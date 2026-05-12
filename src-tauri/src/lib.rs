@@ -10,6 +10,7 @@
 // are scheduled for later milestones (see PRD.md).
 
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, PhysicalPosition, Position,
@@ -18,6 +19,11 @@ use tauri::{
 // Only used in release builds — see the focus-hide block in `run()`.
 #[cfg(not(debug_assertions))]
 use tauri::WindowEvent;
+
+/// Monochrome sprout silhouette embedded at compile time. Designed to read
+/// cleanly at 22pt in the macOS menu bar; used as a template image so macOS
+/// inverts it for the menu bar appearance (light/dark/translucent).
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -40,8 +46,9 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&open_main, &separator, &quit])?;
 
             // ── Tray icon ───────────────────────────────────────────────
+            let tray_icon = Image::from_bytes(TRAY_ICON_PNG)?;
             let _tray = TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
                 .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(false)

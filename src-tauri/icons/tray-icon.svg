@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  gitBuddy tray icon — a monochrome sprout silhouette designed to read
+  cleanly at 22pt in the macOS menu bar. Used as an NSImage template
+  (icon_as_template = true), so macOS handles the colour inversion for
+  light vs dark menu bars.
+
+  Why no eyes/smile: at 22px those details turn into single-pixel noise.
+  The silhouette alone — round body with two leaves — keeps the character
+  recognisable from the popover view.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" width="22" height="22">
+  <!-- body -->
+  <circle cx="11" cy="14" r="6.4" fill="#000"/>
+  <!-- left leaf -->
+  <path d="M11 7.6 Q 8.4 3 4.4 2.2 Q 4.9 6 8.5 7.9 Z" fill="#000"/>
+  <!-- right leaf -->
+  <path d="M11 7.6 Q 13.6 3.8 17.6 4 Q 16 7.5 13 8.5 Z" fill="#000"/>
+</svg>
