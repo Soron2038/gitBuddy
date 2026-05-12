@@ -1,0 +1,113 @@
+/* ─────────────────────────────────────────────────────────────────
+   gitBuddy — Buddy (Warm) design tokens
+   Reference: design-mockups/03-buddy-warm.html
+   ───────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Surfaces */
+  --cream:        #FAF4EA;
+  --cream-2:      #F2E8D5;
+  --cream-3:      #E9DDC4;
+  --paper:        #FFFDF8;
+  --paper-2:      #FDF7EA;
+
+  /* Ink */
+  --ink:          #2E211B;
+  --ink-2:        #5C4A3F;
+  --ink-3:        #8A786A;
+  --ink-4:        #B6A593;
+
+  /* Lines */
+  --line:         rgba(46, 33, 27, 0.08);
+  --line-2:       rgba(46, 33, 27, 0.14);
+
+  /* Accents */
+  --terracotta:        #C66243;
+  --terracotta-soft:   #F4D9CC;
+  --sage:              #80987B;
+  --sage-soft:         #D6E0CF;
+  --butter:            #E8B94B;
+  --butter-soft:       #F6E2A8;
+  --plum:              #A8456A;
+  --plum-soft:         #F1D2DE;
+
+  /* Shadows */
+  --shadow-1: 0 1px 2px rgba(78, 50, 30, 0.05);
+  --shadow-2: 0 8px 20px -10px rgba(78, 50, 30, 0.15);
+  --shadow-3: 0 30px 60px -20px rgba(78, 50, 30, 0.28),
+              0 8px 16px -8px rgba(78, 50, 30, 0.15);
+
+  /* Radii */
+  --r-sm:  8px;
+  --r-md:  12px;
+  --r-lg:  16px;
+  --r-xl:  22px;
+
+  /* Type */
+  --font-display: 'Gambarino', 'Fraunces', Georgia, serif;
+  --font-body:    'Switzer', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Reset --------------------------------------------------------- */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+/* Both html and body are transparent by default — each route paints its own
+   background. This matters on macOS where the popover window has
+   `transparent: true` + `macOSPrivateApi` for rounded corners; an opaque
+   html background would fill the corners and defeat the rounding. */
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+}
+body {
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 0;
+}
+button:focus-visible {
+  outline: 2px solid var(--terracotta);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+a {
+  color: var(--terracotta);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+/* Utility tokens that we'll re-use ------------------------------ */
+.mono { font-family: var(--font-mono); }
+.display { font-family: var(--font-display); letter-spacing: -0.015em; }
+.italic { font-style: italic; }
+
+/* Scrollbar (macOS-style, restrained) --------------------------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(46, 33, 27, 0.18);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(46, 33, 27, 0.30);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}

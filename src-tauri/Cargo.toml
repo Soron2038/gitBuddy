@@ -1,0 +1,23 @@
+[package]
+name = "gitbuddy"
+version = "0.1.0"
+description = "Menu-bar companion for GitHub, GitLab and Codeberg repositories"
+authors = ["Björn Witt"]
+edition = "2021"
+
+[lib]
+name = "gitbuddy_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `macos-private-api` enables real window transparency on macOS (needed for the
+# popover's rounded corners). It uses private Apple symbols, so apps built with
+# this feature cannot be submitted to the Mac App Store — see PRD §2 non-goals.
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+

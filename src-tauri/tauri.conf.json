@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "gitBuddy",
+  "version": "0.1.0",
+  "identifier": "dev.soron2038.gitbuddy",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "gitBuddy",
+        "url": "/",
+        "width": 1200,
+        "height": 780,
+        "minWidth": 960,
+        "minHeight": 600,
+        "visible": false,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "backgroundColor": "#FFFDF8"
+      },
+      {
+        "label": "popover",
+        "title": "gitBuddy",
+        "url": "/popover",
+        "width": 440,
+        "height": 620,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "acceptFirstMouse": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Menu-bar overview of your Git repositories.",
+    "longDescription": "gitBuddy aggregates repositories, issues, pull/merge requests, releases, and CI status across GitHub, GitLab, and Codeberg into a single calm menu-bar companion.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}
