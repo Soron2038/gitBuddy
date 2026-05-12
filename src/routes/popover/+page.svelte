@@ -1,115 +1,279 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { openUrl } from '@tauri-apps/plugin-opener';
   import Buddy from '$lib/Buddy.svelte';
-  import { waiting, stats, type Provider } from '$lib/data/stub';
+  import {
+    ghStatus,
+    ghSetToken,
+    ghListWaiting,
+    providerLabel,
+    type Viewer,
+    type WaitingItem,
+  } from '$lib/data/api';
 
-  let activeTab: 'waiting' | 'repos' | 'releases' = $state('waiting');
+  type Tab = 'waiting' | 'repos' | 'releases';
 
-  const providerLabel: Record<Provider, string> = {
-    github: 'GitHub',
-    gitlab: 'GitLab',
-    codeberg: 'Codeberg',
-    'mpsd-gitlab': 'MPSD',
-  };
+  let viewer: Viewer | null = $state(null);
+  let items: WaitingItem[] = $state([]);
+  let activeTab: Tab = $state('waiting');
+  let loading = $state(true);
+  let refreshing = $state(false);
+  let error: string | null = $state(null);
+
+  // Setup-form state (visible only when there's no connected account).
+  let tokenInput = $state('');
+  let connecting = $state(false);
+
+  let lastSyncedAt: Date | null = $state(null);
+
+  onMount(async () => {
+    try {
+      viewer = await ghStatus();
+      if (viewer) {
+        items = await ghListWaiting();
+        lastSyncedAt = new Date();
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      loading = false;
+    }
+  });
+
+  async function connect() {
+    if (!tokenInput.trim()) return;
+    connecting = true;
+    error = null;
+    try {
+      viewer = await ghSetToken(tokenInput.trim());
+      tokenInput = '';
+      items = await ghListWaiting();
+      lastSyncedAt = new Date();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      connecting = false;
+    }
+  }
+
+  async function refresh() {
+    if (!viewer) return;
+    refreshing = true;
+    error = null;
+    try {
+      items = await ghListWaiting();
+      lastSyncedAt = new Date();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  async function openExternal(url: string) {
+    try {
+      await openUrl(url);
+    } catch {
+      // Opener plugin failure is non-fatal — silently swallow rather than
+      // poison the popover with an error toast over a missing browser handler.
+    }
+  }
+
+  function humaniseSync(d: Date | null, nowMs: number): string {
+    if (!d) return '—';
+    const s = Math.max(0, Math.floor((nowMs - d.getTime()) / 1000));
+    if (s < 5) return 'just now';
+    if (s < 60) return `${s} sec ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m} min ago`;
+    const h = Math.floor(m / 60);
+    return `${h}h ago`;
+  }
+
+  // Tick once per second so the "Synced 24 sec ago" footer text counts up
+  // even when no fetch is happening.
+  let now = $state(Date.now());
+  $effect(() => {
+    const handle = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(handle);
+  });
+  let syncText = $derived(humaniseSync(lastSyncedAt, now));
 </script>
 
 <div class="stage">
-<div class="pop">
-  <header class="pop-head">
-    <Buddy size={28} />
-    <span class="brand">git<em>Buddy</em></span>
-    <span class="spc"></span>
-    <button class="ib" title="Refresh" aria-label="Refresh">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-        <path d="M21 12a9 9 0 1 1-3-6.7" /><path d="M21 4v5h-5" />
-      </svg>
-    </button>
-    <button class="ib" title="Open main window" aria-label="Open main window">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M15 3h6v6" /><path d="M10 14 21 3" />
-        <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
-      </svg>
-    </button>
-    <button class="ib" title="Settings" aria-label="Settings">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
-      </svg>
-    </button>
-  </header>
+  <div class="pop">
+    <header class="pop-head">
+      <Buddy size={28} />
+      <span class="brand">git<em>Buddy</em></span>
+      <span class="spc"></span>
+      <button
+        class="ib"
+        class:spin={refreshing}
+        title="Refresh"
+        aria-label="Refresh"
+        onclick={refresh}
+        disabled={!viewer || refreshing}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M21 12a9 9 0 1 1-3-6.7" /><path d="M21 4v5h-5" />
+        </svg>
+      </button>
+      <button class="ib" title="Open main window" aria-label="Open main window">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M15 3h6v6" /><path d="M10 14 21 3" />
+          <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+        </svg>
+      </button>
+      <button class="ib" title="Settings" aria-label="Settings">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
+        </svg>
+      </button>
+    </header>
 
-  <p class="greeting">
-    Hey <em>Björn</em> — {stats.waiting} things and {stats.newReleases} fresh releases.
-  </p>
+    {#if loading}
+      <div class="state-pad">
+        <p class="loading-text">Connecting…</p>
+      </div>
+    {:else if !viewer}
+      <!-- Onboarding: no account configured yet. -->
+      <div class="setup">
+        <h2>Hi — let's <em>meet</em>.</h2>
+        <p class="lede">
+          Paste a GitHub personal access token to start. gitBuddy stores it in
+          your macOS Keychain and never sends it anywhere else.
+        </p>
 
-  <div class="tabs" role="tablist">
-    <button
-      class="tab"
-      class:on={activeTab === 'waiting'}
-      role="tab"
-      aria-selected={activeTab === 'waiting'}
-      onclick={() => (activeTab = 'waiting')}
-    >
-      Waiting <span class="n">{stats.waiting}</span>
-    </button>
-    <button
-      class="tab"
-      class:on={activeTab === 'repos'}
-      role="tab"
-      aria-selected={activeTab === 'repos'}
-      onclick={() => (activeTab = 'repos')}
-    >
-      Repos <span class="n">147</span>
-    </button>
-    <button
-      class="tab"
-      class:on={activeTab === 'releases'}
-      role="tab"
-      aria-selected={activeTab === 'releases'}
-      onclick={() => (activeTab = 'releases')}
-    >
-      Releases <span class="n">{stats.newReleases}</span>
-    </button>
-  </div>
-
-  <div class="list" role="tabpanel">
-    {#if activeTab === 'waiting'}
-      {#each waiting as item (item.id)}
-        <button class="row" type="button">
-          <span class="chip {item.kind.toLowerCase()}">{item.kind}</span>
-          <span class="body">
-            <span class="title">{item.title}</span>
-            <span class="meta">
-              {item.repo} <span class="dot">·</span>
-              <span class="reason">{item.reason}</span>
-              <span class="prov-tag">{providerLabel[item.provider]}</span>
-            </span>
-          </span>
-          <span class="age">{item.ageHuman}</span>
+        <button
+          class="token-link"
+          onclick={() =>
+            openExternal(
+              'https://github.com/settings/tokens/new?description=gitBuddy&scopes=repo,read:org',
+            )}
+        >
+          Create a token on GitHub →
         </button>
-      {/each}
+
+        <label class="token-input">
+          <span class="lbl">Personal access token</span>
+          <input
+            type="password"
+            placeholder="ghp_… or github_pat_…"
+            bind:value={tokenInput}
+            onkeydown={(e) => e.key === 'Enter' && connect()}
+            disabled={connecting}
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+
+        {#if error}
+          <p class="err">{error}</p>
+        {/if}
+
+        <button
+          class="primary"
+          onclick={connect}
+          disabled={connecting || !tokenInput.trim()}
+        >
+          {connecting ? 'Verifying…' : 'Connect'}
+        </button>
+      </div>
     {:else}
-      <div class="empty">
-        <Buddy size={48} />
-        <p>Nothing here yet.</p>
-        <small>Coming in M2 — provider integrations.</small>
+      <p class="greeting">
+        Hey <em>{viewer.name ?? viewer.login}</em> —
+        {#if items.length === 0}
+          you're all caught up.
+        {:else}
+          {items.length} {items.length === 1 ? 'thing' : 'things'} need a look.
+        {/if}
+      </p>
+
+      <div class="tabs" role="tablist">
+        <button
+          class="tab"
+          class:on={activeTab === 'waiting'}
+          role="tab"
+          aria-selected={activeTab === 'waiting'}
+          onclick={() => (activeTab = 'waiting')}
+        >
+          Waiting <span class="n">{items.length}</span>
+        </button>
+        <button
+          class="tab"
+          class:on={activeTab === 'repos'}
+          role="tab"
+          aria-selected={activeTab === 'repos'}
+          onclick={() => (activeTab = 'repos')}
+        >
+          Repos
+        </button>
+        <button
+          class="tab"
+          class:on={activeTab === 'releases'}
+          role="tab"
+          aria-selected={activeTab === 'releases'}
+          onclick={() => (activeTab = 'releases')}
+        >
+          Releases
+        </button>
+      </div>
+
+      <div class="list" role="tabpanel">
+        {#if error}
+          <div class="err-banner">{error}</div>
+        {/if}
+
+        {#if activeTab === 'waiting'}
+          {#if items.length === 0}
+            <div class="empty">
+              <Buddy size={48} />
+              <p>Nothing's waiting on you.</p>
+              <small>Last checked {syncText}.</small>
+            </div>
+          {:else}
+            {#each items as item (item.id)}
+              <button class="row" type="button" onclick={() => openExternal(item.url)}>
+                <span class="chip {item.kind.toLowerCase()}">{item.kind}</span>
+                <span class="body">
+                  <span class="title">{item.title}</span>
+                  <span class="meta">
+                    {item.repo} <span class="dot">·</span>
+                    <span class="reason">{item.reason}</span>
+                    <span class="prov-tag">{providerLabel[item.provider]}</span>
+                  </span>
+                </span>
+                <span class="age">{item.age_human}</span>
+              </button>
+            {/each}
+          {/if}
+        {:else}
+          <div class="empty">
+            <Buddy size={48} />
+            <p>Coming in a later milestone.</p>
+            <small>{activeTab === 'repos' ? 'Repo list lands with M3.' : 'Release feed lands with M4.'}</small>
+          </div>
+        {/if}
       </div>
     {/if}
-  </div>
 
-  <footer class="pop-foot">
-    <span class="pulse" aria-hidden="true"></span>
-    Synced 24 sec ago · next in 4m 36s
-    <span class="spc"></span>
-    <span class="kbd">⌘⇧G</span>
-  </footer>
-</div>
+    <footer class="pop-foot">
+      <span class="pulse" aria-hidden="true" class:idle={!viewer}></span>
+      {#if viewer}
+        Synced {syncText}
+      {:else}
+        Not connected
+      {/if}
+      <span class="spc"></span>
+      <span class="kbd">⌘⇧G</span>
+    </footer>
+  </div>
 </div>
 
 <style>
-  /* The stage gives the .pop panel a fully-transparent margin so its drop
-     shadow has room to fall *outside* the panel's rounded shape. Without
-     this margin the shadow extends past the rounding into the corner gaps
-     of the Tauri window and makes the corners look square. */
+  /* Stage gives a transparent margin so the panel's shadow can fade naturally
+     instead of being clipped to the window edge. */
   .stage {
     width: 100vw;
     height: 100vh;
@@ -117,13 +281,6 @@
     box-sizing: border-box;
     background: transparent;
   }
-  /* Panel itself — fills the stage area (window minus 20px transparent margin).
-     Shadow is tuned to stay well within that 20px margin so it can fade
-     organically instead of being clipped by the window's bounding rectangle.
-     Layering:
-       1. Hairline 0.5px edge for crisp panel definition.
-       2. Soft asymmetric drop — more below than above, the way a real shadow
-          under a floating object behaves. */
   .pop {
     width: 100%;
     height: 100%;
@@ -152,10 +309,7 @@
     letter-spacing: -0.02em;
     color: var(--ink);
   }
-  .brand em {
-    font-style: italic;
-    color: var(--terracotta);
-  }
+  .brand em { font-style: italic; color: var(--terracotta); }
   .spc { flex: 1; }
   .ib {
     width: 28px; height: 28px;
@@ -163,9 +317,114 @@
     display: grid; place-items: center;
     color: var(--ink-2);
   }
-  .ib:hover { background: var(--cream-2); }
+  .ib:hover:not(:disabled) { background: var(--cream-2); }
+  .ib:disabled { opacity: 0.4; cursor: default; }
+  .ib.spin svg {
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
 
-  /* Greeting ------------------------------------------------------- */
+  /* Loading state -------------------------------------------------- */
+  .state-pad {
+    flex: 1;
+    display: grid;
+    place-items: center;
+  }
+  .loading-text {
+    margin: 0;
+    color: var(--ink-3);
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: 16px;
+  }
+
+  /* Setup / onboarding -------------------------------------------- */
+  .setup {
+    padding: 22px 22px 24px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    overflow-y: auto;
+  }
+  .setup h2 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 28px;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .setup h2 em { font-style: italic; color: var(--terracotta); }
+  .setup .lede {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+  .token-link {
+    align-self: flex-start;
+    color: var(--terracotta);
+    font-size: 13px;
+    text-decoration: none;
+  }
+  .token-link:hover { text-decoration: underline; }
+  .token-input { display: flex; flex-direction: column; gap: 6px; }
+  .token-input .lbl {
+    font-size: 11.5px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .token-input input {
+    height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-sm);
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: var(--paper-2);
+    color: var(--ink);
+    outline: none;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .token-input input:focus {
+    border-color: var(--terracotta);
+    background: var(--paper);
+  }
+  .primary {
+    height: 38px;
+    background: var(--terracotta);
+    color: var(--paper);
+    border-radius: var(--r-sm);
+    font-weight: 600;
+    font-size: 13.5px;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .primary:hover:not(:disabled) { background: #B05738; }
+  .primary:disabled { opacity: 0.5; cursor: default; }
+  .err {
+    margin: 0;
+    color: var(--plum);
+    font-size: 12.5px;
+    background: var(--plum-soft);
+    padding: 8px 10px;
+    border-radius: var(--r-sm);
+  }
+  .err-banner {
+    margin: 8px 10px 0;
+    color: var(--plum);
+    font-size: 12px;
+    background: var(--plum-soft);
+    padding: 7px 10px;
+    border-radius: var(--r-sm);
+  }
+
+  /* Greeting & tabs ---------------------------------------------- */
   .greeting {
     padding: 14px 18px 0;
     font-size: 13px;
@@ -179,8 +438,6 @@
     font-weight: 400;
     font-size: 14px;
   }
-
-  /* Tabs ----------------------------------------------------------- */
   .tabs {
     margin: 12px 18px 0;
     display: flex;
@@ -211,7 +468,7 @@
   }
   .tab.on .n { color: var(--terracotta); }
 
-  /* List ----------------------------------------------------------- */
+  /* List ---------------------------------------------------------- */
   .list {
     flex: 1;
     overflow-y: auto;
@@ -232,11 +489,7 @@
     text-align: left;
   }
   .row:hover { background: var(--cream-2); }
-  .body {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-  }
+  .body { display: flex; flex-direction: column; min-width: 0; }
   .title { display: block; }
   .chip {
     width: 26px; height: 26px;
@@ -290,7 +543,6 @@
   }
 
   .empty {
-    list-style: none;
     text-align: center;
     padding: 50px 20px;
     color: var(--ink-3);
@@ -311,7 +563,7 @@
     color: var(--ink-4);
   }
 
-  /* Footer --------------------------------------------------------- */
+  /* Footer -------------------------------------------------------- */
   .pop-foot {
     padding: 11px 16px;
     border-top: 1px solid var(--line);
@@ -330,6 +582,10 @@
     background: var(--sage);
     box-shadow: 0 0 0 0 rgba(128, 152, 123, 0.5);
     animation: pulse 2.4s ease-out infinite;
+  }
+  .pulse.idle {
+    background: var(--ink-4);
+    animation: none;
   }
   @keyframes pulse {
     0%   { box-shadow: 0 0 0 0 rgba(128, 152, 123, 0.5); }
