@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend:
+    name: Frontend (typecheck)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: SvelteKit sync
+        run: npx svelte-kit sync
+
+      - name: Type-check Svelte
+        run: npm run check
+
+  backend:
+    name: Backend (cargo check + clippy)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Cargo check
+        run: cargo check --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  bundle:
+    name: Tauri bundle (macOS, unsigned)
+    runs-on: macos-14
+    needs: [frontend, backend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Produces target/release/bundle/macos/gitBuddy.app and a .dmg under
+      # target/release/bundle/dmg/. Unsigned — signing & notarization will be
+      # added once an Apple Developer ID is configured (see PRD §6.5).
+      - name: Build app bundle
+        run: npm run tauri build -- --bundles app,dmg
+
+      - name: Upload artifact (DMG)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitBuddy-macos-arm64-unsigned
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
