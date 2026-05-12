@@ -1,0 +1,898 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gitBuddy — Terminal Brutalist</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #0A0A0A;
+    --bg-1: #111110;
+    --bg-2: #161614;
+    --bg-3: #1E1E1B;
+    --ink: #ECE6D6;        /* warm phosphor white */
+    --ink-2: #B8B19E;
+    --ink-3: #76705F;
+    --ink-4: #4A4538;
+    --line: rgba(236, 230, 214, 0.10);
+    --line-strong: rgba(236, 230, 214, 0.22);
+    --amber: #FFAB1F;
+    --amber-soft: rgba(255, 171, 31, 0.18);
+    --green: #6FCF5A;
+    --green-soft: rgba(111, 207, 90, 0.16);
+    --red: #FF5B5B;
+    --red-soft: rgba(255, 91, 91, 0.16);
+    --blue: #5BC0BE;
+    --magenta: #C97FD3;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  body{
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    color: var(--ink);
+    background: var(--bg);
+    min-height: 100vh;
+    padding: 44px 40px 80px;
+    font-size: 12.5px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+
+    /* visible grid texture */
+    background-image:
+      linear-gradient(to right, rgba(236,230,214,0.025) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(236,230,214,0.025) 1px, transparent 1px),
+      radial-gradient(800px 400px at 90% 0%, rgba(255,171,31,0.05) 0%, transparent 60%);
+    background-size: 28px 28px, 28px 28px, auto;
+  }
+  .scanlines::after{
+    content:""; position: fixed; inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg, rgba(255,255,255,0.012) 0 1px, transparent 1px 3px);
+    z-index: 999;
+  }
+  .stage{
+    max-width: 1480px; margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 48px;
+    align-items: start;
+  }
+  .stage > .main{min-width:0}
+
+  /* page header */
+  .page-head{
+    display: flex; align-items: baseline; gap: 14px;
+    margin-bottom: 28px;
+    border-bottom: 1px dashed var(--line-strong);
+    padding-bottom: 14px;
+  }
+  .page-head .id{
+    color: var(--amber);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+  }
+  .page-head .id::before{content:"[ "}
+  .page-head .id::after{content:" ]"}
+  .page-head .name{
+    font-weight: 700;
+    font-size: 22px;
+    letter-spacing: -0.01em;
+  }
+  .page-head .sub{
+    color: var(--ink-3);
+    margin-left: auto;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+  }
+
+  /* ============================ WINDOW ============================ */
+  .window{
+    background: var(--bg-1);
+    border: 1px solid var(--line-strong);
+    box-shadow: 0 30px 60px -10px rgba(0,0,0,0.6);
+    position: relative;
+  }
+  .window::before{
+    content:"";
+    position:absolute; inset:-1px;
+    pointer-events: none;
+    border: 1px solid rgba(255,171,31,0.05);
+  }
+  .titlebar{
+    height: 32px;
+    border-bottom: 1px solid var(--line-strong);
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    padding: 0 12px;
+    background: linear-gradient(180deg, #181814 0%, #121210 100%);
+    font-size: 11px;
+    color: var(--ink-3);
+  }
+  .titlebar .l{display:flex; gap: 14px; align-items:center}
+  .titlebar .r{display:flex; gap: 14px; align-items:center; justify-content:flex-end}
+  .titlebar .pill{
+    border:1px solid var(--line-strong);
+    padding: 1px 6px;
+    color: var(--amber);
+    font-weight: 500;
+    letter-spacing: 0.04em;
+  }
+  .titlebar .title{
+    text-align: center;
+    color: var(--ink);
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    font-size: 11px;
+  }
+  .titlebar .title b{color: var(--amber); font-weight: 600}
+
+  .top-row{
+    display: grid;
+    grid-template-columns: 220px 1fr auto;
+    border-bottom: 1px solid var(--line-strong);
+  }
+  .cmd-bar{
+    padding: 10px 14px;
+    border-right: 1px solid var(--line-strong);
+    color: var(--ink-3);
+    background: var(--bg-2);
+  }
+  .cmd-bar b{color: var(--amber); font-weight: 500}
+  .input{
+    padding: 10px 14px;
+    color: var(--ink);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .input .prompt{color: var(--amber); font-weight: 600}
+  .input .cursor{
+    display: inline-block;
+    width: 7px; height: 13px;
+    background: var(--ink);
+    margin-left: 2px;
+    animation: blink 1.05s steps(2,start) infinite;
+  }
+  @keyframes blink{ to{ visibility: hidden } }
+  .input .placeholder{color: var(--ink-3)}
+  .input .kbd{
+    margin-left: auto;
+    color: var(--ink-3);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+  }
+  .input .kbd b{color: var(--ink-2)}
+  .top-stats{
+    border-left: 1px solid var(--line-strong);
+    padding: 10px 16px;
+    display: flex; gap: 16px;
+    font-size: 11px;
+    color: var(--ink-3);
+  }
+  .top-stats b{color: var(--ink); font-weight: 600}
+  .top-stats .ok b{color: var(--green)}
+  .top-stats .fail b{color: var(--red)}
+  .top-stats .run b{color: var(--amber)}
+
+  .body{
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    min-height: 610px;
+  }
+  /* Sidebar */
+  aside.side{
+    border-right: 1px solid var(--line-strong);
+    padding: 16px 0;
+    font-size: 12px;
+    background: var(--bg-2);
+  }
+  .sgroup + .sgroup{border-top: 1px solid var(--line)}
+  .sgroup{padding: 8px 0 16px}
+  .stitle{
+    color: var(--amber);
+    padding: 8px 16px 6px;
+    font-size: 10.5px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  .stitle::before{content:"// "}
+  .srow{
+    padding: 5px 16px;
+    display: flex; align-items: center; gap: 10px;
+    color: var(--ink-2);
+    cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .srow:hover{background: var(--bg-3); color: var(--ink)}
+  .srow.on{
+    background: var(--bg-3);
+    color: var(--amber);
+    border-left-color: var(--amber);
+  }
+  .srow .c{
+    margin-left: auto;
+    color: var(--ink-3);
+    font-size: 11px;
+  }
+  .srow.on .c{color: var(--amber)}
+  .srow .marker{
+    width: 10px;
+    display: inline-block;
+    text-align: center;
+    color: var(--ink-3);
+  }
+  .srow.on .marker{color: var(--amber)}
+
+  /* Main content area */
+  main.body-main{padding: 0; overflow: hidden}
+
+  .tabs{
+    display: flex;
+    border-bottom: 1px solid var(--line-strong);
+    font-size: 11.5px;
+    background: var(--bg-2);
+  }
+  .tabs span{
+    padding: 11px 18px;
+    color: var(--ink-3);
+    border-right: 1px solid var(--line);
+    cursor: pointer;
+    letter-spacing: 0.04em;
+  }
+  .tabs span.on{
+    color: var(--ink);
+    background: var(--bg-1);
+    box-shadow: inset 0 -1px 0 var(--amber);
+    font-weight: 600;
+  }
+  .tabs span .ct{
+    color: var(--amber);
+    margin-left: 6px;
+    font-weight: 600;
+  }
+  .tabs .spacer{flex: 1; border-right: 1px solid var(--line)}
+  .tabs .toolbtn{
+    padding: 11px 14px;
+    color: var(--ink-3);
+    cursor: pointer;
+    border-right: 1px solid var(--line);
+  }
+  .tabs .toolbtn:hover{color: var(--ink)}
+
+  /* Repo table */
+  .repo-head{
+    display: grid;
+    grid-template-columns: 22px 1fr 90px 90px 84px 24px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--line-strong);
+    background: var(--bg-2);
+    font-size: 10px;
+    color: var(--ink-3);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    gap: 12px;
+  }
+  .repo-row{
+    display: grid;
+    grid-template-columns: 22px 1fr 90px 90px 84px 24px;
+    padding: 9px 16px;
+    border-bottom: 1px solid var(--line);
+    gap: 12px;
+    align-items: center;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .repo-row:hover{background: rgba(255,171,31,0.04)}
+  .repo-row.selected{
+    background: rgba(255,171,31,0.07);
+    box-shadow: inset 2px 0 0 var(--amber);
+  }
+  .px{
+    color: var(--ink-3);
+    font-size: 10.5px;
+  }
+  .pf{
+    width: 12px; height: 12px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 10px;
+  }
+  .pf.gh{color: var(--ink)}
+  .pf.gl{color: #FC6D26}
+  .pf.cb{color: var(--blue)}
+  .name b{color: var(--ink); font-weight: 600}
+  .name .o{color: var(--ink-2); font-weight: 400}
+  .name .s{color: var(--ink-4); margin: 0 1px}
+  .name .meta{
+    display: block;
+    font-size: 10.5px;
+    color: var(--ink-3);
+    margin-top: 2px;
+    letter-spacing: 0.02em;
+  }
+  .name .meta .warn{color: var(--amber)}
+  .name .meta .alert{color: var(--red)}
+  .name .meta .ok{color: var(--green)}
+  .col-ver{
+    text-align: right;
+    font-weight: 500;
+    color: var(--ink);
+  }
+  .col-ver .new{
+    color: var(--amber);
+    font-size: 9.5px;
+    margin-left: 4px;
+    border: 1px solid var(--amber);
+    padding: 0 3px;
+  }
+  .col-counts{
+    text-align: right;
+    color: var(--ink-2);
+    font-size: 11.5px;
+  }
+  .col-counts .a{color: var(--amber); font-weight: 600}
+  .col-clone{
+    text-align: center;
+    color: var(--ink-3);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+  }
+  .col-clone.local{color: var(--green)}
+  .col-ci{text-align: center}
+  .ci-dot{
+    display: inline-block;
+    width: 10px; height: 10px;
+    border: 1px solid currentColor;
+  }
+  .ci-dot.ok{color: var(--green); background: var(--green-soft)}
+  .ci-dot.fail{color: var(--red); background: var(--red-soft)}
+  .ci-dot.run{
+    color: var(--amber); background: var(--amber-soft);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.45}}
+
+  .footbar{
+    display: flex; align-items: center; gap: 16px;
+    border-top: 1px solid var(--line-strong);
+    padding: 7px 16px;
+    background: var(--bg-2);
+    font-size: 10.5px;
+    color: var(--ink-3);
+    letter-spacing: 0.04em;
+  }
+  .footbar b{color: var(--ink-2)}
+  .footbar .spc{flex:1}
+  .footbar .kbd{
+    color: var(--ink-2);
+  }
+  .footbar .kbd b{color: var(--amber); font-weight: 600}
+
+  /* ============================ POPOVER ============================ */
+  .pop-col{
+    position: sticky; top: 44px;
+    padding-top: 22px;
+  }
+  .menubar{
+    width: 100%;
+    height: 26px;
+    background: var(--bg-2);
+    border: 1px solid var(--line-strong);
+    display: flex; align-items: center;
+    padding: 0 12px; gap: 14px;
+    font-size: 11px;
+    color: var(--ink-3);
+    margin-bottom: 6px;
+  }
+  .menubar .spc{flex:1}
+  .menubar .mb-app{color: var(--ink); font-weight: 600; letter-spacing: 0.04em}
+  .menubar .mb-icon{
+    color: var(--amber);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    border: 1px solid var(--amber);
+    padding: 1px 6px;
+  }
+  .menubar .mb-icon b{color: var(--ink); font-weight: 500; margin-left: 4px}
+
+  .pop{
+    width: 380px;
+    height: 560px;
+    background: var(--bg-1);
+    border: 1px solid var(--line-strong);
+    box-shadow: 0 30px 80px -10px rgba(0,0,0,0.8);
+    display: flex; flex-direction: column;
+    position: relative;
+  }
+  .pop::before{
+    content:""; position:absolute; top:-7px; right: 28px;
+    width: 12px; height: 7px;
+    background: var(--bg-1);
+    border-left: 1px solid var(--line-strong);
+    border-top: 1px solid var(--line-strong);
+    transform: rotate(45deg);
+    transform-origin: top left;
+  }
+  .pop-head{
+    border-bottom: 1px solid var(--line-strong);
+    padding: 11px 14px;
+    display: flex; align-items: center; gap: 10px;
+    background: var(--bg-2);
+  }
+  .pop-head .br{
+    color: var(--amber);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+  .pop-head .br::before{content:"▍ "}
+  .pop-head .spc{flex:1}
+  .pop-head .ib{
+    color: var(--ink-3);
+    cursor: pointer;
+    padding: 2px 6px;
+    font-size: 11px;
+    border: 1px solid transparent;
+  }
+  .pop-head .ib:hover{
+    color: var(--ink);
+    border-color: var(--line-strong);
+  }
+
+  .pop-tabs{
+    display: flex;
+    border-bottom: 1px solid var(--line-strong);
+    font-size: 11px;
+  }
+  .pop-tabs span{
+    padding: 9px 14px;
+    color: var(--ink-3);
+    border-right: 1px solid var(--line);
+    cursor: pointer;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .pop-tabs span.on{
+    color: var(--amber);
+    background: var(--bg);
+    box-shadow: inset 0 -1px 0 var(--amber);
+    font-weight: 600;
+  }
+  .pop-tabs span .n{
+    margin-left: 5px;
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .pop-tabs span.on .n{color: var(--amber)}
+  .pop-tabs .end{flex:1; border-right: none}
+
+  .pop-list{
+    flex: 1; overflow: hidden;
+    padding: 4px 0;
+  }
+  .pop-row{
+    display: grid;
+    grid-template-columns: 26px 1fr auto;
+    padding: 9px 14px;
+    gap: 10px;
+    align-items: start;
+    border-bottom: 1px dashed var(--line);
+    cursor: pointer;
+  }
+  .pop-row:hover{background: rgba(255,171,31,0.05)}
+  .pr-tag{
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    border: 1px solid currentColor;
+    padding: 1px 0;
+    text-align: center;
+    margin-top: 1px;
+  }
+  .pr-tag.pr{color: var(--green)}
+  .pr-tag.is{color: var(--amber)}
+  .pr-tag.mr{color: #FC6D26}
+  .pr-title{
+    color: var(--ink);
+    font-weight: 500;
+    font-size: 12.5px;
+    line-height: 1.35;
+  }
+  .pr-meta{
+    margin-top: 3px;
+    color: var(--ink-3);
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    display: flex; gap: 6px; align-items: center;
+  }
+  .pr-meta .reason{color: var(--amber); text-transform: uppercase; letter-spacing: 0.1em}
+  .pr-time{
+    color: var(--ink-2);
+    font-size: 11px;
+    font-weight: 500;
+    text-align: right;
+    min-width: 28px;
+  }
+
+  .pop-foot{
+    border-top: 1px solid var(--line-strong);
+    padding: 8px 14px;
+    background: var(--bg-2);
+    display: flex; align-items: center;
+    font-size: 10.5px;
+    color: var(--ink-3);
+    letter-spacing: 0.04em;
+  }
+  .pop-foot b{color: var(--ink-2)}
+  .pop-foot .spc{flex:1}
+  .pop-foot .pulse{
+    display: inline-block;
+    width: 8px; height: 8px;
+    background: var(--green);
+    margin-right: 6px;
+    animation: blink2 2.4s ease-in-out infinite;
+  }
+  @keyframes blink2{ 0%,40%,100%{opacity:1} 50%,90%{opacity:0.3} }
+  .pop-foot .kbd b{color: var(--amber)}
+
+  /* nav back */
+  .nav-back{
+    position: fixed; top: 18px; left: 22px;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    color: var(--ink-3);
+    text-decoration: none;
+    padding: 5px 10px;
+    border: 1px solid var(--line-strong);
+    background: var(--bg);
+    text-transform: uppercase;
+  }
+  .nav-back:hover{color: var(--amber); border-color: var(--amber)}
+
+  @media (max-width: 1100px){
+    .stage{grid-template-columns: 1fr; gap: 36px}
+    .pop-col{position: static}
+  }
+</style>
+</head>
+<body class="scanlines">
+
+<a class="nav-back" href="index.html">[ ← INDEX ]</a>
+
+<div class="stage">
+
+  <div class="main">
+    <div class="page-head">
+      <span class="id">02</span>
+      <span class="name">TERMINAL BRUTALIST</span>
+      <span class="sub">JETBRAINS MONO · PHOSPHOR AMBER · NO RADIUS</span>
+    </div>
+
+    <!-- ============== MAIN WINDOW ============== -->
+    <div class="window">
+      <div class="titlebar">
+        <div class="l">
+          <span>●●●</span>
+          <span>~/Library/Application Support/gitbuddy</span>
+        </div>
+        <div class="title">git<b>BUDDY</b></div>
+        <div class="r">
+          <span class="pill">SYNCED</span>
+          <span>24s</span>
+          <span>v0.4.1</span>
+        </div>
+      </div>
+
+      <div class="top-row">
+        <div class="cmd-bar">
+          <b>$</b> gitbuddy --watch
+        </div>
+        <div class="input">
+          <span class="prompt">›</span>
+          <span class="placeholder">filter: repo, owner, label, status…</span>
+          <span class="cursor"></span>
+          <span class="kbd"><b>⌘ K</b> · <b>?</b> help</span>
+        </div>
+        <div class="top-stats">
+          <span class="ok">CI <b>134</b></span>
+          <span class="fail">FAIL <b>3</b></span>
+          <span class="run">RUN <b>4</b></span>
+          <span>WAIT <b>12</b></span>
+        </div>
+      </div>
+
+      <div class="body">
+        <!-- SIDE -->
+        <aside class="side">
+          <div class="sgroup">
+            <div class="stitle">scope</div>
+            <div class="srow on"><span class="marker">▸</span> waiting <span class="c">12</span></div>
+            <div class="srow"><span class="marker">·</span> all repos <span class="c">147</span></div>
+            <div class="srow"><span class="marker">·</span> releases <span class="c">8</span></div>
+            <div class="srow"><span class="marker">·</span> local <span class="c">31</span></div>
+            <div class="srow"><span class="marker">·</span> orphans <span class="c">5</span></div>
+          </div>
+          <div class="sgroup">
+            <div class="stitle">providers</div>
+            <div class="srow"><span class="marker" style="color:var(--ink)">●</span> github <span class="c">98</span></div>
+            <div class="srow"><span class="marker" style="color:#FC6D26">●</span> gitlab <span class="c">35</span></div>
+            <div class="srow"><span class="marker" style="color:var(--blue)">●</span> codeberg <span class="c">9</span></div>
+            <div class="srow"><span class="marker" style="color:var(--magenta)">●</span> mpsd.gitlab <span class="c">24</span></div>
+          </div>
+          <div class="sgroup">
+            <div class="stitle">reason</div>
+            <div class="srow"><span class="marker">→</span> assigned <span class="c">3</span></div>
+            <div class="srow"><span class="marker">→</span> review <span class="c">6</span></div>
+            <div class="srow"><span class="marker">→</span> authored <span class="c">2</span></div>
+            <div class="srow"><span class="marker">→</span> mentioned <span class="c">1</span></div>
+          </div>
+        </aside>
+
+        <!-- MAIN -->
+        <main class="body-main">
+          <div class="tabs">
+            <span class="on">REPOS <span class="ct">147</span></span>
+            <span>WAITING <span class="ct">12</span></span>
+            <span>RELEASES <span class="ct">8</span></span>
+            <div class="spacer"></div>
+            <span class="toolbtn" title="Refresh">↻</span>
+            <span class="toolbtn" title="Sort">⇅</span>
+            <span class="toolbtn" title="Group">▢</span>
+          </div>
+
+          <div class="repo-head">
+            <span></span>
+            <span>name / branch</span>
+            <span style="text-align:right">version</span>
+            <span style="text-align:right">i / pr</span>
+            <span style="text-align:center">clone</span>
+            <span style="text-align:center">ci</span>
+          </div>
+
+          <!-- rows -->
+          <div class="repo-row selected">
+            <span class="pf gh">●</span>
+            <span class="name">
+              <span class="o">anthropics</span><span class="s">/</span><b>claude-code</b>
+              <span class="meta">main · TypeScript · <span class="ok">sync ok</span></span>
+            </span>
+            <span class="col-ver">v1.0.93 <span class="new">NEW</span></span>
+            <span class="col-counts"><span class="a">4</span> · 2</span>
+            <span class="col-clone local">[LOCAL]</span>
+            <span class="col-ci"><span class="ci-dot ok"></span></span>
+          </div>
+
+          <div class="repo-row">
+            <span class="pf gh">●</span>
+            <span class="name">
+              <span class="o">vercel</span><span class="s">/</span><b>next.js</b>
+              <span class="meta">canary · TypeScript</span>
+            </span>
+            <span class="col-ver">v15.0.2</span>
+            <span class="col-counts">17 · 3</span>
+            <span class="col-clone">—</span>
+            <span class="col-ci"><span class="ci-dot ok"></span></span>
+          </div>
+
+          <div class="repo-row">
+            <span class="pf gl">▲</span>
+            <span class="name">
+              <span class="o">gitlab-org</span><span class="s">/</span><b>gitlab</b>
+              <span class="meta">master · Ruby · <span class="alert">ci failing on master</span></span>
+            </span>
+            <span class="col-ver">17.5.0</span>
+            <span class="col-counts">8 · 1</span>
+            <span class="col-clone">—</span>
+            <span class="col-ci"><span class="ci-dot fail"></span></span>
+          </div>
+
+          <div class="repo-row">
+            <span class="pf cb">◆</span>
+            <span class="name">
+              <span class="o">forgejo</span><span class="s">/</span><b>runner</b>
+              <span class="meta">main · Go</span>
+            </span>
+            <span class="col-ver">v6.1.0 <span class="new">NEW</span></span>
+            <span class="col-counts">3 · 0</span>
+            <span class="col-clone local">[LOCAL]</span>
+            <span class="col-ci"><span class="ci-dot ok"></span></span>
+          </div>
+
+          <div class="repo-row">
+            <span class="pf gl">▲</span>
+            <span class="name">
+              <span class="o">mpsd</span><span class="s">/</span><b>api-gateway</b>
+              <span class="meta">develop · Rust · <span class="warn">3 unpushed</span> · <span class="warn">2 ahead</span></span>
+            </span>
+            <span class="col-ver">0.18.2</span>
+            <span class="col-counts"><span class="a">2</span> · 1</span>
+            <span class="col-clone local">[LOCAL]</span>
+            <span class="col-ci"><span class="ci-dot run"></span></span>
+          </div>
+
+          <div class="repo-row">
+            <span class="pf gh">●</span>
+            <span class="name">
+              <span class="o">witt</span><span class="s">/</span><b>dotfiles</b>
+              <span class="meta">main · Shell · <span class="warn">7 uncommitted</span></span>
+            </span>
+            <span class="col-ver">—</span>
+            <span class="col-counts">— · —</span>
+            <span class="col-clone local">[LOCAL]</span>
+            <span class="col-ci"><span class="ci-dot" style="opacity:0.25;color:var(--ink-3)"></span></span>
+          </div>
+
+          <div class="repo-row">
+            <span class="pf cb">◆</span>
+            <span class="name">
+              <span class="o">superseriousbusiness</span><span class="s">/</span><b>gotosocial</b>
+              <span class="meta">main · Go</span>
+            </span>
+            <span class="col-ver">v0.18.0</span>
+            <span class="col-counts">21 · 4</span>
+            <span class="col-clone">—</span>
+            <span class="col-ci"><span class="ci-dot ok"></span></span>
+          </div>
+
+          <div class="repo-row">
+            <span class="pf gh">●</span>
+            <span class="name">
+              <span class="o">witt</span><span class="s">/</span><b>gitBuddy</b>
+              <span class="meta">main · Rust · <span class="ok">just synced</span></span>
+            </span>
+            <span class="col-ver">v0.1.0-α</span>
+            <span class="col-counts"><span class="a">1</span> · 0</span>
+            <span class="col-clone local">[LOCAL]</span>
+            <span class="col-ci"><span class="ci-dot run"></span></span>
+          </div>
+
+          <div class="repo-row">
+            <span class="pf gl">▲</span>
+            <span class="name">
+              <span class="o">mpsd</span><span class="s">/</span><b>simulation-core</b>
+              <span class="meta">main · Fortran · stale ~ 2w</span>
+            </span>
+            <span class="col-ver">3.4.1</span>
+            <span class="col-counts">0 · 0</span>
+            <span class="col-clone local">[LOCAL]</span>
+            <span class="col-ci"><span class="ci-dot ok"></span></span>
+          </div>
+
+          <div class="footbar">
+            <span>POLL <b>5m</b></span>
+            <span>·</span>
+            <span>RATE GH <b>4982/5000</b></span>
+            <span>·</span>
+            <span>RATE GL <b>1.8k/2k</b></span>
+            <span class="spc"></span>
+            <span class="kbd"><b>j/k</b> move · <b>↵</b> open · <b>c</b> clone · <b>g r</b> goto repos</span>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============== POPOVER ============== -->
+  <div class="pop-col">
+    <div class="menubar">
+      <span>Finder</span>
+      <span>File</span>
+      <span>Edit</span>
+      <span>View</span>
+      <span class="spc"></span>
+      <span>14:32</span>
+      <span class="mb-icon">▍gB<b>12</b></span>
+    </div>
+
+    <div class="pop">
+      <div class="pop-head">
+        <span class="br">gitBuddy</span>
+        <span class="spc"></span>
+        <span class="ib" title="Refresh">↻</span>
+        <span class="ib" title="Open window">⇱</span>
+        <span class="ib" title="Settings">⚙</span>
+      </div>
+      <div class="pop-tabs">
+        <span class="on">Waiting <span class="n">12</span></span>
+        <span>Repos <span class="n">147</span></span>
+        <span>Releases <span class="n">8</span></span>
+        <span class="end"></span>
+      </div>
+
+      <div class="pop-list">
+
+        <div class="pop-row">
+          <span class="pr-tag pr">PR</span>
+          <div>
+            <div class="pr-title">Fix: prevent race condition in scheduler</div>
+            <div class="pr-meta">
+              <span class="pf gh" style="font-size:9px">●</span> anthropics/claude-code <span style="opacity:0.4">·</span> <span class="reason">review</span>
+            </div>
+          </div>
+          <span class="pr-time">2h</span>
+        </div>
+
+        <div class="pop-row">
+          <span class="pr-tag is">IS</span>
+          <div>
+            <div class="pr-title">Onboarding flow crashes on Safari 17</div>
+            <div class="pr-meta">
+              <span class="pf gh" style="font-size:9px">●</span> vercel/next.js <span style="opacity:0.4">·</span> <span class="reason">assigned</span>
+            </div>
+          </div>
+          <span class="pr-time">1d</span>
+        </div>
+
+        <div class="pop-row">
+          <span class="pr-tag mr">MR</span>
+          <div>
+            <div class="pr-title">Add support for nested groups</div>
+            <div class="pr-meta">
+              <span class="pf gl" style="font-size:9px">▲</span> gitlab-org/gitlab <span style="opacity:0.4">·</span> <span class="reason">authored</span>
+            </div>
+          </div>
+          <span class="pr-time">3d</span>
+        </div>
+
+        <div class="pop-row">
+          <span class="pr-tag is">IS</span>
+          <div>
+            <div class="pr-title">Memory leak in worker pool</div>
+            <div class="pr-meta">
+              <span class="pf gl" style="font-size:9px;color:var(--magenta)">▲</span> mpsd/api-gateway <span style="opacity:0.4">·</span> <span class="reason">mentioned</span>
+            </div>
+          </div>
+          <span class="pr-time">5h</span>
+        </div>
+
+        <div class="pop-row">
+          <span class="pr-tag pr">PR</span>
+          <div>
+            <div class="pr-title">Refactor token storage to keyring</div>
+            <div class="pr-meta">
+              <span class="pf cb" style="font-size:9px">◆</span> forgejo/runner <span style="opacity:0.4">·</span> <span class="reason">review</span>
+            </div>
+          </div>
+          <span class="pr-time">6h</span>
+        </div>
+
+        <div class="pop-row">
+          <span class="pr-tag is">IS</span>
+          <div>
+            <div class="pr-title">Document new auth scope requirements</div>
+            <div class="pr-meta">
+              <span class="pf gh" style="font-size:9px">●</span> witt/gitBuddy <span style="opacity:0.4">·</span> <span class="reason">assigned</span>
+            </div>
+          </div>
+          <span class="pr-time">2d</span>
+        </div>
+
+        <div class="pop-row">
+          <span class="pr-tag pr">PR</span>
+          <div>
+            <div class="pr-title">Switch CI from Travis to Forgejo Actions</div>
+            <div class="pr-meta">
+              <span class="pf cb" style="font-size:9px">◆</span> codeberg/forgejo <span style="opacity:0.4">·</span> <span class="reason">review</span>
+            </div>
+          </div>
+          <span class="pr-time">8h</span>
+        </div>
+
+      </div>
+
+      <div class="pop-foot">
+        <span class="pulse"></span><span>SYNC <b>24s</b></span>
+        <span style="margin-left:8px">·</span>
+        <span style="margin-left:8px">POLL <b>5m</b></span>
+        <span class="spc"></span>
+        <span class="kbd"><b>⌘⇧G</b> toggle</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

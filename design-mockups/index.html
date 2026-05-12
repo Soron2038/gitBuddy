@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gitBuddy — Design Directions</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://api.fontshare.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300..600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=gambarino@400&f[]=switzer@400,500,600&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box; margin:0; padding:0}
+  :root{
+    --ink: #1A1714;
+    --ink-2: #4B4641;
+    --ink-3: #837C73;
+    --line: rgba(26,23,20,0.10);
+    --paper: #F8F5EE;
+  }
+  body{
+    font-family: 'Instrument Sans', system-ui, sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(900px 500px at 90% 0%, #F0E6D2 0%, transparent 60%),
+      radial-gradient(900px 600px at 10% 100%, #E5D9C2 0%, transparent 55%),
+      #F4ECDC;
+    min-height: 100vh;
+    padding: 60px 40px 80px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap{max-width: 1400px; margin: 0 auto}
+  header{
+    margin-bottom: 56px;
+    max-width: 760px;
+  }
+  .label{
+    font-family:'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-bottom: 18px;
+  }
+  h1{
+    font-family:'Fraunces', serif;
+    font-variation-settings: "opsz" 144, "SOFT" 30;
+    font-weight: 350;
+    font-size: 64px;
+    letter-spacing: -0.025em;
+    line-height: 1;
+    color: var(--ink);
+  }
+  h1 em{
+    font-family:'Gambarino', serif;
+    font-style: italic;
+    color: #C66243;
+    font-weight: 400;
+  }
+  .lede{
+    font-size: 17px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    margin-top: 22px;
+    max-width: 600px;
+  }
+  .lede b{color: var(--ink); font-weight: 500}
+
+  .grid{
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+  }
+  .card{
+    background: var(--paper);
+    border-radius: 18px;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 0.5px var(--line),
+      0 30px 60px -25px rgba(60,40,20,0.20),
+      0 6px 14px -6px rgba(60,40,20,0.10);
+    display: flex; flex-direction: column;
+    text-decoration: none;
+    color: inherit;
+    transition: transform 0.18s ease, box-shadow 0.18s ease;
+  }
+  .card:hover{
+    transform: translateY(-3px);
+    box-shadow:
+      0 0 0 0.5px var(--line),
+      0 40px 80px -25px rgba(60,40,20,0.30),
+      0 8px 20px -6px rgba(60,40,20,0.16);
+  }
+  .frame-wrap{
+    height: 360px;
+    overflow: hidden;
+    position: relative;
+    background: #F4ECDC;
+    border-bottom: 0.5px solid var(--line);
+  }
+  .frame-wrap iframe{
+    border: 0;
+    width: 1500px;
+    height: 1200px;
+    transform: scale(0.30);
+    transform-origin: top left;
+    pointer-events: none;
+  }
+  .frame-wrap::after{
+    content:""; position: absolute; inset: 0;
+    background: linear-gradient(180deg, transparent 70%, rgba(244,236,220,0.6) 100%);
+    pointer-events: none;
+  }
+  .meta{
+    padding: 22px 22px 24px;
+    flex: 1;
+    display: flex; flex-direction: column;
+  }
+  .num{
+    font-family:'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    color: var(--ink-3);
+    margin-bottom: 8px;
+  }
+  .title{
+    font-family:'Fraunces', serif;
+    font-variation-settings: "opsz" 50, "SOFT" 30;
+    font-weight: 400;
+    font-size: 26px;
+    letter-spacing: -0.015em;
+    line-height: 1.05;
+    color: var(--ink);
+  }
+  .desc{
+    margin-top: 12px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  .traits{
+    margin-top: 16px;
+    display: flex; flex-wrap: wrap; gap: 6px;
+  }
+  .traits span{
+    font-family:'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    color: var(--ink-2);
+    background: rgba(26,23,20,0.05);
+    padding: 3px 8px;
+    border-radius: 999px;
+  }
+  .cta{
+    margin-top: 22px;
+    font-size: 13px;
+    color: #C66243;
+    font-weight: 500;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+
+  /* alternate card identities — small font hint */
+  .card.c1{background: #FBF7F1}
+  .card.c2{background: #0A0A0A; color: #ECE6D6}
+  .card.c2 .title{color: #ECE6D6; font-family:'JetBrains Mono', monospace; font-weight: 600; letter-spacing: -0.005em; font-size: 22px; text-transform: uppercase}
+  .card.c2 .desc{color: #B8B19E}
+  .card.c2 .num{color: #FFAB1F}
+  .card.c2 .traits span{background: rgba(236,230,214,0.08); color: #B8B19E}
+  .card.c2 .cta{color: #FFAB1F}
+  .card.c3{background: #FFFDF8}
+  .card.c3 .title{font-family:'Gambarino', serif}
+  .card.c3 .title em{font-style: italic; color: #C66243}
+
+  footer{
+    margin-top: 60px;
+    padding-top: 30px;
+    border-top: 0.5px solid var(--line);
+    color: var(--ink-3);
+    font-size: 13px;
+    max-width: 800px;
+  }
+  footer b{color: var(--ink-2); font-weight: 500}
+  footer code{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    background: rgba(26,23,20,0.05);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  @media (max-width: 1100px){
+    .grid{grid-template-columns: 1fr; gap: 32px}
+    h1{font-size: 44px}
+    .frame-wrap{height: 280px}
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header>
+    <div class="label">design exploration · gitBuddy</div>
+    <h1>Three directions, <em>one</em> decision.</h1>
+    <p class="lede">
+      Three intentional aesthetic stances for gitBuddy — each fully committed to a point of view, not a beige compromise. Click any tile to open the full mockup; both the tray popover and a snippet of the main window are shown side by side. Same placeholder data across all three, so only the design varies.
+    </p>
+  </header>
+
+  <div class="grid">
+
+    <a class="card c1" href="01-refined-native.html">
+      <div class="frame-wrap"><iframe src="01-refined-native.html" loading="lazy"></iframe></div>
+      <div class="meta">
+        <div class="num">01 / Refined Native</div>
+        <div class="title">Quiet, warm, distinctly Apple.</div>
+        <p class="desc">macOS Tahoe energy with translucent glass, soft sage as the accent, and Fraunces giving headings an editorial weight. Calm at a glance, beautiful close-up.</p>
+        <div class="traits">
+          <span>Fraunces · Instrument Sans</span>
+          <span>warm white</span>
+          <span>sage accent</span>
+          <span>blurred glass</span>
+        </div>
+        <span class="cta">View full mockup →</span>
+      </div>
+    </a>
+
+    <a class="card c2" href="02-terminal-brutalist.html">
+      <div class="frame-wrap"><iframe src="02-terminal-brutalist.html" loading="lazy"></iframe></div>
+      <div class="meta">
+        <div class="num">02 / Terminal Brutalist</div>
+        <div class="title">Built for the keyboard.</div>
+        <p class="desc">Monospace-only, deep black, phosphor amber. Dense, tabular, ASCII separators, rate limits visible. For people who live in tmux and resent rounded corners.</p>
+        <div class="traits">
+          <span>JetBrains Mono only</span>
+          <span>amber on black</span>
+          <span>no radius</span>
+          <span>dense grid</span>
+        </div>
+        <span class="cta">View full mockup →</span>
+      </div>
+    </a>
+
+    <a class="card c3" href="03-buddy-warm.html">
+      <div class="frame-wrap"><iframe src="03-buddy-warm.html" loading="lazy"></iframe></div>
+      <div class="meta">
+        <div class="num">03 / Buddy <em>(Warm)</em></div>
+        <div class="title">A buddy with <em>character</em>.</div>
+        <p class="desc">A small sprout mascot, Gambarino's italic flourishes, terracotta and sage on cream. Friendly without being a toy — leans into the name without ever winking.</p>
+        <div class="traits">
+          <span>Gambarino · Switzer</span>
+          <span>cream · terracotta</span>
+          <span>soft rounding</span>
+          <span>greeting copy</span>
+        </div>
+        <span class="cta">View full mockup →</span>
+      </div>
+    </a>
+
+  </div>
+
+  <footer>
+    <p><b>How to view:</b> open <code>design-mockups/index.html</code> in your browser (Cmd+Double-click the file in Finder, or drag it onto Chrome/Safari). Each tile links to a full-size mockup. Resize the window to see the responsive collapse.</p>
+    <p style="margin-top:10px"><b>What to look at:</b> typography choices, color temperature, density, the popover/menu-bar metaphor (top-right of each mockup), and the main-window layout below. Same data — anthropics/claude-code, mpsd/api-gateway, gitlab-org/gitlab, forgejo/runner, etc. — so differences are purely aesthetic.</p>
+    <p style="margin-top:10px"><b>Note on mixing:</b> these are stances, not religions. After you pick, we can borrow elements — e.g. the warm typography from 03 with the data density of 02.</p>
+  </footer>
+
+</div>
+
+</body>
+</html>

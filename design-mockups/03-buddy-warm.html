@@ -1,0 +1,1035 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gitBuddy — Buddy (Warm)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://api.fontshare.com">
+<link href="https://api.fontshare.com/v2/css?f[]=gambarino@400&f[]=switzer@300,400,500,600,700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --cream: #FAF4EA;
+    --cream-2: #F2E8D5;
+    --cream-3: #E9DDC4;
+    --paper: #FFFDF8;
+    --paper-2: #FDF7EA;
+    --ink: #2E211B;
+    --ink-2: #5C4A3F;
+    --ink-3: #8A786A;
+    --ink-4: #B6A593;
+    --line: rgba(46, 33, 27, 0.08);
+    --line-2: rgba(46, 33, 27, 0.14);
+    --terracotta: #C66243;
+    --terracotta-soft: #F4D9CC;
+    --sage: #80987B;
+    --sage-soft: #D6E0CF;
+    --butter: #E8B94B;
+    --butter-soft: #F6E2A8;
+    --plum: #A8456A;
+    --plum-soft: #F1D2DE;
+    --shadow-1: 0 1px 2px rgba(78, 50, 30, 0.05);
+    --shadow-2: 0 8px 20px -10px rgba(78, 50, 30, 0.15);
+    --shadow-3: 0 30px 60px -20px rgba(78, 50, 30, 0.28), 0 8px 16px -8px rgba(78, 50, 30, 0.15);
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  body{
+    font-family: 'Switzer', system-ui, sans-serif;
+    color: var(--ink);
+    font-size: 13.5px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(1100px 700px at 92% 0%, #F8E6CB 0%, transparent 55%),
+      radial-gradient(900px 700px at 8% 100%, #F0DBC0 0%, transparent 50%),
+      var(--cream);
+    min-height: 100vh;
+    padding: 56px 48px 96px;
+    position: relative;
+  }
+  /* subtle paper grain via dot texture */
+  body::before{
+    content:""; position: fixed; inset: 0;
+    background-image: radial-gradient(rgba(122,80,40,0.05) 1px, transparent 1px);
+    background-size: 3px 3px;
+    mix-blend-mode: multiply;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .stage{
+    position: relative; z-index: 2;
+    max-width: 1440px; margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr 400px;
+    gap: 56px;
+    align-items: start;
+  }
+  .stage > .main{ min-width: 0 }
+
+  /* header */
+  .page-head{
+    margin-bottom: 32px;
+    display: flex; align-items: flex-end; gap: 18px;
+  }
+  .page-head h1{
+    font-family: 'Gambarino', 'Fraunces', serif;
+    font-weight: 400;
+    font-size: 56px;
+    letter-spacing: -0.025em;
+    line-height: 1;
+    color: var(--ink);
+  }
+  .page-head h1 em{
+    font-style: italic;
+    color: var(--terracotta);
+  }
+  .page-head .tag{
+    margin-bottom: 9px;
+    font-size: 12px;
+    color: var(--ink-3);
+    letter-spacing: 0.04em;
+  }
+  .page-head .tag::before{content:"— "}
+
+  /* ===== buddy mascot SVG (reused) ===== */
+  .buddy{
+    width: 24px; height: 24px;
+    flex-shrink: 0;
+  }
+
+  /* ============================================================
+     MAIN WINDOW
+     ============================================================ */
+  .window{
+    background: var(--paper);
+    border-radius: 22px;
+    box-shadow: var(--shadow-3);
+    overflow: hidden;
+    border: 1px solid var(--line);
+  }
+  .titlebar{
+    height: 46px;
+    background: linear-gradient(180deg, #FDF7EA 0%, #F4E9D2 100%);
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center;
+    padding: 0 18px;
+    gap: 14px;
+  }
+  .lights{display:flex; gap: 8px}
+  .lights span{
+    width: 13px; height: 13px; border-radius: 50%;
+    border: 1px solid rgba(0,0,0,0.08);
+  }
+  .lights .r{background: #ED6A5F}
+  .lights .y{background: #F5BF4F}
+  .lights .g{background: #62C554}
+  .titlebar .title{
+    font-family:'Gambarino', serif;
+    font-size: 16px;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    margin-left: 6px;
+  }
+  .titlebar .crumb{
+    margin-left: 8px;
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+  .titlebar .crumb b{color: var(--ink); font-weight: 500}
+  .titlebar .spc{flex:1}
+  .titlebar .sync{
+    font-family:'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--ink-3);
+    background: var(--cream-2);
+    padding: 4px 10px;
+    border-radius: 999px;
+  }
+  .titlebar .sync .dot{
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: var(--sage);
+    border-radius: 50%;
+    margin-right: 5px;
+    vertical-align: 1px;
+  }
+
+  /* toolbar */
+  .toolbar{
+    padding: 16px 18px;
+    display: flex; align-items: center; gap: 12px;
+    border-bottom: 1px solid var(--line);
+    background: var(--paper-2);
+  }
+  .search{
+    flex: 1;
+    height: 38px;
+    background: var(--paper);
+    border-radius: 10px;
+    border: 1px solid var(--line-2);
+    display: flex; align-items:center; gap: 10px;
+    padding: 0 14px;
+    color: var(--ink-3);
+    font-size: 13.5px;
+    box-shadow: var(--shadow-1);
+  }
+  .search .sho{
+    margin-left: auto;
+    font-family:'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--ink-3);
+    background: var(--cream-2);
+    padding: 2px 7px; border-radius: 5px;
+  }
+  .iconbtn{
+    width: 38px; height: 38px;
+    border-radius: 10px;
+    display: grid; place-items: center;
+    color: var(--ink-2);
+    cursor: pointer;
+    background: var(--paper);
+    border: 1px solid var(--line-2);
+    box-shadow: var(--shadow-1);
+  }
+  .iconbtn:hover{background: var(--cream-2)}
+  .iconbtn.bell{position: relative}
+  .iconbtn.bell::after{
+    content:"12"; position: absolute; top: -4px; right: -4px;
+    background: var(--terracotta); color: white;
+    font-size: 9.5px; font-weight: 600;
+    border-radius: 999px;
+    padding: 2px 5px;
+    box-shadow: 0 0 0 2px var(--paper-2);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* body */
+  .wbody{
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    min-height: 600px;
+  }
+  /* SIDEBAR */
+  .side{
+    padding: 22px 14px;
+    border-right: 1px solid var(--line);
+    background: var(--paper-2);
+  }
+  .sec + .sec{margin-top: 20px}
+  .sec-h{
+    font-family: 'Gambarino', serif;
+    font-size: 13.5px;
+    color: var(--ink-2);
+    padding: 0 8px 8px;
+    letter-spacing: -0.005em;
+  }
+  .sec-h em{font-style: italic; color: var(--terracotta)}
+  .pill-row{
+    padding: 9px 12px;
+    border-radius: 12px;
+    display: flex; align-items: center; gap: 10px;
+    color: var(--ink-2);
+    font-size: 13.5px;
+    cursor: pointer;
+    transition: background 0.15s;
+    margin-bottom: 2px;
+  }
+  .pill-row:hover{background: rgba(0,0,0,0.025)}
+  .pill-row.on{
+    background: var(--terracotta-soft);
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .pill-row .c{
+    margin-left: auto;
+    font-family:'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+  .pill-row.on .c{color: var(--terracotta)}
+  .pill-row .swatch{
+    width: 10px; height: 10px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .pill-row .avatar{
+    width: 22px; height: 22px;
+    border-radius: 8px;
+    display: grid; place-items: center;
+    color: white; font-weight: 600;
+    font-size: 11px;
+    font-family: 'Gambarino', serif;
+    flex-shrink: 0;
+  }
+  .av-gh-p{background: linear-gradient(135deg, #6B5A4D, #2E211B)}
+  .av-gh-w{background: linear-gradient(135deg, #80987B, #4A5E48)}
+  .av-gl-p{background: linear-gradient(135deg, #E8A06A, #C66243)}
+  .av-gl-w{background: linear-gradient(135deg, #B6A5C9, #6E5E80)}
+  .av-cb{background: linear-gradient(135deg, #8DBBC9, #4E7A8A)}
+
+  /* CONTENT */
+  .wcontent{padding: 26px 30px 30px; overflow: hidden}
+  .greeting{
+    display: flex; align-items: flex-end; gap: 14px;
+    margin-bottom: 6px;
+  }
+  .greeting .hello{
+    font-family:'Gambarino', serif;
+    font-size: 32px;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    color: var(--ink);
+  }
+  .greeting .hello em{font-style: italic; color: var(--terracotta)}
+  .greeting .blurb{
+    font-size: 13.5px;
+    color: var(--ink-3);
+    margin-bottom: 6px;
+  }
+  .greeting .blurb b{color: var(--ink-2); font-weight: 500}
+
+  .summary-row{
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin: 18px 0 26px;
+  }
+  .stat{
+    background: var(--paper-2);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 4px;
+    position: relative;
+    overflow: hidden;
+  }
+  .stat .label{
+    font-size: 11.5px;
+    color: var(--ink-3);
+    letter-spacing: 0.02em;
+  }
+  .stat .num{
+    font-family:'Gambarino', serif;
+    font-size: 34px;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    color: var(--ink);
+  }
+  .stat .num em{font-style: italic}
+  .stat .delta{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--ink-3);
+    margin-top: 4px;
+  }
+  .stat.t{background: linear-gradient(135deg, #FBE6DA 0%, #F6D7C2 100%); border-color: rgba(198,98,67,0.12)}
+  .stat.t .num{color: var(--terracotta)}
+  .stat.s{background: linear-gradient(135deg, #E7EDD9 0%, #DCE7CD 100%); border-color: rgba(128,152,123,0.18)}
+  .stat.s .num{color: #5E7758}
+  .stat.b{background: linear-gradient(135deg, #FBEED1 0%, #F4E0AE 100%); border-color: rgba(232,185,75,0.2)}
+  .stat.b .num{color: #B68C2C}
+
+  .section-h{
+    font-family:'Gambarino', serif;
+    font-size: 20px;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+    margin-bottom: 12px;
+    display: flex; align-items: baseline;
+  }
+  .section-h em{font-style: italic; color: var(--terracotta); margin-left: 4px}
+  .section-h .count{
+    margin-left: 8px;
+    font-family:'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+  .section-h .right{
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--terracotta);
+    font-family: 'Switzer', sans-serif;
+    cursor: pointer;
+  }
+
+  /* Repo cards */
+  .repo-grid{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .card{
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px 16px;
+    display: grid;
+    grid-template-columns: 32px 1fr auto;
+    gap: 12px;
+    align-items: start;
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .card:hover{transform: translateY(-1px); box-shadow: var(--shadow-2)}
+  .card.featured{
+    background: linear-gradient(135deg, #FFF9EB 0%, #FBEFD0 100%);
+    border-color: rgba(232,185,75,0.3);
+  }
+  .pchip{
+    width: 28px; height: 28px;
+    border-radius: 9px;
+    display: grid; place-items: center;
+    background: var(--cream-2);
+    color: var(--ink-2);
+    font-weight: 700;
+    font-size: 11px;
+  }
+  .pchip.gh{background: #2E211B; color: #FAF4EA}
+  .pchip.gl{background: linear-gradient(135deg, #E89C5C, #C66243); color: white}
+  .pchip.cb{background: linear-gradient(135deg, #8DBBC9, #4E7A8A); color: white}
+  .pchip.mp{background: linear-gradient(135deg, #B6A5C9, #6E5E80); color: white}
+  .rname{
+    line-height: 1.25;
+  }
+  .rname .o{color: var(--ink-3); font-weight: 400; font-size: 12.5px}
+  .rname b{font-weight: 600; font-size: 14.5px; color: var(--ink)}
+  .rname .sub{
+    display: flex; gap: 10px; flex-wrap: wrap;
+    margin-top: 5px;
+    font-size: 11.5px;
+    color: var(--ink-3);
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.01em;
+  }
+  .rname .sub .pin{
+    display: inline-flex; gap: 4px; align-items: center;
+  }
+  .rname .sub .pin .d{width:5px; height:5px; border-radius:50%; background: var(--sage)}
+  .rname .sub .pin .d.off{background: var(--ink-4); opacity:0.5}
+  .rname .sub .warn{color: var(--terracotta)}
+  .rmeta{
+    text-align: right;
+    display: flex; flex-direction: column;
+    align-items: flex-end; gap: 5px;
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+  .rver{
+    font-family:'Gambarino', serif;
+    font-size: 14px;
+    color: var(--ink);
+    letter-spacing: -0.005em;
+  }
+  .rver .new{
+    display: inline-block;
+    font-family:'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    color: var(--terracotta);
+    background: var(--terracotta-soft);
+    padding: 1px 6px;
+    border-radius: 999px;
+    margin-left: 4px;
+    vertical-align: 2px;
+    letter-spacing: 0.06em;
+  }
+  .rci{
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .rci .b{
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--sage);
+  }
+  .rci.fail .b{background: var(--terracotta)}
+  .rci.fail{color: var(--terracotta)}
+  .rci.run .b{
+    background: var(--butter);
+    animation: rci 1.4s ease-in-out infinite;
+  }
+  .rci.run{color: #B68C2C}
+  @keyframes rci{0%,100%{opacity:1; transform: scale(1)} 50%{opacity:0.5; transform: scale(0.8)}}
+  .rci.off{color: var(--ink-3); opacity:0.5}
+  .rci.off .b{background: var(--ink-4)}
+  .counts{
+    display: flex; gap: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    color: var(--ink-2);
+    margin-top: 2px;
+  }
+  .counts .h{color: var(--terracotta); font-weight: 600}
+
+  /* ============================================================
+     POPOVER
+     ============================================================ */
+  .pop-col{
+    position: sticky; top: 56px;
+  }
+  .menubar{
+    height: 28px;
+    border-radius: 10px;
+    background: rgba(255,253,248,0.6);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow-1);
+    display: flex; align-items: center;
+    padding: 0 14px; gap: 14px;
+    font-size: 12px;
+    color: var(--ink-3);
+    margin-bottom: 6px;
+  }
+  .menubar .spc{flex:1}
+  .menubar .mb-buddy{
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--ink);
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--terracotta-soft);
+    font-family: 'Gambarino', serif;
+    font-size: 12.5px;
+  }
+  .menubar .mb-buddy .n{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    background: var(--terracotta);
+    color: white;
+    border-radius: 999px;
+    padding: 1px 6px;
+    font-weight: 500;
+  }
+
+  .pop-anchor{position: relative; height: 0}
+  .pop-pointer{
+    position: absolute; top: -1px; right: 36px;
+    width: 16px; height: 9px;
+  }
+  .pop-pointer::before{
+    content:""; position: absolute; inset: 0;
+    background: var(--paper);
+    clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  }
+
+  .pop{
+    width: 400px;
+    background: var(--paper);
+    border-radius: 22px;
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow-3);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    height: 580px;
+  }
+  .pop-head{
+    padding: 16px 18px 10px;
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #FFF9EC 0%, #FDF7EA 100%);
+  }
+  .pop-head .name{
+    font-family:'Gambarino', serif;
+    font-size: 22px;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .pop-head .name em{font-style: italic; color: var(--terracotta)}
+  .pop-head .spc{flex:1}
+  .pop-head .ib{
+    width: 28px; height: 28px; border-radius: 8px;
+    display: grid; place-items: center;
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+  .pop-head .ib:hover{background: var(--cream-2)}
+
+  .greeting-strip{
+    padding: 14px 18px 0;
+    font-size: 13px;
+    color: var(--ink-2);
+  }
+  .greeting-strip b{font-family:'Gambarino', serif; font-style: italic; color: var(--terracotta); font-weight: 400}
+
+  .pop-tabs{
+    margin: 12px 18px 0;
+    display:flex; gap: 4px;
+    padding: 4px;
+    background: var(--cream-2);
+    border-radius: 12px;
+    font-size: 12.5px;
+  }
+  .pop-tabs span{
+    flex: 1;
+    text-align: center;
+    padding: 7px 8px;
+    color: var(--ink-2);
+    border-radius: 9px;
+    cursor: pointer;
+    position: relative;
+  }
+  .pop-tabs span.on{
+    background: var(--paper);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: var(--shadow-1);
+  }
+  .pop-tabs span .n{
+    margin-left: 5px;
+    font-family:'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    color: var(--ink-3);
+  }
+  .pop-tabs span.on .n{color: var(--terracotta)}
+
+  .pop-list{
+    flex: 1; overflow: hidden;
+    padding: 8px 10px 10px;
+  }
+  .pop-row{
+    display: grid;
+    grid-template-columns: 32px 1fr auto;
+    gap: 10px;
+    padding: 11px 10px;
+    border-radius: 12px;
+    align-items: start;
+    cursor: pointer;
+  }
+  .pop-row:hover{background: var(--cream-2)}
+  .kindchip{
+    width: 26px; height: 26px;
+    border-radius: 8px;
+    display: grid; place-items:center;
+    font-family:'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    font-weight: 600;
+    margin-top: 1px;
+    letter-spacing: 0.04em;
+  }
+  .kindchip.pr{background: var(--sage-soft); color: #4A6048}
+  .kindchip.is{background: var(--terracotta-soft); color: #A0431F}
+  .kindchip.mr{background: var(--butter-soft); color: #9A6E1A}
+  .pt-title{
+    font-size: 13.5px;
+    line-height: 1.3;
+    color: var(--ink);
+    font-weight: 500;
+    letter-spacing: -0.005em;
+  }
+  .pt-meta{
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--ink-3);
+    font-family:'JetBrains Mono', monospace;
+    letter-spacing: 0.02em;
+    display: flex; gap: 7px; align-items: center;
+  }
+  .pt-meta .reason{
+    color: var(--terracotta);
+    font-weight: 500;
+  }
+  .pt-time{
+    font-family:'Gambarino', serif;
+    font-size: 12px;
+    color: var(--ink-3);
+    margin-top: 2px;
+    font-style: italic;
+  }
+
+  .pop-foot{
+    padding: 11px 16px;
+    border-top: 1px solid var(--line);
+    display: flex; align-items: center;
+    font-size: 11px;
+    color: var(--ink-3);
+    background: var(--paper-2);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .pop-foot .pulse{
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--sage);
+    margin-right: 7px;
+    box-shadow: 0 0 0 0 rgba(128,152,123,0.5);
+    animation: pulse 2.4s ease-out infinite;
+  }
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(128,152,123,0.5)}
+    70%{box-shadow:0 0 0 7px rgba(128,152,123,0)}
+    100%{box-shadow:0 0 0 0 rgba(128,152,123,0)}
+  }
+  .pop-foot .spc{flex:1}
+  .pop-foot .kbd{
+    background: var(--cream-2);
+    padding: 2px 6px;
+    border-radius: 5px;
+    color: var(--ink-2);
+  }
+
+  .nav-back{
+    position: fixed; top: 18px; left: 22px; z-index: 5;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    color: var(--ink-2);
+    text-decoration: none;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow-1);
+    font-family: 'Gambarino', serif;
+  }
+  .nav-back:hover{color: var(--terracotta)}
+
+  @media (max-width: 1100px){
+    .stage{grid-template-columns: 1fr; gap: 36px}
+    .pop-col{position: static}
+    .repo-grid{grid-template-columns: 1fr}
+  }
+</style>
+</head>
+<body>
+
+<a class="nav-back" href="index.html">← back</a>
+
+<!-- Buddy SVG (used inline) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="buddy" viewBox="0 0 32 32">
+      <!-- sprout body -->
+      <circle cx="16" cy="20" r="9" fill="#C66243"/>
+      <!-- leaf -->
+      <path d="M16 11 Q 13 6 9 5 Q 10 9 13 11 Z" fill="#80987B"/>
+      <path d="M16 11 Q 19 7 24 7 Q 22 11 18 12 Z" fill="#80987B"/>
+      <!-- eyes -->
+      <circle cx="13" cy="20" r="1.4" fill="#FAF4EA"/>
+      <circle cx="19" cy="20" r="1.4" fill="#FAF4EA"/>
+      <!-- subtle smile -->
+      <path d="M14 23 Q 16 24.6 18 23" stroke="#FAF4EA" stroke-width="1.1" fill="none" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<div class="stage">
+
+  <div class="main">
+    <div class="page-head">
+      <h1>Buddy<em>.</em></h1>
+      <div class="tag">Gambarino · Switzer · terracotta + sage</div>
+    </div>
+
+    <!-- ================== MAIN WINDOW ================== -->
+    <div class="window">
+      <div class="titlebar">
+        <div class="lights"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <svg class="buddy" style="margin-left:6px"><use href="#buddy"/></svg>
+        <span class="title">gitBuddy</span>
+        <span class="crumb">/ <b>Waiting on me</b></span>
+        <span class="spc"></span>
+        <span class="sync"><span class="dot"></span>Synced 24 sec ago</span>
+      </div>
+
+      <div class="toolbar">
+        <div class="search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          Search by repo, owner, label, anything…
+          <span class="sho">⌘ K</span>
+        </div>
+        <div class="iconbtn" title="Refresh">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+        </div>
+        <div class="iconbtn bell" title="Notifications">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+        </div>
+        <div class="iconbtn" title="Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+        </div>
+      </div>
+
+      <div class="wbody">
+        <!-- SIDEBAR -->
+        <aside class="side">
+          <div class="sec">
+            <div class="sec-h">What's <em>waiting</em></div>
+            <div class="pill-row on">
+              <span class="swatch" style="background:var(--terracotta)"></span>
+              On you <span class="c">12</span>
+            </div>
+            <div class="pill-row">
+              <span class="swatch" style="background:var(--sage)"></span>
+              All repos <span class="c">147</span>
+            </div>
+            <div class="pill-row">
+              <span class="swatch" style="background:var(--butter)"></span>
+              New releases <span class="c">3</span>
+            </div>
+            <div class="pill-row">
+              <span class="swatch" style="background:var(--plum)"></span>
+              Local clones <span class="c">31</span>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec-h">Accounts</div>
+            <div class="pill-row"><div class="avatar av-gh-p">b</div> bjoern.witt <span class="c">42</span></div>
+            <div class="pill-row"><div class="avatar av-gh-w">m</div> mpsd-bw <span class="c">63</span></div>
+            <div class="pill-row"><div class="avatar av-gl-p">g</div> gitlab.com <span class="c">11</span></div>
+            <div class="pill-row"><div class="avatar av-gl-w">M</div> mpsd.gitlab <span class="c">24</span></div>
+            <div class="pill-row"><div class="avatar av-cb">c</div> codeberg <span class="c">7</span></div>
+          </div>
+        </aside>
+
+        <!-- CONTENT -->
+        <main class="wcontent">
+          <div class="greeting">
+            <div class="hello">Hi, <em>Björn</em>.</div>
+            <div class="blurb">You have <b>4 things needing attention</b> and <b>3 fresh releases</b> across 5 accounts.</div>
+          </div>
+
+          <div class="summary-row">
+            <div class="stat t">
+              <div class="label">Waiting on you</div>
+              <div class="num">12</div>
+              <div class="delta">+3 since yesterday</div>
+            </div>
+            <div class="stat s">
+              <div class="label">CI passing</div>
+              <div class="num">134<em>/141</em></div>
+              <div class="delta">3 failing · 4 running</div>
+            </div>
+            <div class="stat b">
+              <div class="label">New releases</div>
+              <div class="num">3</div>
+              <div class="delta">in the last 7 days</div>
+            </div>
+            <div class="stat">
+              <div class="label">Local clones</div>
+              <div class="num">31</div>
+              <div class="delta">9 with uncommitted</div>
+            </div>
+          </div>
+
+          <div class="section-h">
+            Your <em>repos</em>
+            <span class="count">7 shown · 147 total</span>
+            <span class="right">View all →</span>
+          </div>
+
+          <div class="repo-grid">
+
+            <div class="card featured">
+              <div class="pchip gh">A</div>
+              <div class="rname">
+                <span class="o">anthropics</span> / <b>claude-code</b>
+                <div class="sub">
+                  <span class="pin"><span class="d"></span> ~/Developer/claude-code</span>
+                  <span>main</span>
+                </div>
+              </div>
+              <div class="rmeta">
+                <span class="rver">v1.0.93 <span class="new">NEW</span></span>
+                <span class="rci"><span class="b"></span> passing</span>
+                <span class="counts"><span class="h">4</span> issues · 2 PRs</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="pchip gh">V</div>
+              <div class="rname">
+                <span class="o">vercel</span> / <b>next.js</b>
+                <div class="sub">
+                  <span class="pin"><span class="d off"></span> not cloned</span>
+                  <span>canary</span>
+                </div>
+              </div>
+              <div class="rmeta">
+                <span class="rver">v15.0.2</span>
+                <span class="rci"><span class="b"></span> passing</span>
+                <span class="counts">17 issues · 3 PRs</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="pchip gl">G</div>
+              <div class="rname">
+                <span class="o">gitlab-org</span> / <b>gitlab</b>
+                <div class="sub">
+                  <span class="pin"><span class="d off"></span> not cloned</span>
+                  <span>master</span>
+                </div>
+              </div>
+              <div class="rmeta">
+                <span class="rver">17.5.0</span>
+                <span class="rci fail"><span class="b"></span> failing</span>
+                <span class="counts">8 issues · 1 MR</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="pchip cb">F</div>
+              <div class="rname">
+                <span class="o">forgejo</span> / <b>runner</b>
+                <div class="sub">
+                  <span class="pin"><span class="d"></span> ~/Developer/forgejo-runner</span>
+                  <span>main</span>
+                </div>
+              </div>
+              <div class="rmeta">
+                <span class="rver">v6.1.0 <span class="new">NEW</span></span>
+                <span class="rci"><span class="b"></span> passing</span>
+                <span class="counts">3 issues · 0 PRs</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="pchip mp">M</div>
+              <div class="rname">
+                <span class="o">mpsd</span> / <b>api-gateway</b>
+                <div class="sub">
+                  <span class="pin"><span class="d"></span> ~/Developer/work/api-gw</span>
+                  <span>develop</span>
+                  <span class="warn">3 unpushed</span>
+                </div>
+              </div>
+              <div class="rmeta">
+                <span class="rver">0.18.2</span>
+                <span class="rci run"><span class="b"></span> running</span>
+                <span class="counts"><span class="h">2</span> issues · 1 MR</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="pchip gh">W</div>
+              <div class="rname">
+                <span class="o">witt</span> / <b>dotfiles</b>
+                <div class="sub">
+                  <span class="pin"><span class="d"></span> ~/dotfiles</span>
+                  <span>main</span>
+                  <span class="warn">7 uncommitted</span>
+                </div>
+              </div>
+              <div class="rmeta">
+                <span class="rver">—</span>
+                <span class="rci off"><span class="b"></span> no ci</span>
+                <span class="counts">—</span>
+              </div>
+            </div>
+
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================== POPOVER ================== -->
+  <div class="pop-col">
+    <div class="menubar">
+      <span style="font-family:'Gambarino', serif; font-size:13px; color:var(--ink)">Finder</span>
+      <span>File</span>
+      <span>Edit</span>
+      <span>View</span>
+      <span class="spc"></span>
+      <span style="font-family:'JetBrains Mono',monospace; font-size:11px">14:32</span>
+      <span class="mb-buddy">
+        <svg class="buddy" style="width:16px;height:16px"><use href="#buddy"/></svg>
+        gitBuddy
+        <span class="n">12</span>
+      </span>
+    </div>
+    <div class="pop-anchor"><div class="pop-pointer"></div></div>
+
+    <div class="pop">
+      <div class="pop-head">
+        <svg class="buddy" style="width:28px; height:28px"><use href="#buddy"/></svg>
+        <span class="name">git<em>Buddy</em></span>
+        <span class="spc"></span>
+        <span class="ib" title="Refresh">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+        </span>
+        <span class="ib" title="Open window">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
+        </span>
+        <span class="ib" title="Settings">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+        </span>
+      </div>
+
+      <div class="greeting-strip">
+        Hey <b>Björn</b> — twelve things and three fresh releases.
+      </div>
+
+      <div class="pop-tabs">
+        <span class="on">Waiting <span class="n">12</span></span>
+        <span>Repos <span class="n">147</span></span>
+        <span>Releases <span class="n">3</span></span>
+      </div>
+
+      <div class="pop-list">
+
+        <div class="pop-row">
+          <div class="kindchip pr">PR</div>
+          <div>
+            <div class="pt-title">Fix: prevent race condition in scheduler</div>
+            <div class="pt-meta">anthropics/claude-code · <span class="reason">review</span></div>
+          </div>
+          <div class="pt-time">2h</div>
+        </div>
+
+        <div class="pop-row">
+          <div class="kindchip is">IS</div>
+          <div>
+            <div class="pt-title">Onboarding flow crashes on Safari 17</div>
+            <div class="pt-meta">vercel/next.js · <span class="reason">assigned</span></div>
+          </div>
+          <div class="pt-time">1d</div>
+        </div>
+
+        <div class="pop-row">
+          <div class="kindchip mr">MR</div>
+          <div>
+            <div class="pt-title">Add support for nested groups</div>
+            <div class="pt-meta">gitlab-org/gitlab · <span class="reason">authored</span></div>
+          </div>
+          <div class="pt-time">3d</div>
+        </div>
+
+        <div class="pop-row">
+          <div class="kindchip is">IS</div>
+          <div>
+            <div class="pt-title">Memory leak in worker pool</div>
+            <div class="pt-meta">mpsd/api-gateway · <span class="reason">mentioned</span></div>
+          </div>
+          <div class="pt-time">5h</div>
+        </div>
+
+        <div class="pop-row">
+          <div class="kindchip pr">PR</div>
+          <div>
+            <div class="pt-title">Refactor token storage to keyring</div>
+            <div class="pt-meta">forgejo/runner · <span class="reason">review</span></div>
+          </div>
+          <div class="pt-time">6h</div>
+        </div>
+
+        <div class="pop-row">
+          <div class="kindchip is">IS</div>
+          <div>
+            <div class="pt-title">Document new auth scope requirements</div>
+            <div class="pt-meta">witt/gitBuddy · <span class="reason">assigned</span></div>
+          </div>
+          <div class="pt-time">2d</div>
+        </div>
+
+      </div>
+
+      <div class="pop-foot">
+        <span class="pulse"></span> Synced 24 sec ago · next in 4m 36s
+        <span class="spc"></span>
+        <span class="kbd">⌘⇧G</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>
