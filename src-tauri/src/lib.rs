@@ -1,14 +1,18 @@
 // gitBuddy backend entry point.
 //
-// Responsibilities for the M1 skeleton:
-//   * Run as a macOS menu-bar app (no dock icon).
-//   * Show a tray icon; left-click toggles the popover window,
-//     right-click opens a small menu (Open gitBuddy / Quit).
-//   * Hide the popover when it loses focus, the way Mac menu-bar apps behave.
-//
-// Provider integrations, the local repo index, polling, and notifications
-// are scheduled for later milestones (see PRD.md).
+// M1: menu-bar tray, popover, main window.
+// M2: GitHub provider (PAT auth + waiting-items search) + Keychain storage.
+// Local repo index, polling, notifications, multi-account, GitLab/Codeberg
+// come in later milestones — see PRD.md.
 
+mod commands;
+mod github;
+mod keychain;
+mod types;
+
+use std::sync::Arc;
+
+use commands::AppState;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -29,6 +33,12 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(Arc::new(AppState::default()))
+        .invoke_handler(tauri::generate_handler![
+            commands::gh_set_token,
+            commands::gh_status,
+            commands::gh_list_waiting,
+        ])
         .setup(|app| {
             // gitBuddy lives in the menu bar — no dock icon by default.
             // Opening the main window flips this back to Regular so the
@@ -37,6 +47,15 @@ pub fn run() {
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
+
+            // Restore any GitHub token previously saved to the Keychain so the
+            // UI can show real data on next launch without re-pasting. Runs in
+            // the background — the popover will display the empty state for a
+            // brief moment if Keychain access takes its time.
+            let state = app.state::<Arc<AppState>>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                state.restore_from_keychain().await;
+            });
 
             // ── Tray menu (right-click) ─────────────────────────────────
             let open_main =
