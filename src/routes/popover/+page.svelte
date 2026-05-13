@@ -221,6 +221,19 @@
     return () => clearInterval(handle);
   });
   let syncText = $derived(humaniseSync(lastSyncedAt, now));
+
+  // Auto-refresh every 5 minutes while a viewer is connected. Hardcoded for
+  // now — promoted to a user-configurable setting in a later milestone.
+  // The popover's webview stays loaded even when hidden, so this keeps the
+  // popover's data warm without the user needing to click Refresh.
+  const POLL_INTERVAL_MS = 5 * 60 * 1000;
+  $effect(() => {
+    if (!viewer) return;
+    const handle = setInterval(() => {
+      void refresh();
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(handle);
+  });
 </script>
 
 <div class="stage">
