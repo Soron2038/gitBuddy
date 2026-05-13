@@ -7,6 +7,7 @@
 
 mod commands;
 mod github;
+mod gitlab;
 mod keychain;
 mod local_index;
 mod settings;
@@ -44,10 +45,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::gh_set_token,
             commands::gh_status,
-            commands::gh_list_waiting,
-            commands::gh_list_repos,
-            commands::gh_list_releases,
-            commands::gh_list_ci,
+            commands::gl_set_token,
+            commands::gl_status,
+            commands::list_waiting,
+            commands::list_repos,
+            commands::list_releases,
+            commands::list_ci,
             commands::list_local_repos,
             commands::get_settings,
             commands::save_settings,

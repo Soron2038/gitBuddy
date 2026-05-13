@@ -5,15 +5,18 @@
   import {
     ghStatus,
     ghSetToken,
-    ghListWaiting,
-    ghListRepos,
-    ghListReleases,
-    ghListCi,
+    glStatus,
+    glSetToken,
+    listWaiting,
+    listRepos,
+    listReleases,
+    listCi,
     listLocalRepos,
     indexLocalByRemote,
     localKeyForRepo,
     providerLabel,
     type Viewer,
+    type GitLabStatus,
     type WaitingItem,
     type Repo,
     type LocalRepo,
@@ -25,6 +28,7 @@
   type Tab = 'waiting' | 'repos' | 'releases';
 
   let viewer: Viewer | null = $state(null);
+  let gl: GitLabStatus | null = $state(null);
   let items: WaitingItem[] = $state([]);
   let repos: Repo[] = $state([]);
   let reposLoaded = $state(false);
@@ -40,7 +44,43 @@
   let refreshing = $state(false);
   let error: string | null = $state(null);
 
+  // Onboarding / add-provider state.
+  let chosenProvider: 'github' | 'gitlab' = $state('github');
+  let tokenInput = $state('');
+  let gitlabBaseInput = $state('https://gitlab.com');
+  let connecting = $state(false);
+  /** Forces the onboarding form to appear even when one provider is already
+   *  connected, so the user can attach a second provider via the "+" button. */
+  let addingAnotherProvider = $state(false);
+
+  let connected = $derived(viewer !== null || gl !== null);
+  let showOnboarding = $derived(!connected || addingAnotherProvider);
+  let canAddGithub = $derived(viewer === null);
+  let canAddGitlab = $derived(gl === null);
+  let canAddAny = $derived(canAddGithub || canAddGitlab);
+  let displayName = $derived.by(() => {
+    if (viewer) return viewer.name ?? viewer.login;
+    if (gl) return gl.viewer.name ?? gl.viewer.login;
+    return 'there';
+  });
+
   let localByKey = $derived(indexLocalByRemote(locals));
+
+  /** GitLab host suggestions derived from the local scan: any non-github.com
+   *  host seen in `origin` URLs that isn't already the connected GitLab.
+   *  Drives the quick-pick chips in the GitLab onboarding form so the user
+   *  doesn't have to retype `gitlab.gwdg.de` etc. */
+  let gitlabHostSuggestions = $derived.by(() => {
+    const out = new Set<string>();
+    for (const o of locals) {
+      const h = o.remote?.host;
+      if (!h) continue;
+      if (h === 'github.com') continue;
+      if (gl && gl.base_url.includes(h)) continue;
+      out.add(h);
+    }
+    return Array.from(out).sort();
+  });
 
   /** Local repos whose `origin` doesn't match any of the user's known remote
    *  accounts — typically scratch clones, abandoned forks, or repos hosted
@@ -54,21 +94,13 @@
     }),
   );
 
-  // Setup-form state (visible only when there's no connected account).
-  let tokenInput = $state('');
-  let connecting = $state(false);
-
   let lastSyncedAt: Date | null = $state(null);
 
-  /** Fetch the data that should be visible the moment the user has a connected
-   *  account — waiting items + local clone index, in parallel. Shared between
-   *  the on-mount path and the post-connect path so the popover and the
-   *  Repos-tab local indicators show up immediately in both cases (previously
-   *  the post-connect path only fetched waiting items, which is why local dots
-   *  only appeared after a manual refresh). */
+  /** Fetch waiting items (aggregated across providers) and the local clone
+   *  index in parallel. Shared between the on-mount and post-connect paths. */
   async function loadInitialData() {
     const [fetchedItems, fetchedLocals] = await Promise.all([
-      ghListWaiting(),
+      listWaiting(),
       listLocalRepos().catch((e) => {
         error = `Local scan failed: ${e}`;
         return [] as LocalRepo[];
@@ -81,8 +113,28 @@
 
   onMount(async () => {
     try {
-      viewer = await ghStatus();
-      if (viewer) await loadInitialData();
+      // Always run the local scan first — its results power the orphan-host
+      // suggestion that the GitLab onboarding form shows, so we need them
+      // available even with no provider connected yet.
+      const localPromise = listLocalRepos().catch((e) => {
+        error = `Local scan failed: ${e}`;
+        return [] as LocalRepo[];
+      });
+
+      const [ghViewer, glRes] = await Promise.all([ghStatus(), glStatus()]);
+      viewer = ghViewer;
+      gl = glRes;
+
+      // Default the onboarding form to whichever provider can still be added.
+      // If only GitLab is unconnected, jump straight to its tab.
+      if (viewer && !gl) chosenProvider = 'gitlab';
+      else if (gl && !viewer) chosenProvider = 'github';
+
+      if (viewer || gl) {
+        items = await listWaiting();
+        lastSyncedAt = new Date();
+      }
+      locals = await localPromise;
     } catch (e) {
       error = String(e);
     } finally {
@@ -92,11 +144,19 @@
 
   async function connect() {
     if (!tokenInput.trim()) return;
+    if (chosenProvider === 'gitlab' && !gitlabBaseInput.trim()) return;
     connecting = true;
     error = null;
     try {
-      viewer = await ghSetToken(tokenInput.trim());
+      if (chosenProvider === 'github') {
+        viewer = await ghSetToken(tokenInput.trim());
+      } else {
+        await glSetToken(tokenInput.trim(), gitlabBaseInput.trim());
+        // Round-trip via status so the UI gets the server-normalised base URL.
+        gl = await glStatus();
+      }
       tokenInput = '';
+      addingAnotherProvider = false;
       await loadInitialData();
     } catch (e) {
       error = String(e);
@@ -105,21 +165,35 @@
     }
   }
 
+  function startAddingProvider() {
+    addingAnotherProvider = true;
+    error = null;
+    // Default to the unconnected provider.
+    if (canAddGithub && !canAddGitlab) chosenProvider = 'github';
+    else if (canAddGitlab && !canAddGithub) chosenProvider = 'gitlab';
+  }
+
+  function cancelAdding() {
+    addingAnotherProvider = false;
+    tokenInput = '';
+    error = null;
+  }
+
   async function refresh() {
-    if (!viewer) return;
+    if (!connected) return;
     refreshing = true;
     error = null;
     try {
       const promises: Array<Promise<unknown>> = [
-        ghListWaiting().then((v) => (items = v)),
+        listWaiting().then((v) => (items = v)),
         listLocalRepos().then((v) => (locals = v)),
       ];
       if (reposLoaded) {
-        promises.push(ghListRepos().then((v) => (repos = v)));
-        promises.push(ghListCi().then((v) => (ciRuns = v)).catch(() => {}));
+        promises.push(listRepos().then((v) => (repos = v)));
+        promises.push(listCi().then((v) => (ciRuns = v)).catch(() => {}));
       }
       if (releasesLoaded) {
-        promises.push(ghListReleases().then((v) => (releases = v)));
+        promises.push(listReleases().then((v) => (releases = v)));
       }
       await Promise.all(promises);
       lastSyncedAt = new Date();
@@ -130,17 +204,16 @@
     }
   }
 
-  // Lazy-load repos + their CI status the first time the user switches to
-  // the Repos tab. With 100s of repos this can take a couple seconds total
-  // (CI is one extra request per repo), so we skip it on initial open
-  // unless the user actually asked.
+  // Lazy-load repos + CI status the first time the user switches to the
+  // Repos tab. With 100s of repos this can take a couple of seconds, so we
+  // skip it on initial open unless the user asks.
   async function ensureRepos() {
-    if (reposLoaded || reposLoading || !viewer) return;
+    if (reposLoaded || reposLoading || !connected) return;
     reposLoading = true;
     try {
       const [fetchedRepos, fetchedCi] = await Promise.all([
-        ghListRepos(),
-        ghListCi().catch(() => [] as CiRun[]),
+        listRepos(),
+        listCi().catch(() => [] as CiRun[]),
       ]);
       repos = fetchedRepos;
       ciRuns = fetchedCi;
@@ -152,13 +225,11 @@
     }
   }
 
-  // Releases are even more expensive (one /releases/latest per repo, capped
-  // to 60 in the backend), so we also defer them until the tab is opened.
   async function ensureReleases() {
-    if (releasesLoaded || releasesLoading || !viewer) return;
+    if (releasesLoaded || releasesLoading || !connected) return;
     releasesLoading = true;
     try {
-      releases = await ghListReleases();
+      releases = await listReleases();
       releasesLoaded = true;
     } catch (e) {
       error = String(e);
@@ -168,9 +239,9 @@
   }
 
   $effect(() => {
-    if (activeTab === 'repos' && viewer) {
+    if (activeTab === 'repos' && connected) {
       ensureRepos();
-    } else if (activeTab === 'releases' && viewer) {
+    } else if (activeTab === 'releases' && connected) {
       ensureReleases();
     }
   });
@@ -234,13 +305,10 @@
   });
   let syncText = $derived(humaniseSync(lastSyncedAt, now));
 
-  // Auto-refresh every 5 minutes while a viewer is connected. Hardcoded for
-  // now — promoted to a user-configurable setting in a later milestone.
-  // The popover's webview stays loaded even when hidden, so this keeps the
-  // popover's data warm without the user needing to click Refresh.
+  // Auto-refresh every 5 minutes while any provider is connected.
   const POLL_INTERVAL_MS = 5 * 60 * 1000;
   $effect(() => {
-    if (!viewer) return;
+    if (!connected) return;
     const handle = setInterval(() => {
       void refresh();
     }, POLL_INTERVAL_MS);
@@ -284,57 +352,149 @@
       <div class="state-pad">
         <p class="loading-text">Connecting…</p>
       </div>
-    {:else if !viewer}
-      <!-- Onboarding: no account configured yet. -->
+    {:else if showOnboarding}
+      <!-- Onboarding: no account, or user clicked "+ add provider". -->
       <div class="setup">
-        <h2>Hi — let's <em>meet</em>.</h2>
-        <p class="lede">
-          Paste a GitHub personal access token to start. gitBuddy stores it in
-          your macOS Keychain and never sends it anywhere else.
-        </p>
+        {#if connected}
+          <h2>Add <em>provider</em>.</h2>
+          <p class="lede">
+            Connect another forge to see all your work in one place.
+          </p>
+        {:else}
+          <h2>Hi — let's <em>meet</em>.</h2>
+          <p class="lede">
+            Connect a Git forge to get started. Tokens are stored in your
+            macOS Keychain and never sent anywhere else.
+          </p>
+        {/if}
 
-        <button
-          class="token-link"
-          onclick={() =>
-            openExternal(
-              'https://github.com/settings/tokens/new?description=gitBuddy&scopes=repo,read:org',
-            )}
-        >
-          Create a token on GitHub →
-        </button>
+        <!-- Provider selector: only render the tab strip when both can be
+             added; otherwise we're locked to whichever is unconnected. -->
+        {#if canAddGithub && canAddGitlab}
+          <div class="provider-tabs">
+            <button
+              class:on={chosenProvider === 'github'}
+              onclick={() => (chosenProvider = 'github')}
+            >
+              GitHub
+            </button>
+            <button
+              class:on={chosenProvider === 'gitlab'}
+              onclick={() => (chosenProvider = 'gitlab')}
+            >
+              GitLab
+            </button>
+          </div>
+        {/if}
 
-        <label class="token-input">
-          <span class="lbl">Personal access token</span>
-          <input
-            type="password"
-            placeholder="ghp_… or github_pat_…"
-            bind:value={tokenInput}
-            onkeydown={(e) => e.key === 'Enter' && connect()}
-            disabled={connecting}
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </label>
+        {#if chosenProvider === 'github' && canAddGithub}
+          <button
+            class="token-link"
+            onclick={() =>
+              openExternal(
+                'https://github.com/settings/tokens/new?description=gitBuddy&scopes=repo,read:org',
+              )}
+          >
+            Create a token on GitHub →
+          </button>
+
+          <label class="token-input">
+            <span class="lbl">Personal access token</span>
+            <input
+              type="password"
+              placeholder="ghp_… or github_pat_…"
+              bind:value={tokenInput}
+              onkeydown={(e) => e.key === 'Enter' && connect()}
+              disabled={connecting}
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+        {:else if chosenProvider === 'gitlab' && canAddGitlab}
+          <label class="token-input">
+            <span class="lbl">Instance URL</span>
+            <input
+              type="url"
+              placeholder="https://gitlab.com"
+              bind:value={gitlabBaseInput}
+              disabled={connecting}
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+
+          {#if gitlabHostSuggestions.length > 0}
+            <div class="host-hints">
+              <span class="hint">Found in your local clones:</span>
+              <div class="host-chips">
+                {#each gitlabHostSuggestions as host}
+                  <button
+                    type="button"
+                    class="host-chip"
+                    onclick={() => (gitlabBaseInput = `https://${host}`)}
+                  >
+                    {host}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <button
+            class="token-link"
+            onclick={() =>
+              openExternal(
+                `${gitlabBaseInput.replace(/\/$/, '')}/-/user_settings/personal_access_tokens?name=gitBuddy&scopes=api,read_user`,
+              )}
+          >
+            Create a token on this GitLab →
+          </button>
+
+          <label class="token-input">
+            <span class="lbl">Personal access token</span>
+            <input
+              type="password"
+              placeholder="glpat-…"
+              bind:value={tokenInput}
+              onkeydown={(e) => e.key === 'Enter' && connect()}
+              disabled={connecting}
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+        {/if}
 
         {#if error}
           <p class="err">{error}</p>
         {/if}
 
-        <button
-          class="primary"
-          onclick={connect}
-          disabled={connecting || !tokenInput.trim()}
-        >
-          {connecting ? 'Verifying…' : 'Connect'}
-        </button>
+        <div class="setup-actions">
+          {#if connected}
+            <button type="button" class="secondary" onclick={cancelAdding} disabled={connecting}>
+              Cancel
+            </button>
+          {/if}
+          <button
+            class="primary"
+            onclick={connect}
+            disabled={connecting || !tokenInput.trim() || (chosenProvider === 'gitlab' && !gitlabBaseInput.trim())}
+          >
+            {connecting ? 'Verifying…' : 'Connect'}
+          </button>
+        </div>
       </div>
     {:else}
       <p class="greeting">
-        Hey <em>{viewer.name ?? viewer.login}</em> —
+        Hey <em>{displayName}</em> —
         {#if items.length === 0}
           you're all caught up.
         {:else}
           {items.length} {items.length === 1 ? 'thing' : 'things'} need a look.
+        {/if}
+        {#if canAddAny}
+          <button type="button" class="add-provider" onclick={startAddingProvider}>
+            + add {canAddGithub && !canAddGitlab ? 'GitHub' : canAddGitlab && !canAddGithub ? 'GitLab' : 'provider'}
+          </button>
         {/if}
       </p>
 
@@ -670,6 +830,94 @@
   }
   .primary:hover:not(:disabled) { background: #B05738; }
   .primary:disabled { opacity: 0.5; cursor: default; }
+  .secondary {
+    height: 38px;
+    padding: 0 14px;
+    background: var(--cream-2);
+    color: var(--ink-2);
+    border-radius: var(--r-sm);
+    font-weight: 500;
+    font-size: 13px;
+    transition: background 0.15s;
+  }
+  .secondary:hover:not(:disabled) { background: var(--cream-3); }
+  .setup-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .setup-actions .primary { flex: 1; }
+
+  /* Provider segmented control — same shape as the in-list tab strip but a
+     little tighter and inline in the setup form. */
+  .provider-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    background: var(--cream-2);
+    border-radius: var(--r-md);
+    font-size: 12.5px;
+    margin-bottom: 4px;
+  }
+  .provider-tabs button {
+    flex: 1;
+    padding: 6px 8px;
+    color: var(--ink-2);
+    border-radius: 9px;
+    text-align: center;
+  }
+  .provider-tabs button.on {
+    background: var(--paper);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: var(--shadow-1);
+  }
+
+  /* Quick-pick chips for hosts seen in local orphan clones — clicking one
+     fills the GitLab instance URL field so the user doesn't have to retype
+     a self-hosted host name. */
+  .host-hints {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: -4px;
+  }
+  .host-hints .hint {
+    font-size: 11px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    letter-spacing: 0.02em;
+  }
+  .host-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .host-chip {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink);
+    background: var(--paper-2);
+    border: 1px solid var(--line-2);
+    padding: 3px 8px;
+    border-radius: 999px;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .host-chip:hover {
+    background: var(--terracotta-soft);
+    border-color: var(--terracotta);
+  }
+
+  /* "+ add provider" inline link in the greeting strip — shown only when at
+     least one provider slot is still empty. */
+  .add-provider {
+    margin-left: 6px;
+    font-size: 12px;
+    color: var(--terracotta);
+    font-style: italic;
+    font-family: var(--font-display);
+  }
+  .add-provider:hover { text-decoration: underline; }
   .err {
     margin: 0;
     color: var(--plum);

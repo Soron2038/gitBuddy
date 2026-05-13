@@ -26,6 +26,11 @@ export interface Viewer {
   name: string | null;
 }
 
+export interface GitLabStatus {
+  viewer: Viewer;
+  base_url: string;
+}
+
 export interface Repo {
   id: string;
   owner: string;
@@ -109,24 +114,29 @@ export interface CiRun {
 
 // ── Tauri commands ─────────────────────────────────────────────────────────
 
-/** Returns the currently-connected GitHub viewer, or null if no account is set. */
-export const ghStatus = (): Promise<Viewer | null> => invoke('gh_status');
+// ── Per-provider auth ──────────────────────────────────────────────────────
 
-/** Verifies a GitHub PAT, stores it in the Keychain, and activates it. */
+export const ghStatus = (): Promise<Viewer | null> => invoke('gh_status');
 export const ghSetToken = (token: string): Promise<Viewer> =>
   invoke('gh_set_token', { token });
 
+export const glStatus = (): Promise<GitLabStatus | null> => invoke('gl_status');
+export const glSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
+  invoke('gl_set_token', { token, baseUrl });
+
+// ── Aggregated data (across all connected providers) ───────────────────────
+
 /** Items where the user is assigned, review-requested, authored, or mentioned. */
-export const ghListWaiting = (): Promise<WaitingItem[]> => invoke('gh_list_waiting');
+export const listWaiting = (): Promise<WaitingItem[]> => invoke('list_waiting');
 
-/** All repos the viewer can see — owned, collaborator, or org member. */
-export const ghListRepos = (): Promise<Repo[]> => invoke('gh_list_repos');
+/** All repos visible to any connected provider. */
+export const listRepos = (): Promise<Repo[]> => invoke('list_repos');
 
-/** Latest release per recently-pushed repo, sorted by publication date. */
-export const ghListReleases = (): Promise<Release[]> => invoke('gh_list_releases');
+/** Latest release per recently-active repo. GitHub only for now. */
+export const listReleases = (): Promise<Release[]> => invoke('list_releases');
 
-/** Latest CI workflow run on each repo's default branch. */
-export const ghListCi = (): Promise<CiRun[]> => invoke('gh_list_ci');
+/** Latest CI workflow run on each repo's default branch. GitHub only for now. */
+export const listCi = (): Promise<CiRun[]> => invoke('list_ci');
 
 /** Scan configured roots and report every local checkout with diagnostics. */
 export const listLocalRepos = (): Promise<LocalRepo[]> => invoke('list_local_repos');

@@ -17,6 +17,10 @@ pub struct Settings {
     /// of the always-skip list in `local_index::SKIP_DIRS`.
     #[serde(default)]
     pub scan_ignore: Vec<String>,
+    /// Base URL for the connected GitLab instance (e.g. "https://gitlab.com"
+    /// or "https://gitlab.gwdg.de"). The token itself lives in the Keychain.
+    #[serde(default)]
+    pub gitlab_base_url: Option<String>,
 }
 
 impl Default for Settings {
@@ -24,6 +28,7 @@ impl Default for Settings {
         Self {
             scan_roots: default_scan_roots(),
             scan_ignore: Vec::new(),
+            gitlab_base_url: None,
         }
     }
 }
