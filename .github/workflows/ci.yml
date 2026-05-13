@@ -37,9 +37,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # actions-rust-lang/setup-rust-toolchain puts ~/.cargo/bin at the front
+      # of $GITHUB_PATH. On macos-14 runners /usr/local/bin/cargo is a
+      # rustup-init shim that doesn't accept subcommands like `fmt`; without
+      # the prepend the shim wins and `cargo fmt` fails with
+      # "unexpected argument 'fmt'".
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: stable
           components: clippy, rustfmt
 
       - name: Cache cargo registry & build
@@ -70,7 +76,9 @@ jobs:
           cache: "npm"
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
