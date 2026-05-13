@@ -15,6 +15,8 @@
     indexLocalByRemote,
     localKeyForRepo,
     providerLabel,
+    providerChipText,
+    providerCssClass,
     type Viewer,
     type GitLabStatus,
     type WaitingItem,
@@ -255,15 +257,6 @@
     if (mins < 60 * 24 * 30) return `${Math.floor(mins / (60 * 24))}d`;
     if (mins < 60 * 24 * 365) return `${Math.floor(mins / (60 * 24 * 30))}mo`;
     return `${Math.floor(mins / (60 * 24 * 365))}y`;
-  }
-
-  function providerInitial(p: Repo): string {
-    return ({
-      github: 'gh',
-      gitlab: 'gl',
-      codeberg: 'cb',
-      'mpsd-gitlab': 'mp',
-    } as const)[p.provider];
   }
 
   /** Shorten an absolute path for compact display: replace $HOME with `~`
@@ -549,7 +542,7 @@
                   <span class="meta">
                     {item.repo} <span class="dot">·</span>
                     <span class="reason">{item.reason}</span>
-                    <span class="prov-tag">{providerLabel[item.provider]}</span>
+                    <span class="prov-tag">{providerLabel(item)}</span>
                   </span>
                 </span>
                 <span class="age">{item.age_human}</span>
@@ -603,7 +596,7 @@
               {@const localDiag = local?.[0]}
               {@const ci = ciByRepo.get(r.id) ?? 'none'}
               <button class="row repo-row" type="button" onclick={() => openExternal(r.html_url)}>
-                <span class="pchip">{providerInitial(r)}</span>
+                <span class="pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
                 <span class="body">
                   <span class="title">
                     {#if local}
@@ -1016,7 +1009,9 @@
   .chip.is { background: var(--terracotta-soft); color: #A0431F; }
   .chip.mr { background: var(--butter-soft); color: #9A6E1A; }
   /* Repo rows reuse the .row layout but the leading chip is the provider
-     glyph instead of an item kind. */
+     glyph instead of an item kind. Colour distinguishes provider type at
+     a glance — black for GitHub, GitLab-orange for gitlab.com, plum for
+     any self-hosted GitLab, teal for Codeberg/Gitea. */
   .repo-row .pchip {
     width: 26px; height: 26px;
     border-radius: var(--r-sm);
@@ -1026,10 +1021,13 @@
     font-weight: 600;
     letter-spacing: 0.04em;
     margin-top: 1px;
-    background: #2E211B;
     color: var(--paper);
     text-transform: lowercase;
   }
+  .repo-row .pchip.gh      { background: #2E211B; }
+  .repo-row .pchip.gl      { background: linear-gradient(135deg, #E89C5C, #C66243); }
+  .repo-row .pchip.gl-self { background: linear-gradient(135deg, #B6A5C9, #6E5E80); }
+  .repo-row .pchip.cb      { background: linear-gradient(135deg, #8DBBC9, #4E7A8A); }
   .repo-row .title {
     font-size: 13.5px;
     line-height: 1.3;

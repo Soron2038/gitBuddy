@@ -48,12 +48,74 @@ export interface Repo {
   pushed_at: string | null;
 }
 
-export const providerLabel: Record<Provider, string> = {
-  github: 'GitHub',
-  gitlab: 'GitLab',
-  codeberg: 'Codeberg',
-  'mpsd-gitlab': 'MPSD',
-};
+/** Short display label for the provider, derived from the canonical URL on
+ *  the item so self-hosted GitLab instances show their actual hostname
+ *  (e.g. "gitlab.gwdg.de") rather than a stub "MPSD" placeholder. */
+export function providerLabel(item: { provider: Provider; url?: string; html_url?: string }): string {
+  switch (item.provider) {
+    case 'github':
+      return 'GitHub';
+    case 'gitlab':
+      return 'GitLab';
+    case 'codeberg':
+      return 'Codeberg';
+    case 'mpsd-gitlab':
+      return extractHost(item.url ?? item.html_url ?? '') || 'GitLab';
+  }
+}
+
+/** Two-character chip text. For self-hosted GitLab we derive a slug from the
+ *  hostname (e.g. "gitlab.gwdg.de" → "gw", "gitlab.mpsd.mpg.de" → "mp") so
+ *  the user can tell different instances apart at a glance. */
+export function providerChipText(item: { provider: Provider; url?: string; html_url?: string }): string {
+  switch (item.provider) {
+    case 'github':
+      return 'gh';
+    case 'gitlab':
+      return 'gl';
+    case 'codeberg':
+      return 'cb';
+    case 'mpsd-gitlab': {
+      const host = extractHost(item.url ?? item.html_url ?? '');
+      return shortHostSlug(host);
+    }
+  }
+}
+
+/** CSS class to colour the chip. Self-hosted GitLab keeps a plum tint so it
+ *  reads as "GitLab, but not the .com one". */
+export function providerCssClass(provider: Provider): string {
+  switch (provider) {
+    case 'github':
+      return 'gh';
+    case 'gitlab':
+      return 'gl';
+    case 'codeberg':
+      return 'cb';
+    case 'mpsd-gitlab':
+      return 'gl-self';
+  }
+}
+
+function extractHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return '';
+  }
+}
+
+/** "gitlab.gwdg.de" → "gw", "gitlab.mpsd.mpg.de" → "mp", "git.example.com" → "ex". */
+function shortHostSlug(host: string): string {
+  if (!host) return 'gl';
+  const parts = host.split('.');
+  // Skip a leading "gitlab" / "git" / "code" subdomain so the slug reflects
+  // the instance owner rather than the product name.
+  const skip = new Set(['gitlab', 'git', 'code']);
+  const idx = parts[0] && skip.has(parts[0].toLowerCase()) ? 1 : 0;
+  const seg = parts[idx] ?? 'gl';
+  return seg.slice(0, 2).toLowerCase();
+}
 
 /** Fallback host portion when a Repo doesn't have a usable html_url. Only
  *  applies to gitlab.com / github.com / codeberg.org — for self-hosted
