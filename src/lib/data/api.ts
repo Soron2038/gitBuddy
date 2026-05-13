@@ -96,6 +96,17 @@ export interface Release {
   age_human: string;
 }
 
+export type CiStatus = 'ok' | 'fail' | 'run' | 'cancelled' | 'none';
+
+export interface CiRun {
+  repo_id: string;
+  repo_full_name: string;
+  status: CiStatus;
+  html_url: string | null;
+  branch: string | null;
+  workflow_name: string | null;
+}
+
 // ── Tauri commands ─────────────────────────────────────────────────────────
 
 /** Returns the currently-connected GitHub viewer, or null if no account is set. */
@@ -113,6 +124,9 @@ export const ghListRepos = (): Promise<Repo[]> => invoke('gh_list_repos');
 
 /** Latest release per recently-pushed repo, sorted by publication date. */
 export const ghListReleases = (): Promise<Release[]> => invoke('gh_list_releases');
+
+/** Latest CI workflow run on each repo's default branch. */
+export const ghListCi = (): Promise<CiRun[]> => invoke('gh_list_ci');
 
 /** Scan configured roots and report every local checkout with diagnostics. */
 export const listLocalRepos = (): Promise<LocalRepo[]> => invoke('list_local_repos');

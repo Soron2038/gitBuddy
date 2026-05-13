@@ -121,6 +121,15 @@ pub async fn gh_list_releases(
     provider.list_releases().await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn gh_list_ci(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<CiRun>, String> {
+    let provider = state.github.read().await.clone();
+    let Some(provider) = provider else {
+        return Ok(Vec::new());
+    };
+    provider.list_ci().await.map_err(|e| e.to_string())
+}
+
 // ── M3: local index ─────────────────────────────────────────────────────────
 
 /// Walk the configured scan roots and return every Git checkout found, with

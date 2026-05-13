@@ -62,6 +62,36 @@ pub struct Viewer {
     pub name: Option<String>,
 }
 
+/// Coarse CI state collapsed from the provider's richer status/conclusion
+/// matrix into the four buckets the UI cares about: green / red / spinning /
+/// nothing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CiStatus {
+    /// Workflow completed successfully.
+    Ok,
+    /// Workflow failed, timed out, or requires action.
+    Fail,
+    /// Currently queued or running.
+    Run,
+    /// Cancelled or skipped — not a failure but not a pass either.
+    Cancelled,
+    /// Repo has no CI configured, or no workflow runs found.
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiRun {
+    pub repo_id: String,
+    /// "owner/name" — useful when the frontend wants to render CI rows
+    /// independently of the repo list.
+    pub repo_full_name: String,
+    pub status: CiStatus,
+    pub html_url: Option<String>,
+    pub branch: Option<String>,
+    pub workflow_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Release {
     pub repo_id: String,

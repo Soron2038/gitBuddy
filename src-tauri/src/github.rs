@@ -6,7 +6,9 @@
 //! single-digit account counts and avoids hand-rolling a GraphQL client for
 //! milestone one of the providers.
 
-use crate::types::{ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem};
+use crate::types::{
+    CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
+};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -185,6 +187,116 @@ impl GitHubProvider {
 
         releases.sort_by(|a, b| b.published_at.cmp(&a.published_at));
         Ok(releases)
+    }
+
+    /// Latest CI workflow run on each repo's default branch, for the N most-
+    /// recently-pushed repos. Used to paint a coloured status dot next to
+    /// each repo row in the UI.
+    pub async fn list_ci(&self) -> Result<Vec<CiRun>> {
+        const MAX_REPOS_TO_CHECK: usize = 60;
+
+        let mut repos = self.list_repos().await?;
+        repos.truncate(MAX_REPOS_TO_CHECK);
+
+        let mut handles = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let client = self.client.clone();
+            let token = self.token.clone();
+            handles.push(tokio::spawn(async move {
+                fetch_latest_ci_run(&client, &token, &repo).await
+            }));
+        }
+
+        let mut runs = Vec::new();
+        for h in handles {
+            if let Ok(Ok(Some(r))) = h.await {
+                runs.push(r);
+            }
+        }
+        Ok(runs)
+    }
+}
+
+async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Result<Option<CiRun>> {
+    let url = format!("{API_BASE}/repos/{}/{}/actions/runs", repo.owner, repo.name);
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Accept", ACCEPT)
+        .query(&[("branch", repo.default_branch.as_str()), ("per_page", "1")])
+        .send()
+        .await?;
+
+    match resp.status() {
+        s if s.is_success() => {}
+        // Actions not enabled or repo doesn't exist for this branch — emit
+        // a "no CI" marker rather than failing the batch.
+        StatusCode::NOT_FOUND => {
+            return Ok(Some(CiRun {
+                repo_id: repo.id.clone(),
+                repo_full_name: format!("{}/{}", repo.owner, repo.name),
+                status: CiStatus::None,
+                html_url: None,
+                branch: Some(repo.default_branch.clone()),
+                workflow_name: None,
+            }));
+        }
+        StatusCode::UNAUTHORIZED => return Err(GitHubError::Unauthorized),
+        // 403 can happen when the repo's owner has disabled actions for
+        // forks; treat it the same as "no CI" to keep the batch flowing.
+        StatusCode::FORBIDDEN => return Ok(None),
+        s => return Err(GitHubError::HttpStatus(s)),
+    }
+
+    #[derive(Deserialize)]
+    struct WorkflowRunsResp {
+        workflow_runs: Vec<WorkflowRun>,
+    }
+    #[derive(Deserialize)]
+    struct WorkflowRun {
+        status: String,
+        conclusion: Option<String>,
+        html_url: String,
+        head_branch: Option<String>,
+        name: Option<String>,
+    }
+
+    let body: WorkflowRunsResp = resp.json().await?;
+    let Some(run) = body.workflow_runs.into_iter().next() else {
+        return Ok(Some(CiRun {
+            repo_id: repo.id.clone(),
+            repo_full_name: format!("{}/{}", repo.owner, repo.name),
+            status: CiStatus::None,
+            html_url: None,
+            branch: Some(repo.default_branch.clone()),
+            workflow_name: None,
+        }));
+    };
+
+    Ok(Some(CiRun {
+        repo_id: repo.id.clone(),
+        repo_full_name: format!("{}/{}", repo.owner, repo.name),
+        status: collapse_ci_status(&run.status, run.conclusion.as_deref()),
+        html_url: Some(run.html_url),
+        branch: run.head_branch,
+        workflow_name: run.name,
+    }))
+}
+
+/// Collapse GitHub's status × conclusion matrix into our four-state enum.
+/// `status` is one of queued / in_progress / completed; `conclusion` is only
+/// meaningful when status is completed.
+fn collapse_ci_status(status: &str, conclusion: Option<&str>) -> CiStatus {
+    if status != "completed" {
+        return CiStatus::Run;
+    }
+    match conclusion {
+        Some("success") => CiStatus::Ok,
+        Some("failure" | "timed_out" | "action_required" | "startup_failure") => CiStatus::Fail,
+        Some("cancelled" | "skipped") => CiStatus::Cancelled,
+        Some("neutral") => CiStatus::Ok,
+        // stale, or some future conclusion value we don't recognise yet
+        _ => CiStatus::None,
     }
 }
 

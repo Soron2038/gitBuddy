@@ -8,6 +8,7 @@
     ghListWaiting,
     ghListRepos,
     ghListReleases,
+    ghListCi,
     listLocalRepos,
     indexLocalByRemote,
     localKeyForRepo,
@@ -17,6 +18,8 @@
     type Repo,
     type LocalRepo,
     type Release,
+    type CiRun,
+    type CiStatus,
   } from '$lib/data/api';
 
   type Tab = 'waiting' | 'repos' | 'releases';
@@ -30,6 +33,8 @@
   let releases: Release[] = $state([]);
   let releasesLoaded = $state(false);
   let releasesLoading = $state(false);
+  let ciRuns: CiRun[] = $state([]);
+  let ciByRepo = $derived(new Map(ciRuns.map((r) => [r.repo_id, r.status] as [string, CiStatus])));
   let activeTab: Tab = $state('waiting');
   let loading = $state(true);
   let refreshing = $state(false);
@@ -111,6 +116,7 @@
       ];
       if (reposLoaded) {
         promises.push(ghListRepos().then((v) => (repos = v)));
+        promises.push(ghListCi().then((v) => (ciRuns = v)).catch(() => {}));
       }
       if (releasesLoaded) {
         promises.push(ghListReleases().then((v) => (releases = v)));
@@ -124,14 +130,20 @@
     }
   }
 
-  // Lazy-load repos the first time the user switches to that tab. With 100s
-  // of repos this can take a couple seconds, so we skip it on initial open
+  // Lazy-load repos + their CI status the first time the user switches to
+  // the Repos tab. With 100s of repos this can take a couple seconds total
+  // (CI is one extra request per repo), so we skip it on initial open
   // unless the user actually asked.
   async function ensureRepos() {
     if (reposLoaded || reposLoading || !viewer) return;
     reposLoading = true;
     try {
-      repos = await ghListRepos();
+      const [fetchedRepos, fetchedCi] = await Promise.all([
+        ghListRepos(),
+        ghListCi().catch(() => [] as CiRun[]),
+      ]);
+      repos = fetchedRepos;
+      ciRuns = fetchedCi;
       reposLoaded = true;
     } catch (e) {
       error = String(e);
@@ -429,6 +441,7 @@
             {#each repos as r (r.id)}
               {@const local = localByKey.get(localKeyForRepo(r))}
               {@const localDiag = local?.[0]}
+              {@const ci = ciByRepo.get(r.id) ?? 'none'}
               <button class="row repo-row" type="button" onclick={() => openExternal(r.html_url)}>
                 <span class="pchip">{providerInitial(r)}</span>
                 <span class="body">
@@ -438,6 +451,12 @@
                         class="local-flag"
                         class:dirty={localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged + localDiag.untracked > 0 || localDiag.ahead > 0)}
                         title={local.length === 1 ? `Cloned at ${localDiag?.path}` : `Cloned ${local.length}× — first at ${localDiag?.path}`}
+                      ></span>
+                    {/if}
+                    {#if ci !== 'none'}
+                      <span
+                        class="ci-dot ci-{ci}"
+                        title={ci === 'ok' ? 'CI passing on default branch' : ci === 'fail' ? 'CI failing on default branch' : ci === 'run' ? 'CI running' : 'CI cancelled'}
                       ></span>
                     {/if}
                     <span class="rowner">{r.owner}</span><span class="rslash">/</span>{r.name}
@@ -790,6 +809,30 @@
   }
   .local-flag.dirty {
     background: var(--terracotta);
+  }
+  /* CI status dot — a ring rather than a fill so it visually distinguishes
+     itself from the solid local-clone dot above. */
+  .ci-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 6px;
+    border-radius: 50%;
+    border: 1.5px solid var(--ink-4);
+    vertical-align: 1px;
+    background: transparent;
+  }
+  .ci-dot.ci-ok   { border-color: var(--sage); background: var(--sage); }
+  .ci-dot.ci-fail { border-color: var(--terracotta); background: var(--terracotta); }
+  .ci-dot.ci-run  {
+    border-color: var(--butter);
+    background: var(--butter);
+    animation: ci-pulse 1.4s ease-in-out infinite;
+  }
+  .ci-dot.ci-cancelled { border-color: var(--ink-3); background: transparent; }
+  @keyframes ci-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.45; }
   }
   .meta .warn {
     color: var(--terracotta);
