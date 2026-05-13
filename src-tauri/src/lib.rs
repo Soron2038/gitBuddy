@@ -41,6 +41,7 @@ pub fn run() {
             commands::gh_status,
             commands::gh_list_waiting,
             commands::gh_list_repos,
+            commands::gh_list_releases,
             commands::list_local_repos,
             commands::get_settings,
             commands::save_settings,

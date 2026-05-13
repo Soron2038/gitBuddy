@@ -63,6 +63,24 @@ pub struct Viewer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Release {
+    pub repo_id: String,
+    /// "owner/name" for display.
+    pub repo_full_name: String,
+    pub provider: Provider,
+    pub tag: String,
+    /// Release title; falls back to the tag if the publisher didn't set one.
+    pub name: String,
+    pub published_at: String,
+    pub html_url: String,
+    pub is_prerelease: bool,
+    /// True when published within the last 7 days — drives the "NEW" badge.
+    pub is_new: bool,
+    /// Pre-rendered relative age, e.g. "2d", "3w".
+    pub age_human: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
     /// Provider-stable identifier (e.g. GitHub numeric `id` as a string).
     pub id: String,

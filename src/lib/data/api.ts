@@ -83,6 +83,19 @@ export interface Settings {
   scan_ignore: string[];
 }
 
+export interface Release {
+  repo_id: string;
+  repo_full_name: string;
+  provider: Provider;
+  tag: string;
+  name: string;
+  published_at: string;
+  html_url: string;
+  is_prerelease: boolean;
+  is_new: boolean;
+  age_human: string;
+}
+
 // ── Tauri commands ─────────────────────────────────────────────────────────
 
 /** Returns the currently-connected GitHub viewer, or null if no account is set. */
@@ -97,6 +110,9 @@ export const ghListWaiting = (): Promise<WaitingItem[]> => invoke('gh_list_waiti
 
 /** All repos the viewer can see — owned, collaborator, or org member. */
 export const ghListRepos = (): Promise<Repo[]> => invoke('gh_list_repos');
+
+/** Latest release per recently-pushed repo, sorted by publication date. */
+export const ghListReleases = (): Promise<Release[]> => invoke('gh_list_releases');
 
 /** Scan configured roots and report every local checkout with diagnostics. */
 export const listLocalRepos = (): Promise<LocalRepo[]> => invoke('list_local_repos');

@@ -6,7 +6,7 @@
 //! single-digit account counts and avoids hand-rolling a GraphQL client for
 //! milestone one of the providers.
 
-use crate::types::{ItemKind, ItemReason, Provider, Repo, Viewer, WaitingItem};
+use crate::types::{ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -150,6 +150,105 @@ impl GitHubProvider {
 
         Ok(all)
     }
+
+    /// Latest release per repo, for the N most-recently-pushed repos the
+    /// viewer has access to. Bounded because /releases/latest is one call
+    /// per repo and we don't want to spend the rate-limit budget on dormant
+    /// archives.
+    pub async fn list_releases(&self) -> Result<Vec<Release>> {
+        const MAX_REPOS_TO_CHECK: usize = 60;
+
+        let mut repos = self.list_repos().await?;
+        repos.truncate(MAX_REPOS_TO_CHECK);
+
+        let mut handles = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let client = self.client.clone();
+            let token = self.token.clone();
+            handles.push(tokio::spawn(async move {
+                fetch_latest_release(&client, &token, &repo).await
+            }));
+        }
+
+        let now = Utc::now();
+        let mut releases = Vec::new();
+        for h in handles {
+            // Skip individual failures rather than fail the whole batch — a
+            // single repo erroring out (e.g. abuse-detection 403) shouldn't
+            // blank the Releases tab.
+            if let Ok(Ok(Some(mut r))) = h.await {
+                r.is_new = within_days(&r.published_at, &now, 7);
+                r.age_human = humanise_age(&r.published_at, now);
+                releases.push(r);
+            }
+        }
+
+        releases.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+        Ok(releases)
+    }
+}
+
+async fn fetch_latest_release(
+    client: &Client,
+    token: &str,
+    repo: &Repo,
+) -> Result<Option<Release>> {
+    let url = format!(
+        "{API_BASE}/repos/{}/{}/releases/latest",
+        repo.owner, repo.name
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Accept", ACCEPT)
+        .send()
+        .await?;
+
+    match resp.status() {
+        s if s.is_success() => {}
+        // 404 just means "no releases yet" — not an error.
+        StatusCode::NOT_FOUND => return Ok(None),
+        StatusCode::UNAUTHORIZED => return Err(GitHubError::Unauthorized),
+        s => return Err(GitHubError::HttpStatus(s)),
+    }
+
+    #[derive(Deserialize)]
+    struct RawRelease {
+        tag_name: String,
+        name: Option<String>,
+        html_url: String,
+        published_at: Option<String>,
+        prerelease: bool,
+    }
+
+    let raw: RawRelease = resp.json().await?;
+    let Some(published_at) = raw.published_at else {
+        return Ok(None);
+    };
+
+    let name = raw
+        .name
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| raw.tag_name.clone());
+
+    Ok(Some(Release {
+        repo_id: repo.id.clone(),
+        repo_full_name: format!("{}/{}", repo.owner, repo.name),
+        provider: Provider::Github,
+        tag: raw.tag_name,
+        name,
+        published_at,
+        html_url: raw.html_url,
+        is_prerelease: raw.prerelease,
+        is_new: false, // filled in by list_releases against a consistent `now`
+        age_human: String::new(),
+    }))
+}
+
+fn within_days(timestamp: &str, now: &DateTime<Utc>, days: i64) -> bool {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|t| (*now - t.with_timezone(&Utc)).num_days() <= days)
+        .unwrap_or(false)
 }
 
 #[derive(Deserialize)]

@@ -7,6 +7,7 @@
     ghSetToken,
     ghListWaiting,
     ghListRepos,
+    ghListReleases,
     listLocalRepos,
     indexLocalByRemote,
     localKeyForRepo,
@@ -15,6 +16,7 @@
     type WaitingItem,
     type Repo,
     type LocalRepo,
+    type Release,
   } from '$lib/data/api';
 
   type Tab = 'waiting' | 'repos' | 'releases';
@@ -25,6 +27,9 @@
   let reposLoaded = $state(false);
   let reposLoading = $state(false);
   let locals: LocalRepo[] = $state([]);
+  let releases: Release[] = $state([]);
+  let releasesLoaded = $state(false);
+  let releasesLoading = $state(false);
   let activeTab: Tab = $state('waiting');
   let loading = $state(true);
   let refreshing = $state(false);
@@ -107,6 +112,9 @@
       if (reposLoaded) {
         promises.push(ghListRepos().then((v) => (repos = v)));
       }
+      if (releasesLoaded) {
+        promises.push(ghListReleases().then((v) => (releases = v)));
+      }
       await Promise.all(promises);
       lastSyncedAt = new Date();
     } catch (e) {
@@ -132,9 +140,26 @@
     }
   }
 
+  // Releases are even more expensive (one /releases/latest per repo, capped
+  // to 60 in the backend), so we also defer them until the tab is opened.
+  async function ensureReleases() {
+    if (releasesLoaded || releasesLoading || !viewer) return;
+    releasesLoading = true;
+    try {
+      releases = await ghListReleases();
+      releasesLoaded = true;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      releasesLoading = false;
+    }
+  }
+
   $effect(() => {
     if (activeTab === 'repos' && viewer) {
       ensureRepos();
+    } else if (activeTab === 'releases' && viewer) {
+      ensureReleases();
     }
   });
 
@@ -424,11 +449,42 @@
             {/each}
           {/if}
         {:else}
-          <div class="empty">
-            <Buddy size={48} />
-            <p>Coming in M4.</p>
-            <small>Release feed needs the per-repo /releases endpoint.</small>
-          </div>
+          {#if releasesLoading && !releasesLoaded}
+            <div class="empty"><p class="loading-text">Loading releases…</p></div>
+          {:else if releases.length === 0}
+            <div class="empty">
+              <Buddy size={48} />
+              <p>No releases found.</p>
+              <small>None of your most-recent repos have published a release.</small>
+            </div>
+          {:else}
+            {#each releases as r (r.repo_id)}
+              <button class="row release-row" type="button" onclick={() => openExternal(r.html_url)}>
+                <span class="pchip rel-chip">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 2 4 7v10l8 5 8-5V7z" />
+                    <path d="m4 7 8 5 8-5" />
+                    <path d="M12 22V12" />
+                  </svg>
+                </span>
+                <span class="body">
+                  <span class="title">
+                    {r.name}
+                    {#if r.is_prerelease}<span class="badge-pre">pre</span>{/if}
+                  </span>
+                  <span class="meta">
+                    {r.repo_full_name}
+                    <span class="dot">·</span>
+                    <span class="tag">{r.tag}</span>
+                  </span>
+                </span>
+                <span class="age">
+                  {r.age_human}
+                  {#if r.is_new}<span class="new-badge">NEW</span>{/if}
+                </span>
+              </button>
+            {/each}
+          {/if}
         {/if}
       </div>
     {/if}
@@ -754,6 +810,46 @@
   .orphan-chip {
     background: var(--cream-3) !important;
     color: var(--ink-3) !important;
+  }
+
+  /* Release rows reuse the .row layout. The chip uses a small package /
+     octahedron icon to distinguish them from repo or waiting rows. */
+  .release-row .pchip.rel-chip {
+    background: var(--butter-soft);
+    color: #8A5C12;
+  }
+  .release-row .title {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .release-row .tag {
+    font-family: var(--font-mono);
+    color: var(--ink-2);
+  }
+  .badge-pre {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--plum);
+    background: var(--plum-soft);
+    padding: 1px 5px;
+    border-radius: 999px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .new-badge {
+    display: inline-block;
+    margin-left: 5px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--terracotta);
+    background: var(--terracotta-soft);
+    padding: 1px 5px;
+    border-radius: 999px;
+    letter-spacing: 0.06em;
+    vertical-align: 1px;
+    font-style: normal;
   }
   .title {
     font-size: 13.5px;
