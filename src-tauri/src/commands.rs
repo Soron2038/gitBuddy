@@ -113,6 +113,16 @@ pub async fn gh_status(
 }
 
 #[tauri::command]
+pub async fn gh_disconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Delete the keychain entry before clearing in-memory state so a crash
+    // mid-disconnect doesn't leave a stale token that would re-auth on
+    // next launch.
+    let _ = keychain::delete(GH_KEYCHAIN_KEY).await;
+    *state.github.write().await = None;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn gl_set_token(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
@@ -158,6 +168,21 @@ pub struct GitLabStatus {
 }
 
 #[tauri::command]
+pub async fn gl_disconnect(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let _ = keychain::delete(GL_KEYCHAIN_KEY).await;
+    *state.gitlab.write().await = None;
+    // Clear the base URL too so the next `+ Add` flow starts from
+    // gitlab.com rather than re-suggesting the disconnected host.
+    let mut s = settings::load(&app).unwrap_or_default();
+    s.gitlab_base_url = None;
+    settings::save(&app, &s)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn cb_set_token(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
@@ -200,6 +225,38 @@ pub async fn cb_status(
 pub struct CodebergStatus {
     pub viewer: Viewer,
     pub base_url: String,
+}
+
+#[tauri::command]
+pub async fn cb_disconnect(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let _ = keychain::delete(CB_KEYCHAIN_KEY).await;
+    *state.codeberg.write().await = None;
+    let mut s = settings::load(&app).unwrap_or_default();
+    s.codeberg_base_url = None;
+    settings::save(&app, &s)?;
+    Ok(())
+}
+
+/// Reveal the main window and switch the app's activation policy to Regular
+/// so it can take focus normally. Mirrors the tray menu's "Open gitBuddy"
+/// item — exposed as a command so the popover can offer the same action.
+#[tauri::command]
+pub fn open_main(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("main window not found".into());
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    }
+    window.show().map_err(|e| e.to_string())?;
+    let _ = window.unminimize();
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ── Aggregated data commands ───────────────────────────────────────────────

@@ -17,6 +17,10 @@
     glSetToken,
     cbStatus,
     cbSetToken,
+    ghDisconnect,
+    glDisconnect,
+    cbDisconnect,
+    openMainWindow,
     listWaiting,
     listRepos,
     listReleases,
@@ -376,6 +380,39 @@
     error = null;
   }
 
+  /** Disconnect a provider. Confirms first so a misclick can't quietly
+   *  drop a session — re-pasting a PAT is annoying. */
+  async function disconnect(kind: 'github' | 'gitlab' | 'codeberg') {
+    const label =
+      kind === 'github' ? 'GitHub' : kind === 'gitlab' ? 'GitLab' : 'Codeberg';
+    if (!confirm(`Disconnect ${label}? The stored token will be removed from your Keychain.`)) {
+      return;
+    }
+    error = null;
+    try {
+      if (kind === 'github') {
+        await ghDisconnect();
+        viewer = null;
+      } else if (kind === 'gitlab') {
+        await glDisconnect();
+        gl = null;
+      } else {
+        await cbDisconnect();
+        cb = null;
+      }
+      // Re-fetch waiting items so the disconnected provider's entries drop
+      // out of the list immediately.
+      if (connected) {
+        items = await listWaiting();
+        lastSyncedAt = new Date();
+      } else {
+        items = [];
+      }
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   // ── Settings actions ───────────────────────────────────────────────────
 
   function openSettings() {
@@ -679,7 +716,12 @@
           <path d="M21 12a9 9 0 1 1-3-6.7" /><path d="M21 4v5h-5" />
         </svg>
       </button>
-      <button class="ib" data-tip="Open main window" aria-label="Open main window">
+      <button
+        class="ib"
+        data-tip="Open main window"
+        aria-label="Open main window"
+        onclick={() => void openMainWindow()}
+      >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M15 3h6v6" /><path d="M10 14 21 3" />
           <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
@@ -789,39 +831,77 @@
         <section class="set-sec">
           <h3>Connected <em>providers</em></h3>
           {#if !connected}
-            <p class="set-empty">None yet — close Settings and pick one to start.</p>
+            <p class="set-empty">No providers yet.</p>
           {:else}
             <ul class="prov-list">
               {#if viewer}
                 <li class="prov-row">
                   <span class="pchip gh">gh</span>
-                  <div>
+                  <div class="prov-meta">
                     <div class="prov-name">{viewer.name ?? viewer.login}</div>
                     <div class="prov-host">github.com</div>
                   </div>
+                  <button
+                    type="button"
+                    class="prov-disconnect"
+                    data-tip="Remove this account"
+                    onclick={() => disconnect('github')}
+                  >
+                    Disconnect
+                  </button>
                 </li>
               {/if}
               {#if gl}
                 <li class="prov-row">
                   <span class="pchip {gl.base_url.includes('gitlab.com') ? 'gl' : 'gl-self'}">
-                    {gl.base_url.includes('gitlab.com') ? 'gl' : providerChipText({ provider: 'mpsd-gitlab', html_url: gl.base_url })}
+                    {gl.base_url.includes('gitlab.com')
+                      ? 'gl'
+                      : providerChipText({ provider: 'mpsd-gitlab', html_url: gl.base_url })}
                   </span>
-                  <div>
+                  <div class="prov-meta">
                     <div class="prov-name">{gl.viewer.name ?? gl.viewer.login}</div>
                     <div class="prov-host">{new URL(gl.base_url).host}</div>
                   </div>
+                  <button
+                    type="button"
+                    class="prov-disconnect"
+                    data-tip="Remove this account"
+                    onclick={() => disconnect('gitlab')}
+                  >
+                    Disconnect
+                  </button>
                 </li>
               {/if}
               {#if cb}
                 <li class="prov-row">
                   <span class="pchip cb">cb</span>
-                  <div>
+                  <div class="prov-meta">
                     <div class="prov-name">{cb.viewer.name ?? cb.viewer.login}</div>
                     <div class="prov-host">{new URL(cb.base_url).host}</div>
                   </div>
+                  <button
+                    type="button"
+                    class="prov-disconnect"
+                    data-tip="Remove this account"
+                    onclick={() => disconnect('codeberg')}
+                  >
+                    Disconnect
+                  </button>
                 </li>
               {/if}
             </ul>
+          {/if}
+          {#if canAddAny}
+            <button
+              type="button"
+              class="set-add"
+              onclick={() => {
+                closeSettings();
+                startAddingProvider();
+              }}
+            >
+              + Add provider…
+            </button>
           {/if}
         </section>
 
@@ -1036,11 +1116,6 @@
           you're all caught up.
         {:else}
           {items.length} {items.length === 1 ? 'thing' : 'things'} need a look.
-        {/if}
-        {#if canAddAny}
-          <button type="button" class="add-provider" onclick={startAddingProvider}>
-            + add {canAddGithub && !canAddGitlab ? 'GitHub' : canAddGitlab && !canAddGithub ? 'GitLab' : 'provider'}
-          </button>
         {/if}
       </p>
 
@@ -1677,6 +1752,19 @@
     background: var(--paper-2);
     border: 1px solid var(--line);
     border-radius: var(--r-sm);
+  }
+  .prov-meta { flex: 1; min-width: 0; }
+  .prov-disconnect {
+    font-size: 11.5px;
+    color: var(--ink-3);
+    padding: 5px 10px;
+    border-radius: var(--r-sm);
+    background: transparent;
+    transition: background 0.15s, color 0.15s;
+  }
+  .prov-disconnect:hover {
+    background: var(--plum-soft);
+    color: var(--plum);
   }
   .prov-row .pchip {
     width: 26px; height: 26px;

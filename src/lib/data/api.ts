@@ -197,13 +197,21 @@ export const ghStatus = (): Promise<Viewer | null> => invoke('gh_status');
 export const ghSetToken = (token: string): Promise<Viewer> =>
   invoke('gh_set_token', { token });
 
+export const ghDisconnect = (): Promise<void> => invoke('gh_disconnect');
+
 export const glStatus = (): Promise<GitLabStatus | null> => invoke('gl_status');
 export const glSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
   invoke('gl_set_token', { token, baseUrl });
+export const glDisconnect = (): Promise<void> => invoke('gl_disconnect');
 
 export const cbStatus = (): Promise<CodebergStatus | null> => invoke('cb_status');
 export const cbSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
   invoke('cb_set_token', { token, baseUrl });
+export const cbDisconnect = (): Promise<void> => invoke('cb_disconnect');
+
+/** Reveal the main window. (Currently still shows stub data — proper
+ *  wiring to the live providers is on the roadmap.) */
+export const openMainWindow = (): Promise<void> => invoke('open_main');
 
 // ── Aggregated data (across all connected providers) ───────────────────────
 
