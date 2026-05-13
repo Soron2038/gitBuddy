@@ -32,6 +32,18 @@
 
   let localByKey = $derived(indexLocalByRemote(locals));
 
+  /** Local repos whose `origin` doesn't match any of the user's known remote
+   *  accounts — typically scratch clones, abandoned forks, or repos hosted
+   *  somewhere we don't have a provider connected yet. Surfaced separately
+   *  so the user can spot disk-only state. */
+  let orphans = $derived(
+    locals.filter((l) => {
+      if (!l.remote || !l.remote.host) return true;
+      const key = `${l.remote.host}:${l.remote.owner}/${l.remote.name}`.toLowerCase();
+      return !repos.some((r) => localKeyForRepo(r) === key);
+    }),
+  );
+
   // Setup-form state (visible only when there's no connected account).
   let tokenInput = $state('');
   let connecting = $state(false);
@@ -142,6 +154,16 @@
       codeberg: 'cb',
       'mpsd-gitlab': 'mp',
     } as const)[p.provider];
+  }
+
+  /** Shorten an absolute path for compact display: replace $HOME with `~`
+   *  and trim to the last two path components if it's still too long. */
+  function shortenPath(p: string): string {
+    // The Rust side returns absolute paths; we don't know $HOME on the JS
+    // side without an extra Tauri call, so we just shorten cosmetically.
+    const parts = p.split('/').filter(Boolean);
+    if (parts.length <= 2) return p;
+    return `…/${parts.slice(-2).join('/')}`;
   }
 
   async function openExternal(url: string) {
@@ -332,6 +354,38 @@
               <small>Your account doesn't seem to have any visible repos.</small>
             </div>
           {:else}
+            {#if reposLoaded && orphans.length > 0}
+              <div class="section-h">
+                Local <em>orphans</em>
+                <span class="section-h-count">{orphans.length}</span>
+              </div>
+              {#each orphans as o (o.path)}
+                <div class="row repo-row orphan">
+                  <span class="pchip orphan-chip" title="No matching remote account">?</span>
+                  <span class="body">
+                    <span class="title">
+                      <span class="rowner">{shortenPath(o.path)}</span>
+                    </span>
+                    <span class="meta">
+                      {#if o.branch}{o.branch}{:else if o.detached}detached{:else}—{/if}
+                      {#if o.remote}<span class="dot">·</span> {o.remote.host || 'unknown host'}{/if}
+                      {#if o.dirty_staged + o.dirty_unstaged > 0}
+                        <span class="dot">·</span>
+                        <span class="warn">{o.dirty_staged + o.dirty_unstaged} uncommitted</span>
+                      {/if}
+                      {#if o.ahead > 0}
+                        <span class="dot">·</span>
+                        <span class="warn">{o.ahead} unpushed</span>
+                      {/if}
+                    </span>
+                  </span>
+                </div>
+              {/each}
+              <div class="section-h">
+                Remote <em>repos</em>
+                <span class="section-h-count">{repos.length}</span>
+              </div>
+            {/if}
             {#each repos as r (r.id)}
               {@const local = localByKey.get(localKeyForRepo(r))}
               {@const localDiag = local?.[0]}
@@ -669,6 +723,35 @@
   .meta .warn {
     color: var(--terracotta);
     font-weight: 500;
+  }
+
+  /* Section headers inside a tab panel (e.g. "Local orphans" + "Remote repos"
+     when both lists are non-empty in the Repos tab). */
+  .section-h {
+    padding: 14px 10px 6px;
+    font-family: var(--font-display);
+    font-size: 13.5px;
+    color: var(--ink-2);
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .section-h:first-child { padding-top: 4px; }
+  .section-h em { font-style: italic; color: var(--terracotta); }
+  .section-h-count {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-3);
+  }
+  .repo-row.orphan {
+    cursor: default;
+    opacity: 0.92;
+  }
+  .repo-row.orphan:hover { background: transparent; }
+  .orphan-chip {
+    background: var(--cream-3) !important;
+    color: var(--ink-3) !important;
   }
   .title {
     font-size: 13.5px;
