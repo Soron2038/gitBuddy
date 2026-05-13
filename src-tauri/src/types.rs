@@ -61,3 +61,27 @@ pub struct Viewer {
     pub avatar_url: Option<String>,
     pub name: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Repo {
+    /// Provider-stable identifier (e.g. GitHub numeric `id` as a string).
+    pub id: String,
+    pub owner: String,
+    pub name: String,
+    pub provider: Provider,
+    pub default_branch: String,
+    pub language: Option<String>,
+    pub description: Option<String>,
+    pub stars: u64,
+    pub html_url: String,
+    /// One of the SSH clone URLs the provider exposes, kept for the M3
+    /// local-clone matcher.
+    pub ssh_url: Option<String>,
+    /// The HTTPS clone URL — same purpose.
+    pub clone_url: Option<String>,
+    pub is_fork: bool,
+    pub is_private: bool,
+    /// RFC 3339 timestamp of the most recent push to the default branch,
+    /// used purely for sorting the repo list by recency.
+    pub pushed_at: Option<String>,
+}

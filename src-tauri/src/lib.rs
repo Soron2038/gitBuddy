@@ -38,6 +38,7 @@ pub fn run() {
             commands::gh_set_token,
             commands::gh_status,
             commands::gh_list_waiting,
+            commands::gh_list_repos,
         ])
         .setup(|app| {
             // gitBuddy lives in the menu bar — no dock icon by default.

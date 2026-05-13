@@ -6,7 +6,7 @@
 //! single-digit account counts and avoids hand-rolling a GraphQL client for
 //! milestone one of the providers.
 
-use crate::types::{ItemKind, ItemReason, Provider, Viewer, WaitingItem};
+use crate::types::{ItemKind, ItemReason, Provider, Repo, Viewer, WaitingItem};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -105,6 +105,93 @@ impl GitHubProvider {
         items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
         Ok(items)
+    }
+
+    /// All repos the viewer has explicit access to — owned, collaborator, or
+    /// organization member. Paginates through `/user/repos` up to a sane cap
+    /// (M2 doesn't need full pagination for an account with thousands of repos
+    /// yet; the M5 work will revisit this when multi-account is in).
+    pub async fn list_repos(&self) -> Result<Vec<Repo>> {
+        let mut all = Vec::new();
+        const PAGE_SIZE: u32 = 100;
+        const MAX_PAGES: u32 = 5; // 500 repos is plenty for M2
+
+        for page in 1..=MAX_PAGES {
+            let resp = self
+                .client
+                .get(format!("{API_BASE}/user/repos"))
+                .bearer_auth(&self.token)
+                .header("Accept", ACCEPT)
+                .query(&[
+                    ("per_page", PAGE_SIZE.to_string()),
+                    ("page", page.to_string()),
+                    ("sort", "pushed".to_string()),
+                    (
+                        "affiliation",
+                        "owner,collaborator,organization_member".into(),
+                    ),
+                ])
+                .send()
+                .await?;
+
+            match resp.status() {
+                s if s.is_success() => {}
+                StatusCode::UNAUTHORIZED => return Err(GitHubError::Unauthorized),
+                s => return Err(GitHubError::HttpStatus(s)),
+            }
+
+            let raw: Vec<RawRepo> = resp.json().await?;
+            let len = raw.len();
+            all.extend(raw.into_iter().map(Into::into));
+            if (len as u32) < PAGE_SIZE {
+                break;
+            }
+        }
+
+        Ok(all)
+    }
+}
+
+#[derive(Deserialize)]
+struct RawRepo {
+    id: u64,
+    name: String,
+    owner: RawOwner,
+    default_branch: Option<String>,
+    language: Option<String>,
+    description: Option<String>,
+    stargazers_count: u64,
+    html_url: String,
+    ssh_url: Option<String>,
+    clone_url: Option<String>,
+    fork: bool,
+    private: bool,
+    pushed_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawOwner {
+    login: String,
+}
+
+impl From<RawRepo> for Repo {
+    fn from(r: RawRepo) -> Self {
+        Self {
+            id: r.id.to_string(),
+            owner: r.owner.login,
+            name: r.name,
+            provider: Provider::Github,
+            default_branch: r.default_branch.unwrap_or_else(|| "main".into()),
+            language: r.language,
+            description: r.description,
+            stars: r.stargazers_count,
+            html_url: r.html_url,
+            ssh_url: r.ssh_url,
+            clone_url: r.clone_url,
+            is_fork: r.fork,
+            is_private: r.private,
+            pushed_at: r.pushed_at,
+        }
     }
 }
 

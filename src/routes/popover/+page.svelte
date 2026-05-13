@@ -6,15 +6,20 @@
     ghStatus,
     ghSetToken,
     ghListWaiting,
+    ghListRepos,
     providerLabel,
     type Viewer,
     type WaitingItem,
+    type Repo,
   } from '$lib/data/api';
 
   type Tab = 'waiting' | 'repos' | 'releases';
 
   let viewer: Viewer | null = $state(null);
   let items: WaitingItem[] = $state([]);
+  let repos: Repo[] = $state([]);
+  let reposLoaded = $state(false);
+  let reposLoading = $state(false);
   let activeTab: Tab = $state('waiting');
   let loading = $state(true);
   let refreshing = $state(false);
@@ -62,12 +67,59 @@
     error = null;
     try {
       items = await ghListWaiting();
+      // If repos were already loaded once, refresh them too so the user
+      // doesn't have to switch tabs to get fresh data.
+      if (reposLoaded) {
+        repos = await ghListRepos();
+      }
       lastSyncedAt = new Date();
     } catch (e) {
       error = String(e);
     } finally {
       refreshing = false;
     }
+  }
+
+  // Lazy-load repos the first time the user switches to that tab. With 100s
+  // of repos this can take a couple seconds, so we skip it on initial open
+  // unless the user actually asked.
+  async function ensureRepos() {
+    if (reposLoaded || reposLoading || !viewer) return;
+    reposLoading = true;
+    try {
+      repos = await ghListRepos();
+      reposLoaded = true;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      reposLoading = false;
+    }
+  }
+
+  $effect(() => {
+    if (activeTab === 'repos' && viewer) {
+      ensureRepos();
+    }
+  });
+
+  function repoAge(pushed_at: string | null): string {
+    if (!pushed_at) return '—';
+    const d = new Date(pushed_at);
+    const mins = Math.floor((Date.now() - d.getTime()) / 60_000);
+    if (mins < 60) return `${Math.max(1, mins)}m`;
+    if (mins < 60 * 24) return `${Math.floor(mins / 60)}h`;
+    if (mins < 60 * 24 * 30) return `${Math.floor(mins / (60 * 24))}d`;
+    if (mins < 60 * 24 * 365) return `${Math.floor(mins / (60 * 24 * 30))}mo`;
+    return `${Math.floor(mins / (60 * 24 * 365))}y`;
+  }
+
+  function providerInitial(p: Repo): string {
+    return ({
+      github: 'gh',
+      gitlab: 'gl',
+      codeberg: 'cb',
+      'mpsd-gitlab': 'mp',
+    } as const)[p.provider];
   }
 
   async function openExternal(url: string) {
@@ -248,11 +300,39 @@
               </button>
             {/each}
           {/if}
+        {:else if activeTab === 'repos'}
+          {#if reposLoading && !reposLoaded}
+            <div class="empty"><p class="loading-text">Loading repos…</p></div>
+          {:else if repos.length === 0}
+            <div class="empty">
+              <Buddy size={48} />
+              <p>No repos found.</p>
+              <small>Your account doesn't seem to have any visible repos.</small>
+            </div>
+          {:else}
+            {#each repos as r (r.id)}
+              <button class="row repo-row" type="button" onclick={() => openExternal(r.html_url)}>
+                <span class="pchip">{providerInitial(r)}</span>
+                <span class="body">
+                  <span class="title">
+                    <span class="rowner">{r.owner}</span><span class="rslash">/</span>{r.name}
+                  </span>
+                  <span class="meta">
+                    {r.default_branch}
+                    {#if r.language}<span class="dot">·</span> {r.language}{/if}
+                    {#if r.is_private}<span class="dot">·</span> <span class="badge-private">private</span>{/if}
+                    {#if r.is_fork}<span class="dot">·</span> fork{/if}
+                  </span>
+                </span>
+                <span class="age">{repoAge(r.pushed_at)}</span>
+              </button>
+            {/each}
+          {/if}
         {:else}
           <div class="empty">
             <Buddy size={48} />
-            <p>Coming in a later milestone.</p>
-            <small>{activeTab === 'repos' ? 'Repo list lands with M3.' : 'Release feed lands with M4.'}</small>
+            <p>Coming in M4.</p>
+            <small>Release feed needs the per-repo /releases endpoint.</small>
           </div>
         {/if}
       </div>
@@ -504,6 +584,33 @@
   .chip.pr { background: var(--sage-soft); color: #4A6048; }
   .chip.is { background: var(--terracotta-soft); color: #A0431F; }
   .chip.mr { background: var(--butter-soft); color: #9A6E1A; }
+  /* Repo rows reuse the .row layout but the leading chip is the provider
+     glyph instead of an item kind. */
+  .repo-row .pchip {
+    width: 26px; height: 26px;
+    border-radius: var(--r-sm);
+    display: grid; place-items: center;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    margin-top: 1px;
+    background: #2E211B;
+    color: var(--paper);
+    text-transform: lowercase;
+  }
+  .repo-row .title {
+    font-size: 13.5px;
+    line-height: 1.3;
+    color: var(--ink);
+    font-weight: 500;
+  }
+  .repo-row .rowner { color: var(--ink-3); font-weight: 400; }
+  .repo-row .rslash { color: var(--ink-4); margin: 0 1px; }
+  .badge-private {
+    color: var(--terracotta);
+    font-style: italic;
+  }
   .title {
     font-size: 13.5px;
     line-height: 1.3;

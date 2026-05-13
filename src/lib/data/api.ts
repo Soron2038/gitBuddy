@@ -26,6 +26,23 @@ export interface Viewer {
   name: string | null;
 }
 
+export interface Repo {
+  id: string;
+  owner: string;
+  name: string;
+  provider: Provider;
+  default_branch: string;
+  language: string | null;
+  description: string | null;
+  stars: number;
+  html_url: string;
+  ssh_url: string | null;
+  clone_url: string | null;
+  is_fork: boolean;
+  is_private: boolean;
+  pushed_at: string | null;
+}
+
 export const providerLabel: Record<Provider, string> = {
   github: 'GitHub',
   gitlab: 'GitLab',
@@ -44,3 +61,6 @@ export const ghSetToken = (token: string): Promise<Viewer> =>
 
 /** Items where the user is assigned, review-requested, authored, or mentioned. */
 export const ghListWaiting = (): Promise<WaitingItem[]> => invoke('gh_list_waiting');
+
+/** All repos the viewer can see — owned, collaborator, or org member. */
+export const ghListRepos = (): Promise<Repo[]> => invoke('gh_list_repos');

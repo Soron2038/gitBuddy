@@ -72,3 +72,12 @@ pub async fn gh_list_waiting(
     };
     provider.list_waiting().await.map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn gh_list_repos(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<Repo>, String> {
+    let provider = state.github.read().await.clone();
+    let Some(provider) = provider else {
+        return Ok(Vec::new());
+    };
+    provider.list_repos().await.map_err(|e| e.to_string())
+}
