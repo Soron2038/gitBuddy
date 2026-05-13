@@ -3,6 +3,11 @@
   import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+  import {
+    isPermissionGranted,
+    requestPermission,
+    sendNotification,
+  } from '@tauri-apps/plugin-notification';
   import Buddy from '$lib/Buddy.svelte';
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
   import {
@@ -75,6 +80,7 @@
     gitlab_base_url: null,
     codeberg_base_url: null,
     editor_command: null,
+    notifications_enabled: true,
   });
   let savingSettings = $state(false);
   /** Local mirror of settings.editor_command so the input has its own
@@ -90,6 +96,22 @@
     if (normalised === (settings.editor_command ?? null)) return;
     settings = { ...settings, editor_command: normalised };
     await persistSettings();
+  }
+
+  async function toggleNotifications(value: boolean) {
+    if (value === settings.notifications_enabled) return;
+    settings = { ...settings, notifications_enabled: value };
+    await persistSettings();
+    // If the user just turned them on but macOS denied permission, prompt
+    // again so they have a chance to flip it in System Settings.
+    if (value && notificationPermission !== 'granted') {
+      try {
+        const result = await requestPermission();
+        notificationPermission = result === 'granted' ? 'granted' : 'denied';
+      } catch {
+        notificationPermission = 'denied';
+      }
+    }
   }
 
   // Context menu state — shared instance, opened on right-click of any
@@ -157,6 +179,85 @@
 
   let lastSyncedAt: Date | null = $state(null);
 
+  // ── Notifications ─────────────────────────────────────────────────────
+  // Persist the set of IDs we've already surfaced so a freshly-launched app
+  // doesn't fire 12 notifications for items the user already saw last time.
+  // localStorage works fine in the popover webview (it stays loaded across
+  // popover show/hide) and survives app restarts.
+  const SEEN_KEY = 'gitbuddy:seen-waiting-ids';
+  const SEEN_INITIALISED_KEY = 'gitbuddy:seen-initialised';
+  let seenWaitingIds: Set<string> = new Set();
+  let notificationPermission: 'granted' | 'denied' | 'unrequested' = $state('unrequested');
+
+  function loadSeen() {
+    try {
+      const raw = localStorage.getItem(SEEN_KEY);
+      if (raw) seenWaitingIds = new Set(JSON.parse(raw) as string[]);
+    } catch {
+      // Corrupt or missing — start fresh.
+      seenWaitingIds = new Set();
+    }
+  }
+
+  function persistSeen() {
+    try {
+      localStorage.setItem(SEEN_KEY, JSON.stringify([...seenWaitingIds]));
+    } catch {
+      // Quota or private mode — non-fatal.
+    }
+  }
+
+  /** Diff `items` against the persisted "seen" set; fire a native
+   *  notification for each genuinely-new entry, then mark them seen. On
+   *  the very first refresh of a fresh install we suppress notifications
+   *  to avoid spamming the user with the entire backlog at once. */
+  async function notifyNewWaiting(currentItems: WaitingItem[]) {
+    if (!settings.notifications_enabled) return;
+    if (notificationPermission !== 'granted') return;
+
+    const firstRun = !localStorage.getItem(SEEN_INITIALISED_KEY);
+    if (firstRun) {
+      seenWaitingIds = new Set(currentItems.map((i) => i.id));
+      localStorage.setItem(SEEN_INITIALISED_KEY, '1');
+      persistSeen();
+      return;
+    }
+
+    const newOnes = currentItems.filter((i) => !seenWaitingIds.has(i.id));
+    if (newOnes.length > 0) {
+      // Batch large bursts into a single summary so we don't blast the
+      // notification centre on a fresh login or after a long offline period.
+      if (newOnes.length >= 4) {
+        sendNotification({
+          title: 'gitBuddy',
+          body: `${newOnes.length} new things need a look.`,
+        });
+      } else {
+        for (const item of newOnes) {
+          sendNotification({
+            title: notificationTitleFor(item),
+            body: `${item.title}\n${item.repo}`,
+          });
+        }
+      }
+    }
+
+    seenWaitingIds = new Set(currentItems.map((i) => i.id));
+    persistSeen();
+  }
+
+  function notificationTitleFor(item: WaitingItem): string {
+    const reason =
+      item.reason === 'assigned'
+        ? 'Assigned to you'
+        : item.reason === 'review'
+          ? 'Review requested'
+          : item.reason === 'authored'
+            ? 'Update on your PR'
+            : 'Mentioned';
+    return `gitBuddy — ${reason}`;
+  }
+
   /** Fetch waiting items (aggregated across providers) and the local clone
    *  index in parallel. Shared between the on-mount and post-connect paths. */
   async function loadInitialData() {
@@ -170,10 +271,26 @@
     items = fetchedItems;
     locals = fetchedLocals;
     lastSyncedAt = new Date();
+    await notifyNewWaiting(fetchedItems);
   }
 
   onMount(async () => {
     try {
+      loadSeen();
+
+      // Request notification permission early — macOS only prompts once per
+      // app install, after which subsequent calls return the cached result.
+      try {
+        if (await isPermissionGranted()) {
+          notificationPermission = 'granted';
+        } else {
+          const result = await requestPermission();
+          notificationPermission = result === 'granted' ? 'granted' : 'denied';
+        }
+      } catch {
+        notificationPermission = 'denied';
+      }
+
       // Always run the local scan first — its results power the orphan-host
       // suggestion that the GitLab onboarding form shows, so we need them
       // available even with no provider connected yet.
@@ -204,6 +321,7 @@
       if (viewer || gl || cb) {
         items = await listWaiting();
         lastSyncedAt = new Date();
+        await notifyNewWaiting(items);
       }
       locals = await localPromise;
     } catch (e) {
@@ -432,6 +550,7 @@
       }
       await Promise.all(promises);
       lastSyncedAt = new Date();
+      await notifyNewWaiting(items);
     } catch (e) {
       error = String(e);
     } finally {
@@ -622,6 +741,29 @@
           >
             + Add folder…
           </button>
+        </section>
+
+        <section class="set-sec">
+          <h3><em>Notifications</em></h3>
+          <p class="set-help">
+            Fire a macOS notification when a poll surfaces a new issue, PR
+            or MR that's waiting on you. Releases and CI events join in a
+            later iteration.
+          </p>
+          <label class="set-toggle">
+            <input
+              type="checkbox"
+              checked={settings.notifications_enabled}
+              onchange={(e) => toggleNotifications((e.target as HTMLInputElement).checked)}
+            />
+            <span>Enable notifications</span>
+          </label>
+          {#if settings.notifications_enabled && notificationPermission === 'denied'}
+            <p class="set-warn">
+              macOS hasn't granted notification permission. Open
+              <em>System Settings → Notifications → gitBuddy</em> to allow them.
+            </p>
+          {/if}
         </section>
 
         <section class="set-sec">
@@ -1467,6 +1609,56 @@
   .set-input:focus {
     border-color: var(--terracotta);
     background: var(--paper);
+  }
+  .set-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--ink);
+    cursor: pointer;
+    user-select: none;
+  }
+  .set-toggle input[type='checkbox'] {
+    appearance: none;
+    width: 32px;
+    height: 18px;
+    border-radius: 999px;
+    background: var(--cream-3);
+    position: relative;
+    cursor: pointer;
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+  .set-toggle input[type='checkbox']::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--paper);
+    transition: transform 0.18s ease;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  }
+  .set-toggle input[type='checkbox']:checked {
+    background: var(--sage);
+  }
+  .set-toggle input[type='checkbox']:checked::after {
+    transform: translateX(14px);
+  }
+  .set-warn {
+    margin: 8px 0 0;
+    font-size: 11.5px;
+    color: var(--plum);
+    background: var(--plum-soft);
+    padding: 6px 10px;
+    border-radius: var(--r-sm);
+  }
+  .set-warn em {
+    font-style: italic;
+    color: inherit;
   }
 
   .prov-list {

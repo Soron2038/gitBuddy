@@ -31,6 +31,14 @@ pub struct Settings {
     /// appended as the last argument (e.g. `"code"` becomes `code /Users/.../repo`).
     #[serde(default)]
     pub editor_command: Option<String>,
+    /// Whether to fire native macOS notifications when a poll surfaces new
+    /// waiting items (assigned / review-requested / mentioned).
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -41,6 +49,7 @@ impl Default for Settings {
             gitlab_base_url: None,
             codeberg_base_url: None,
             editor_command: None,
+            notifications_enabled: true,
         }
     }
 }

@@ -160,6 +160,9 @@ export interface Settings {
   /** Shell command spawned by "Open in editor" — repo path is appended.
    *  Empty/null disables that quick-action menu entry. */
   editor_command: string | null;
+  /** When true, the popover fires a native notification whenever a poll
+   *  surfaces a waiting item that wasn't there on the previous refresh. */
+  notifications_enabled: boolean;
 }
 
 export interface Release {
