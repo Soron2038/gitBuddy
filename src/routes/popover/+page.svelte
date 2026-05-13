@@ -7,10 +7,14 @@
     ghSetToken,
     ghListWaiting,
     ghListRepos,
+    listLocalRepos,
+    indexLocalByRemote,
+    localKeyForRepo,
     providerLabel,
     type Viewer,
     type WaitingItem,
     type Repo,
+    type LocalRepo,
   } from '$lib/data/api';
 
   type Tab = 'waiting' | 'repos' | 'releases';
@@ -20,10 +24,13 @@
   let repos: Repo[] = $state([]);
   let reposLoaded = $state(false);
   let reposLoading = $state(false);
+  let locals: LocalRepo[] = $state([]);
   let activeTab: Tab = $state('waiting');
   let loading = $state(true);
   let refreshing = $state(false);
   let error: string | null = $state(null);
+
+  let localByKey = $derived(indexLocalByRemote(locals));
 
   // Setup-form state (visible only when there's no connected account).
   let tokenInput = $state('');
@@ -35,7 +42,20 @@
     try {
       viewer = await ghStatus();
       if (viewer) {
-        items = await ghListWaiting();
+        // Waiting items and the local index run in parallel — the local scan
+        // can take longer on slow disks, but the waiting list shows up as
+        // soon as it's ready.
+        const [fetchedItems, fetchedLocals] = await Promise.all([
+          ghListWaiting(),
+          listLocalRepos().catch((e) => {
+            // Local scan failure shouldn't block the popover from rendering;
+            // surface as a non-fatal hint via the error banner.
+            error = `Local scan failed: ${e}`;
+            return [] as LocalRepo[];
+          }),
+        ]);
+        items = fetchedItems;
+        locals = fetchedLocals;
         lastSyncedAt = new Date();
       }
     } catch (e) {
@@ -66,12 +86,14 @@
     refreshing = true;
     error = null;
     try {
-      items = await ghListWaiting();
-      // If repos were already loaded once, refresh them too so the user
-      // doesn't have to switch tabs to get fresh data.
+      const promises: Array<Promise<unknown>> = [
+        ghListWaiting().then((v) => (items = v)),
+        listLocalRepos().then((v) => (locals = v)),
+      ];
       if (reposLoaded) {
-        repos = await ghListRepos();
+        promises.push(ghListRepos().then((v) => (repos = v)));
       }
+      await Promise.all(promises);
       lastSyncedAt = new Date();
     } catch (e) {
       error = String(e);
@@ -311,10 +333,19 @@
             </div>
           {:else}
             {#each repos as r (r.id)}
+              {@const local = localByKey.get(localKeyForRepo(r))}
+              {@const localDiag = local?.[0]}
               <button class="row repo-row" type="button" onclick={() => openExternal(r.html_url)}>
                 <span class="pchip">{providerInitial(r)}</span>
                 <span class="body">
                   <span class="title">
+                    {#if local}
+                      <span
+                        class="local-flag"
+                        class:dirty={localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged + localDiag.untracked > 0 || localDiag.ahead > 0)}
+                        title={local.length === 1 ? `Cloned at ${localDiag?.path}` : `Cloned ${local.length}× — first at ${localDiag?.path}`}
+                      ></span>
+                    {/if}
                     <span class="rowner">{r.owner}</span><span class="rslash">/</span>{r.name}
                   </span>
                   <span class="meta">
@@ -322,6 +353,14 @@
                     {#if r.language}<span class="dot">·</span> {r.language}{/if}
                     {#if r.is_private}<span class="dot">·</span> <span class="badge-private">private</span>{/if}
                     {#if r.is_fork}<span class="dot">·</span> fork{/if}
+                    {#if localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged > 0)}
+                      <span class="dot">·</span>
+                      <span class="warn">{localDiag.dirty_staged + localDiag.dirty_unstaged} uncommitted</span>
+                    {/if}
+                    {#if localDiag && localDiag.ahead > 0}
+                      <span class="dot">·</span>
+                      <span class="warn">{localDiag.ahead} unpushed</span>
+                    {/if}
                   </span>
                 </span>
                 <span class="age">{repoAge(r.pushed_at)}</span>
@@ -610,6 +649,26 @@
   .badge-private {
     color: var(--terracotta);
     font-style: italic;
+  }
+  /* Filled sage dot next to a repo name means we found a local clone of it
+     in the scan roots. Goes terracotta when the local copy has uncommitted
+     work or unpushed commits, so the user spots dirty clones at a glance. */
+  .local-flag {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--sage);
+    vertical-align: 1px;
+    box-shadow: 0 0 0 2px var(--paper);
+  }
+  .local-flag.dirty {
+    background: var(--terracotta);
+  }
+  .meta .warn {
+    color: var(--terracotta);
+    font-weight: 500;
   }
   .title {
     font-size: 13.5px;

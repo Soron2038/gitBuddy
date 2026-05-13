@@ -50,6 +50,39 @@ export const providerLabel: Record<Provider, string> = {
   'mpsd-gitlab': 'MPSD',
 };
 
+/** Host portion the local indexer would record on `origin` for each provider.
+ *  Used to join LocalRepo.remote → Repo. */
+export const providerHost: Record<Provider, string> = {
+  github: 'github.com',
+  gitlab: 'gitlab.com',
+  codeberg: 'codeberg.org',
+  'mpsd-gitlab': 'gitlab.mpsd.mpg.de',
+};
+
+export interface RemoteRef {
+  host: string;
+  owner: string;
+  name: string;
+  raw_url: string;
+}
+
+export interface LocalRepo {
+  path: string;
+  branch: string | null;
+  remote: RemoteRef | null;
+  dirty_staged: number;
+  dirty_unstaged: number;
+  untracked: number;
+  ahead: number;
+  behind: number;
+  detached: boolean;
+}
+
+export interface Settings {
+  scan_roots: string[];
+  scan_ignore: string[];
+}
+
 // ── Tauri commands ─────────────────────────────────────────────────────────
 
 /** Returns the currently-connected GitHub viewer, or null if no account is set. */
@@ -64,3 +97,30 @@ export const ghListWaiting = (): Promise<WaitingItem[]> => invoke('gh_list_waiti
 
 /** All repos the viewer can see — owned, collaborator, or org member. */
 export const ghListRepos = (): Promise<Repo[]> => invoke('gh_list_repos');
+
+/** Scan configured roots and report every local checkout with diagnostics. */
+export const listLocalRepos = (): Promise<LocalRepo[]> => invoke('list_local_repos');
+
+/** Load persisted user settings (scan roots, ignore patterns). */
+export const getSettings = (): Promise<Settings> => invoke('get_settings');
+
+/** Persist user settings to the OS config directory. */
+export const saveSettings = (settings: Settings): Promise<void> =>
+  invoke('save_settings', { settings });
+
+/** Build a (host, owner, name) → LocalRepo[] map for fast remote→local joins. */
+export function indexLocalByRemote(locals: LocalRepo[]): Map<string, LocalRepo[]> {
+  const map = new Map<string, LocalRepo[]>();
+  for (const l of locals) {
+    if (!l.remote || !l.remote.host) continue;
+    const key = `${l.remote.host}:${l.remote.owner}/${l.remote.name}`.toLowerCase();
+    const list = map.get(key);
+    if (list) list.push(l);
+    else map.set(key, [l]);
+  }
+  return map;
+}
+
+export function localKeyForRepo(r: Repo): string {
+  return `${providerHost[r.provider]}:${r.owner}/${r.name}`.toLowerCase();
+}

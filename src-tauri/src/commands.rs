@@ -1,11 +1,16 @@
 //! Tauri commands bridging the Svelte frontend to the providers.
 //!
-//! M2 ships exactly three commands — connecting a GitHub token, listing
-//! waiting items, and probing connection state — because that's the smallest
-//! surface area that makes the popover useful with real data. Multi-account,
-//! per-provider settings, and richer queries land in later milestones.
+//! M2 added GitHub PAT auth + waiting items + repo list.
+//! M3 layers on the local-index commands so the UI can surface "this repo
+//! is cloned at ~/Developer/x" next to remote results.
 
-use crate::{github::GitHubProvider, keychain, types::*};
+use crate::{
+    github::GitHubProvider,
+    keychain, local_index,
+    local_index::LocalRepo,
+    settings::{self, Settings},
+    types::*,
+};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -80,4 +85,27 @@ pub async fn gh_list_repos(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec
         return Ok(Vec::new());
     };
     provider.list_repos().await.map_err(|e| e.to_string())
+}
+
+// ── M3: local index ─────────────────────────────────────────────────────────
+
+/// Walk the configured scan roots and return every Git checkout found, with
+/// per-repo diagnostics. Scan runs on tokio's blocking pool so the async
+/// runtime keeps responsive even on slow disks.
+#[tauri::command]
+pub async fn list_local_repos(app: tauri::AppHandle) -> Result<Vec<LocalRepo>, String> {
+    let settings = settings::load(&app)?;
+    tokio::task::spawn_blocking(move || local_index::scan(&settings))
+        .await
+        .map_err(|e| format!("scan task panicked: {e}"))
+}
+
+#[tauri::command]
+pub fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
+    settings::load(&app)
+}
+
+#[tauri::command]
+pub fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), String> {
+    settings::save(&app, &settings)
 }

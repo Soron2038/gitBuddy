@@ -28,3 +28,9 @@ keyring = { version = "3", features = ["apple-native"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "2"
 
+# M3 — Local index: filesystem walking + libgit2 for per-repo diagnostics.
+# git2 vendors libgit2 from source; no system dependency needed at build time.
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+walkdir = "2"
+dirs = "6"
+

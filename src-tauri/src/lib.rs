@@ -8,6 +8,8 @@
 mod commands;
 mod github;
 mod keychain;
+mod local_index;
+mod settings;
 mod types;
 
 use std::sync::Arc;
@@ -39,6 +41,9 @@ pub fn run() {
             commands::gh_status,
             commands::gh_list_waiting,
             commands::gh_list_repos,
+            commands::list_local_repos,
+            commands::get_settings,
+            commands::save_settings,
         ])
         .setup(|app| {
             // gitBuddy lives in the menu bar — no dock icon by default.
