@@ -257,7 +257,7 @@
       <button
         class="ib"
         class:spin={refreshing}
-        title="Refresh"
+        data-tip="Refresh now"
         aria-label="Refresh"
         onclick={refresh}
         disabled={!viewer || refreshing}
@@ -266,13 +266,13 @@
           <path d="M21 12a9 9 0 1 1-3-6.7" /><path d="M21 4v5h-5" />
         </svg>
       </button>
-      <button class="ib" title="Open main window" aria-label="Open main window">
+      <button class="ib" data-tip="Open main window" aria-label="Open main window">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M15 3h6v6" /><path d="M10 14 21 3" />
           <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
         </svg>
       </button>
-      <button class="ib" title="Settings" aria-label="Settings">
+      <button class="ib" data-tip="Settings" aria-label="Settings">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
@@ -413,7 +413,7 @@
               </div>
               {#each orphans as o (o.path)}
                 <div class="row repo-row orphan">
-                  <span class="pchip orphan-chip" title="No matching remote account">?</span>
+                  <span class="pchip orphan-chip" data-tip="No matching remote account">?</span>
                   <span class="body">
                     <span class="title">
                       <span class="rowner">{shortenPath(o.path)}</span>
@@ -450,13 +450,13 @@
                       <span
                         class="local-flag"
                         class:dirty={localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged + localDiag.untracked > 0 || localDiag.ahead > 0)}
-                        title={local.length === 1 ? `Cloned at ${localDiag?.path}` : `Cloned ${local.length}× — first at ${localDiag?.path}`}
+                        data-tip={local.length === 1 ? `Cloned at ${localDiag?.path}` : `Cloned ${local.length}× — first at ${localDiag?.path}`}
                       ></span>
                     {/if}
                     {#if ci !== 'none'}
                       <span
                         class="ci-dot ci-{ci}"
-                        title={ci === 'ok' ? 'CI passing on default branch' : ci === 'fail' ? 'CI failing on default branch' : ci === 'run' ? 'CI running' : 'CI cancelled'}
+                        data-tip={ci === 'ok' ? 'CI passing on default branch' : ci === 'fail' ? 'CI failing on default branch' : ci === 'run' ? 'CI running' : 'CI cancelled'}
                       ></span>
                     {/if}
                     <span class="rowner">{r.owner}</span><span class="rslash">/</span>{r.name}
