@@ -337,7 +337,6 @@ fn extract_path_from_url(url: &str) -> String {
 #[derive(Deserialize)]
 struct RawProject {
     id: u64,
-    name: String,
     path_with_namespace: String,
     default_branch: Option<String>,
     description: Option<String>,
@@ -352,8 +351,14 @@ struct RawProject {
 
 impl RawProject {
     fn into_repo(self, self_hosted: bool) -> Repo {
+        // `path_with_namespace` is the URL-form: "group/sub/repo-slug". We
+        // split off the last segment for `name` and use the rest as `owner`.
+        // We deliberately ignore `self.name` (the human display name), which
+        // can contain spaces ("Netbox Backup") that wouldn't match the local
+        // clone's parsed origin URL ("Netbox-Backup") — and the local-index
+        // join would silently fail.
         let (owner, name) = match self.path_with_namespace.rsplit_once('/') {
-            Some((o, _)) => (o.to_string(), self.name.clone()),
+            Some((o, n)) => (o.to_string(), n.to_string()),
             None => (String::new(), self.path_with_namespace.clone()),
         };
         Repo {

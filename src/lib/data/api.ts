@@ -55,13 +55,15 @@ export const providerLabel: Record<Provider, string> = {
   'mpsd-gitlab': 'MPSD',
 };
 
-/** Host portion the local indexer would record on `origin` for each provider.
- *  Used to join LocalRepo.remote → Repo. */
+/** Fallback host portion when a Repo doesn't have a usable html_url. Only
+ *  applies to gitlab.com / github.com / codeberg.org — for self-hosted
+ *  instances the actual host has to come from html_url because we don't
+ *  know it ahead of time. */
 export const providerHost: Record<Provider, string> = {
   github: 'github.com',
   gitlab: 'gitlab.com',
   codeberg: 'codeberg.org',
-  'mpsd-gitlab': 'gitlab.mpsd.mpg.de',
+  'mpsd-gitlab': '',
 };
 
 export interface RemoteRef {
@@ -161,6 +163,16 @@ export function indexLocalByRemote(locals: LocalRepo[]): Map<string, LocalRepo[]
   return map;
 }
 
+/** Build the local-index join key for a remote Repo. The host has to come
+ *  from html_url because for self-hosted GitLab/Gitea instances we can't
+ *  derive it from the Provider tag alone (different users connect to
+ *  different hosts: gitlab.gwdg.de, gitlab.mpsd.mpg.de, …). */
 export function localKeyForRepo(r: Repo): string {
-  return `${providerHost[r.provider]}:${r.owner}/${r.name}`.toLowerCase();
+  let host = '';
+  try {
+    host = new URL(r.html_url).host;
+  } catch {
+    host = providerHost[r.provider];
+  }
+  return `${host}:${r.owner}/${r.name}`.toLowerCase();
 }
