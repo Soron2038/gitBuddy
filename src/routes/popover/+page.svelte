@@ -7,6 +7,8 @@
     ghSetToken,
     glStatus,
     glSetToken,
+    cbStatus,
+    cbSetToken,
     listWaiting,
     listRepos,
     listReleases,
@@ -19,6 +21,7 @@
     providerCssClass,
     type Viewer,
     type GitLabStatus,
+    type CodebergStatus,
     type WaitingItem,
     type Repo,
     type LocalRepo,
@@ -31,6 +34,7 @@
 
   let viewer: Viewer | null = $state(null);
   let gl: GitLabStatus | null = $state(null);
+  let cb: CodebergStatus | null = $state(null);
   let items: WaitingItem[] = $state([]);
   let repos: Repo[] = $state([]);
   let reposLoaded = $state(false);
@@ -47,42 +51,55 @@
   let error: string | null = $state(null);
 
   // Onboarding / add-provider state.
-  let chosenProvider: 'github' | 'gitlab' = $state('github');
+  let chosenProvider: 'github' | 'gitlab' | 'codeberg' = $state('github');
   let tokenInput = $state('');
   let gitlabBaseInput = $state('https://gitlab.com');
+  let codebergBaseInput = $state('https://codeberg.org');
   let connecting = $state(false);
   /** Forces the onboarding form to appear even when one provider is already
    *  connected, so the user can attach a second provider via the "+" button. */
   let addingAnotherProvider = $state(false);
 
-  let connected = $derived(viewer !== null || gl !== null);
+  let connected = $derived(viewer !== null || gl !== null || cb !== null);
   let showOnboarding = $derived(!connected || addingAnotherProvider);
   let canAddGithub = $derived(viewer === null);
   let canAddGitlab = $derived(gl === null);
-  let canAddAny = $derived(canAddGithub || canAddGitlab);
+  let canAddCodeberg = $derived(cb === null);
+  let canAddAny = $derived(canAddGithub || canAddGitlab || canAddCodeberg);
   let displayName = $derived.by(() => {
     if (viewer) return viewer.name ?? viewer.login;
     if (gl) return gl.viewer.name ?? gl.viewer.login;
+    if (cb) return cb.viewer.name ?? cb.viewer.login;
     return 'there';
   });
 
   let localByKey = $derived(indexLocalByRemote(locals));
 
-  /** GitLab host suggestions derived from the local scan: any non-github.com
-   *  host seen in `origin` URLs that isn't already the connected GitLab.
-   *  Drives the quick-pick chips in the GitLab onboarding form so the user
-   *  doesn't have to retype `gitlab.gwdg.de` etc. */
-  let gitlabHostSuggestions = $derived.by(() => {
+  /** Hosts seen in local orphan clones, filtered to those that aren't
+   *  already a connected provider. Drives the quick-pick chips for both
+   *  GitLab and Codeberg onboarding so the user doesn't have to retype
+   *  `gitlab.gwdg.de` or `codeberg.org`. */
+  function hostSuggestionsFor(target: 'gitlab' | 'codeberg'): string[] {
     const out = new Set<string>();
     for (const o of locals) {
       const h = o.remote?.host;
       if (!h) continue;
       if (h === 'github.com') continue;
       if (gl && gl.base_url.includes(h)) continue;
+      if (cb && cb.base_url.includes(h)) continue;
+      // Cheap heuristic: hosts containing "gitlab" are GitLab-y, anything
+      // else is offered for Codeberg/Gitea. We don't gatekeep too strictly
+      // — the user might know better.
+      const isGitlabLike = h.includes('gitlab');
+      if (target === 'gitlab' && !isGitlabLike && out.size > 0) continue;
+      if (target === 'codeberg' && isGitlabLike) continue;
       out.add(h);
     }
     return Array.from(out).sort();
-  });
+  }
+
+  let gitlabHostSuggestions = $derived(hostSuggestionsFor('gitlab'));
+  let codebergHostSuggestions = $derived(hostSuggestionsFor('codeberg'));
 
   /** Local repos whose `origin` doesn't match any of the user's known remote
    *  accounts — typically scratch clones, abandoned forks, or repos hosted
@@ -123,16 +140,21 @@
         return [] as LocalRepo[];
       });
 
-      const [ghViewer, glRes] = await Promise.all([ghStatus(), glStatus()]);
+      const [ghViewer, glRes, cbRes] = await Promise.all([
+        ghStatus(),
+        glStatus(),
+        cbStatus(),
+      ]);
       viewer = ghViewer;
       gl = glRes;
+      cb = cbRes;
 
-      // Default the onboarding form to whichever provider can still be added.
-      // If only GitLab is unconnected, jump straight to its tab.
-      if (viewer && !gl) chosenProvider = 'gitlab';
-      else if (gl && !viewer) chosenProvider = 'github';
+      // Default the onboarding tab to whichever provider can still be added.
+      if (!viewer && (gl || cb)) chosenProvider = 'github';
+      else if (viewer && !gl && cb) chosenProvider = 'gitlab';
+      else if (viewer && gl && !cb) chosenProvider = 'codeberg';
 
-      if (viewer || gl) {
+      if (viewer || gl || cb) {
         items = await listWaiting();
         lastSyncedAt = new Date();
       }
@@ -147,15 +169,18 @@
   async function connect() {
     if (!tokenInput.trim()) return;
     if (chosenProvider === 'gitlab' && !gitlabBaseInput.trim()) return;
+    if (chosenProvider === 'codeberg' && !codebergBaseInput.trim()) return;
     connecting = true;
     error = null;
     try {
       if (chosenProvider === 'github') {
         viewer = await ghSetToken(tokenInput.trim());
-      } else {
+      } else if (chosenProvider === 'gitlab') {
         await glSetToken(tokenInput.trim(), gitlabBaseInput.trim());
-        // Round-trip via status so the UI gets the server-normalised base URL.
         gl = await glStatus();
+      } else {
+        await cbSetToken(tokenInput.trim(), codebergBaseInput.trim());
+        cb = await cbStatus();
       }
       tokenInput = '';
       addingAnotherProvider = false;
@@ -170,9 +195,14 @@
   function startAddingProvider() {
     addingAnotherProvider = true;
     error = null;
-    // Default to the unconnected provider.
-    if (canAddGithub && !canAddGitlab) chosenProvider = 'github';
-    else if (canAddGitlab && !canAddGithub) chosenProvider = 'gitlab';
+    // Default to whichever single provider still can be added; otherwise
+    // leave the current chosenProvider so the tab strip is visible.
+    const open = [
+      canAddGithub && 'github',
+      canAddGitlab && 'gitlab',
+      canAddCodeberg && 'codeberg',
+    ].filter(Boolean) as Array<'github' | 'gitlab' | 'codeberg'>;
+    if (open.length === 1) chosenProvider = open[0];
   }
 
   function cancelAdding() {
@@ -361,22 +391,34 @@
           </p>
         {/if}
 
-        <!-- Provider selector: only render the tab strip when both can be
-             added; otherwise we're locked to whichever is unconnected. -->
-        {#if canAddGithub && canAddGitlab}
+        <!-- Provider selector: only render the tab strip when more than
+             one slot is still empty; otherwise we'd lock to the only option. -->
+        {#if [canAddGithub, canAddGitlab, canAddCodeberg].filter(Boolean).length > 1}
           <div class="provider-tabs">
-            <button
-              class:on={chosenProvider === 'github'}
-              onclick={() => (chosenProvider = 'github')}
-            >
-              GitHub
-            </button>
-            <button
-              class:on={chosenProvider === 'gitlab'}
-              onclick={() => (chosenProvider = 'gitlab')}
-            >
-              GitLab
-            </button>
+            {#if canAddGithub}
+              <button
+                class:on={chosenProvider === 'github'}
+                onclick={() => (chosenProvider = 'github')}
+              >
+                GitHub
+              </button>
+            {/if}
+            {#if canAddGitlab}
+              <button
+                class:on={chosenProvider === 'gitlab'}
+                onclick={() => (chosenProvider = 'gitlab')}
+              >
+                GitLab
+              </button>
+            {/if}
+            {#if canAddCodeberg}
+              <button
+                class:on={chosenProvider === 'codeberg'}
+                onclick={() => (chosenProvider = 'codeberg')}
+              >
+                Codeberg
+              </button>
+            {/if}
           </div>
         {/if}
 
@@ -455,6 +497,58 @@
               spellcheck="false"
             />
           </label>
+        {:else if chosenProvider === 'codeberg' && canAddCodeberg}
+          <label class="token-input">
+            <span class="lbl">Instance URL</span>
+            <input
+              type="url"
+              placeholder="https://codeberg.org"
+              bind:value={codebergBaseInput}
+              disabled={connecting}
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+
+          {#if codebergHostSuggestions.length > 0}
+            <div class="host-hints">
+              <span class="hint">Found in your local clones:</span>
+              <div class="host-chips">
+                {#each codebergHostSuggestions as host}
+                  <button
+                    type="button"
+                    class="host-chip"
+                    onclick={() => (codebergBaseInput = `https://${host}`)}
+                  >
+                    {host}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <button
+            class="token-link"
+            onclick={() =>
+              openExternal(
+                `${codebergBaseInput.replace(/\/$/, '')}/user/settings/applications`,
+              )}
+          >
+            Create a token on this Gitea/Forgejo →
+          </button>
+
+          <label class="token-input">
+            <span class="lbl">Personal access token</span>
+            <input
+              type="password"
+              placeholder="token"
+              bind:value={tokenInput}
+              onkeydown={(e) => e.key === 'Enter' && connect()}
+              disabled={connecting}
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
         {/if}
 
         {#if error}
@@ -470,7 +564,12 @@
           <button
             class="primary"
             onclick={connect}
-            disabled={connecting || !tokenInput.trim() || (chosenProvider === 'gitlab' && !gitlabBaseInput.trim())}
+            disabled={
+              connecting ||
+              !tokenInput.trim() ||
+              (chosenProvider === 'gitlab' && !gitlabBaseInput.trim()) ||
+              (chosenProvider === 'codeberg' && !codebergBaseInput.trim())
+            }
           >
             {connecting ? 'Verifying…' : 'Connect'}
           </button>

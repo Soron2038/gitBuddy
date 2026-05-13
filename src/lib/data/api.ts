@@ -31,6 +31,11 @@ export interface GitLabStatus {
   base_url: string;
 }
 
+export interface CodebergStatus {
+  viewer: Viewer;
+  base_url: string;
+}
+
 export interface Repo {
   id: string;
   owner: string;
@@ -187,6 +192,10 @@ export const ghSetToken = (token: string): Promise<Viewer> =>
 export const glStatus = (): Promise<GitLabStatus | null> => invoke('gl_status');
 export const glSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
   invoke('gl_set_token', { token, baseUrl });
+
+export const cbStatus = (): Promise<CodebergStatus | null> => invoke('cb_status');
+export const cbSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
+  invoke('cb_set_token', { token, baseUrl });
 
 // ── Aggregated data (across all connected providers) ───────────────────────
 

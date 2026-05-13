@@ -5,6 +5,7 @@
 // Local repo index, polling, notifications, multi-account, GitLab/Codeberg
 // come in later milestones — see PRD.md.
 
+mod codeberg;
 mod commands;
 mod github;
 mod gitlab;
@@ -47,6 +48,8 @@ pub fn run() {
             commands::gh_status,
             commands::gl_set_token,
             commands::gl_status,
+            commands::cb_set_token,
+            commands::cb_status,
             commands::list_waiting,
             commands::list_repos,
             commands::list_releases,

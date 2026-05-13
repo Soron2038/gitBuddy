@@ -21,6 +21,11 @@ pub struct Settings {
     /// or "https://gitlab.gwdg.de"). The token itself lives in the Keychain.
     #[serde(default)]
     pub gitlab_base_url: Option<String>,
+    /// Base URL for the connected Codeberg/Gitea/Forgejo instance. Defaults
+    /// to https://codeberg.org when the user picks that radio in onboarding;
+    /// can be overridden for self-hosted Gitea/Forgejo.
+    #[serde(default)]
+    pub codeberg_base_url: Option<String>,
 }
 
 impl Default for Settings {
@@ -29,6 +34,7 @@ impl Default for Settings {
             scan_roots: default_scan_roots(),
             scan_ignore: Vec::new(),
             gitlab_base_url: None,
+            codeberg_base_url: None,
         }
     }
 }
