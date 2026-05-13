@@ -42,6 +42,7 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(AppState::default()))
         .invoke_handler(tauri::generate_handler![
             commands::gh_set_token,

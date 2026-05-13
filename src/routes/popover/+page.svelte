@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { openUrl } from '@tauri-apps/plugin-opener';
+  import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import Buddy from '$lib/Buddy.svelte';
   import {
     ghStatus,
@@ -14,6 +15,8 @@
     listReleases,
     listCi,
     listLocalRepos,
+    getSettings,
+    saveSettings,
     indexLocalByRemote,
     localKeyForRepo,
     providerLabel,
@@ -28,6 +31,7 @@
     type Release,
     type CiRun,
     type CiStatus,
+    type Settings,
   } from '$lib/data/api';
 
   type Tab = 'waiting' | 'repos' | 'releases';
@@ -60,8 +64,21 @@
    *  connected, so the user can attach a second provider via the "+" button. */
   let addingAnotherProvider = $state(false);
 
+  // Settings panel state — replaces the list view when the gear icon is clicked.
+  let showSettings = $state(false);
+  let settings: Settings = $state({
+    scan_roots: [],
+    scan_ignore: [],
+    gitlab_base_url: null,
+    codeberg_base_url: null,
+  });
+  let savingSettings = $state(false);
+
   let connected = $derived(viewer !== null || gl !== null || cb !== null);
-  let showOnboarding = $derived(!connected || addingAnotherProvider);
+  /** Onboarding takes the screen unless we're explicitly in Settings —
+   *  Settings is reachable even without a connected provider (so the user
+   *  can configure scan roots before adding any auth). */
+  let showOnboarding = $derived(!showSettings && (!connected || addingAnotherProvider));
   let canAddGithub = $derived(viewer === null);
   let canAddGitlab = $derived(gl === null);
   let canAddCodeberg = $derived(cb === null);
@@ -140,6 +157,11 @@
         return [] as LocalRepo[];
       });
 
+      // Settings load is cheap (small JSON, OS app-config dir).
+      getSettings()
+        .then((s) => (settings = s))
+        .catch((e) => console.error('settings load:', e));
+
       const [ghViewer, glRes, cbRes] = await Promise.all([
         ghStatus(),
         glStatus(),
@@ -209,6 +231,66 @@
     addingAnotherProvider = false;
     tokenInput = '';
     error = null;
+  }
+
+  // ── Settings actions ───────────────────────────────────────────────────
+
+  function openSettings() {
+    showSettings = true;
+    error = null;
+  }
+  function closeSettings() {
+    showSettings = false;
+  }
+
+  /** Open a native folder picker, append the chosen path to scan_roots,
+   *  persist, and rescan so the new path shows up immediately. */
+  async function addScanRoot() {
+    let chosen: string | null = null;
+    try {
+      const result = await openDialog({
+        directory: true,
+        multiple: false,
+        title: 'Choose a folder to scan for Git repositories',
+      });
+      if (typeof result === 'string') chosen = result;
+    } catch (e) {
+      error = `Folder picker failed: ${e}`;
+      return;
+    }
+    if (!chosen) return;
+    if (settings.scan_roots.includes(chosen)) return;
+    settings = { ...settings, scan_roots: [...settings.scan_roots, chosen] };
+    await persistSettings();
+    await rescanLocals();
+  }
+
+  async function removeScanRoot(path: string) {
+    settings = {
+      ...settings,
+      scan_roots: settings.scan_roots.filter((p) => p !== path),
+    };
+    await persistSettings();
+    await rescanLocals();
+  }
+
+  async function persistSettings() {
+    savingSettings = true;
+    try {
+      await saveSettings(settings);
+    } catch (e) {
+      error = `Saving settings failed: ${e}`;
+    } finally {
+      savingSettings = false;
+    }
+  }
+
+  async function rescanLocals() {
+    try {
+      locals = await listLocalRepos();
+    } catch (e) {
+      error = `Local scan failed: ${e}`;
+    }
   }
 
   async function refresh() {
@@ -363,7 +445,13 @@
           <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
         </svg>
       </button>
-      <button class="ib" data-tip="Settings" aria-label="Settings">
+      <button
+        class="ib"
+        class:on={showSettings}
+        data-tip={showSettings ? 'Back to overview' : 'Settings'}
+        aria-label="Settings"
+        onclick={() => (showSettings ? closeSettings() : openSettings())}
+      >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
@@ -374,6 +462,89 @@
     {#if loading}
       <div class="state-pad">
         <p class="loading-text">Connecting…</p>
+      </div>
+    {:else if showSettings}
+      <!-- Settings panel — scan roots, connected providers, version. -->
+      <div class="settings">
+        <section class="set-sec">
+          <h3>Scan <em>roots</em></h3>
+          <p class="set-help">
+            gitBuddy walks these folders looking for <code>.git</code> checkouts.
+            <code>node_modules</code>, build outputs and macOS junk are skipped.
+          </p>
+          {#if settings.scan_roots.length === 0}
+            <p class="set-empty">No scan roots yet.</p>
+          {:else}
+            <ul class="path-list">
+              {#each settings.scan_roots as path (path)}
+                <li class="path-row">
+                  <span class="path-text" title={path}>{path}</span>
+                  <button
+                    type="button"
+                    class="path-remove"
+                    data-tip="Remove from scan list"
+                    aria-label="Remove {path}"
+                    onclick={() => removeScanRoot(path)}
+                    disabled={savingSettings}
+                  >
+                    ×
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+          <button
+            type="button"
+            class="set-add"
+            onclick={addScanRoot}
+            disabled={savingSettings}
+          >
+            + Add folder…
+          </button>
+        </section>
+
+        <section class="set-sec">
+          <h3>Connected <em>providers</em></h3>
+          {#if !connected}
+            <p class="set-empty">None yet — close Settings and pick one to start.</p>
+          {:else}
+            <ul class="prov-list">
+              {#if viewer}
+                <li class="prov-row">
+                  <span class="pchip gh">gh</span>
+                  <div>
+                    <div class="prov-name">{viewer.name ?? viewer.login}</div>
+                    <div class="prov-host">github.com</div>
+                  </div>
+                </li>
+              {/if}
+              {#if gl}
+                <li class="prov-row">
+                  <span class="pchip {gl.base_url.includes('gitlab.com') ? 'gl' : 'gl-self'}">
+                    {gl.base_url.includes('gitlab.com') ? 'gl' : providerChipText({ provider: 'mpsd-gitlab', html_url: gl.base_url })}
+                  </span>
+                  <div>
+                    <div class="prov-name">{gl.viewer.name ?? gl.viewer.login}</div>
+                    <div class="prov-host">{new URL(gl.base_url).host}</div>
+                  </div>
+                </li>
+              {/if}
+              {#if cb}
+                <li class="prov-row">
+                  <span class="pchip cb">cb</span>
+                  <div>
+                    <div class="prov-name">{cb.viewer.name ?? cb.viewer.login}</div>
+                    <div class="prov-host">{new URL(cb.base_url).host}</div>
+                  </div>
+                </li>
+              {/if}
+            </ul>
+          {/if}
+        </section>
+
+        {#if error}
+          <p class="err">{error}</p>
+        {/if}
       </div>
     {:else if showOnboarding}
       <!-- Onboarding: no account, or user clicked "+ add provider". -->
@@ -1010,6 +1181,155 @@
     font-family: var(--font-display);
   }
   .add-provider:hover { text-decoration: underline; }
+
+  /* Settings panel ------------------------------------------------- */
+  .settings {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 18px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+  .ib.on {
+    background: var(--terracotta-soft);
+    color: var(--terracotta);
+  }
+  .set-sec h3 {
+    margin: 0 0 4px;
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  .set-sec h3 em {
+    font-style: italic;
+    color: var(--terracotta);
+  }
+  .set-help {
+    margin: 0 0 12px;
+    font-size: 11.5px;
+    color: var(--ink-3);
+    line-height: 1.5;
+  }
+  .set-help code {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    background: var(--cream-2);
+    padding: 1px 4px;
+    border-radius: 4px;
+    color: var(--ink-2);
+  }
+  .set-empty {
+    margin: 0 0 10px;
+    font-size: 12px;
+    color: var(--ink-3);
+    font-style: italic;
+    font-family: var(--font-display);
+  }
+  .path-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .path-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    background: var(--paper-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-2);
+  }
+  .path-text {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .path-remove {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    color: var(--ink-3);
+    font-size: 16px;
+    line-height: 1;
+    display: grid;
+    place-items: center;
+    transition: background 0.15s, color 0.15s;
+  }
+  .path-remove:hover:not(:disabled) {
+    background: var(--terracotta-soft);
+    color: var(--terracotta);
+  }
+  .path-remove:disabled { opacity: 0.4; cursor: default; }
+  .set-add {
+    align-self: flex-start;
+    padding: 7px 12px;
+    border: 1px dashed var(--line-2);
+    border-radius: var(--r-sm);
+    font-size: 12.5px;
+    color: var(--ink-2);
+    background: transparent;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .set-add:hover:not(:disabled) {
+    background: var(--cream-2);
+    border-color: var(--terracotta);
+    color: var(--terracotta);
+  }
+  .set-add:disabled { opacity: 0.5; cursor: default; }
+
+  .prov-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .prov-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    background: var(--paper-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+  }
+  .prov-row .pchip {
+    width: 26px; height: 26px;
+    border-radius: var(--r-sm);
+    display: grid; place-items: center;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--paper);
+    text-transform: lowercase;
+  }
+  .prov-row .pchip.gh      { background: #2E211B; }
+  .prov-row .pchip.gl      { background: linear-gradient(135deg, #E89C5C, #C66243); }
+  .prov-row .pchip.gl-self { background: linear-gradient(135deg, #B6A5C9, #6E5E80); }
+  .prov-row .pchip.cb      { background: linear-gradient(135deg, #8DBBC9, #4E7A8A); }
+  .prov-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink);
+  }
+  .prov-host {
+    font-size: 11px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    margin-top: 1px;
+  }
   .err {
     margin: 0;
     color: var(--plum);

@@ -155,6 +155,8 @@ export interface LocalRepo {
 export interface Settings {
   scan_roots: string[];
   scan_ignore: string[];
+  gitlab_base_url: string | null;
+  codeberg_base_url: string | null;
 }
 
 export interface Release {
