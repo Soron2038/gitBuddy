@@ -22,18 +22,39 @@ const GH_ACCOUNT_KEY: &str = "github";
 #[derive(Default)]
 pub struct AppState {
     pub github: RwLock<Option<Arc<GitHubProvider>>>,
+    /// Guards the one-time "have we tried to restore from the Keychain yet?"
+    /// transition. Lazy-init protects against the popover's `onMount` calling
+    /// `gh_status` before an eager startup task would have finished.
+    init_attempted: tokio::sync::Mutex<bool>,
 }
 
 impl AppState {
-    /// Try to restore a previously-saved GitHub token from the Keychain on
-    /// startup. Silently leaves the provider unconfigured if the token is
-    /// missing or invalid — the UI will show an empty-state prompt.
-    pub async fn restore_from_keychain(self: &Arc<Self>) {
-        let Ok(Some(token)) = keychain::load(GH_ACCOUNT_KEY).await else {
+    /// Restore a previously-saved GitHub token from the Keychain, exactly
+    /// once per app lifetime. Subsequent calls return immediately. If the
+    /// keychain entry is missing or its token has been revoked, the provider
+    /// stays unset and the UI shows the onboarding form.
+    pub async fn ensure_initialized(&self) {
+        let mut attempted = self.init_attempted.lock().await;
+        if *attempted {
             return;
+        }
+        *attempted = true;
+
+        let token = match keychain::load(GH_ACCOUNT_KEY).await {
+            Ok(Some(t)) => t,
+            Ok(None) => return,
+            Err(e) => {
+                eprintln!("gitbuddy: keychain load failed: {e}");
+                return;
+            }
         };
-        if let Ok(provider) = GitHubProvider::connect(token).await {
-            *self.github.write().await = Some(Arc::new(provider));
+        match GitHubProvider::connect(token).await {
+            Ok(provider) => {
+                *self.github.write().await = Some(Arc::new(provider));
+            }
+            Err(e) => {
+                eprintln!("gitbuddy: restoring github session failed: {e}");
+            }
         }
     }
 }
@@ -60,9 +81,11 @@ pub async fn gh_set_token(
 
 /// Return the currently-connected GitHub viewer, or `None` if no account is
 /// configured yet. Used by the frontend on load to decide between empty
-/// state and live data.
+/// state and live data. Triggers (and waits for) the one-time keychain
+/// restoration on the first call after startup.
 #[tauri::command]
 pub async fn gh_status(state: tauri::State<'_, Arc<AppState>>) -> Result<Option<Viewer>, String> {
+    state.ensure_initialized().await;
     let guard = state.github.read().await;
     Ok(guard.as_ref().map(|p| p.viewer.clone()))
 }

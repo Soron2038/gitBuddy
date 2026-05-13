@@ -50,26 +50,29 @@
 
   let lastSyncedAt: Date | null = $state(null);
 
+  /** Fetch the data that should be visible the moment the user has a connected
+   *  account — waiting items + local clone index, in parallel. Shared between
+   *  the on-mount path and the post-connect path so the popover and the
+   *  Repos-tab local indicators show up immediately in both cases (previously
+   *  the post-connect path only fetched waiting items, which is why local dots
+   *  only appeared after a manual refresh). */
+  async function loadInitialData() {
+    const [fetchedItems, fetchedLocals] = await Promise.all([
+      ghListWaiting(),
+      listLocalRepos().catch((e) => {
+        error = `Local scan failed: ${e}`;
+        return [] as LocalRepo[];
+      }),
+    ]);
+    items = fetchedItems;
+    locals = fetchedLocals;
+    lastSyncedAt = new Date();
+  }
+
   onMount(async () => {
     try {
       viewer = await ghStatus();
-      if (viewer) {
-        // Waiting items and the local index run in parallel — the local scan
-        // can take longer on slow disks, but the waiting list shows up as
-        // soon as it's ready.
-        const [fetchedItems, fetchedLocals] = await Promise.all([
-          ghListWaiting(),
-          listLocalRepos().catch((e) => {
-            // Local scan failure shouldn't block the popover from rendering;
-            // surface as a non-fatal hint via the error banner.
-            error = `Local scan failed: ${e}`;
-            return [] as LocalRepo[];
-          }),
-        ]);
-        items = fetchedItems;
-        locals = fetchedLocals;
-        lastSyncedAt = new Date();
-      }
+      if (viewer) await loadInitialData();
     } catch (e) {
       error = String(e);
     } finally {
@@ -84,8 +87,7 @@
     try {
       viewer = await ghSetToken(tokenInput.trim());
       tokenInput = '';
-      items = await ghListWaiting();
-      lastSyncedAt = new Date();
+      await loadInitialData();
     } catch (e) {
       error = String(e);
     } finally {

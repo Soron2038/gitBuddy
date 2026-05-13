@@ -54,14 +54,10 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
-            // Restore any GitHub token previously saved to the Keychain so the
-            // UI can show real data on next launch without re-pasting. Runs in
-            // the background — the popover will display the empty state for a
-            // brief moment if Keychain access takes its time.
-            let state = app.state::<Arc<AppState>>().inner().clone();
-            tauri::async_runtime::spawn(async move {
-                state.restore_from_keychain().await;
-            });
+            // Keychain restore happens lazily on the first `gh_status` call
+            // (see `AppState::ensure_initialized`) — a previous eager-spawn
+            // version could race against the popover webview, which loads
+            // immediately and calls `gh_status` from its `onMount`.
 
             // ── Tray menu (right-click) ─────────────────────────────────
             let open_main =
