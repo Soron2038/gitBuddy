@@ -26,6 +26,11 @@ pub struct Settings {
     /// can be overridden for self-hosted Gitea/Forgejo.
     #[serde(default)]
     pub codeberg_base_url: Option<String>,
+    /// Shell command used by the "Open in editor" quick action. Whitespace-
+    /// or empty-string disables the menu entry. The repo's local path is
+    /// appended as the last argument (e.g. `"code"` becomes `code /Users/.../repo`).
+    #[serde(default)]
+    pub editor_command: Option<String>,
 }
 
 impl Default for Settings {
@@ -35,6 +40,7 @@ impl Default for Settings {
             scan_ignore: Vec::new(),
             gitlab_base_url: None,
             codeberg_base_url: None,
+            editor_command: None,
         }
     }
 }

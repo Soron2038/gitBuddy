@@ -157,6 +157,9 @@ export interface Settings {
   scan_ignore: string[];
   gitlab_base_url: string | null;
   codeberg_base_url: string | null;
+  /** Shell command spawned by "Open in editor" — repo path is appended.
+   *  Empty/null disables that quick-action menu entry. */
+  editor_command: string | null;
 }
 
 export interface Release {
@@ -222,6 +225,11 @@ export const getSettings = (): Promise<Settings> => invoke('get_settings');
 /** Persist user settings to the OS config directory. */
 export const saveSettings = (settings: Settings): Promise<void> =>
   invoke('save_settings', { settings });
+
+/** Spawn the configured editor command with `path` appended. Fails if no
+ *  editor_command is set in Settings. */
+export const runEditor = (path: string): Promise<void> =>
+  invoke('run_editor', { path });
 
 /** Build a (host, owner, name) → LocalRepo[] map for fast remote→local joins. */
 export function indexLocalByRemote(locals: LocalRepo[]): Map<string, LocalRepo[]> {

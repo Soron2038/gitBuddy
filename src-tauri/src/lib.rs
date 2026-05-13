@@ -43,6 +43,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Arc::new(AppState::default()))
         .invoke_handler(tauri::generate_handler![
             commands::gh_set_token,
@@ -58,6 +59,7 @@ pub fn run() {
             commands::list_local_repos,
             commands::get_settings,
             commands::save_settings,
+            commands::run_editor,
         ])
         .setup(|app| {
             // gitBuddy lives in the menu bar — no dock icon by default.

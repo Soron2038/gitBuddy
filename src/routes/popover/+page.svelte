@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { openUrl } from '@tauri-apps/plugin-opener';
+  import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
+  import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import Buddy from '$lib/Buddy.svelte';
+  import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
   import {
     ghStatus,
     ghSetToken,
@@ -17,6 +19,7 @@
     listLocalRepos,
     getSettings,
     saveSettings,
+    runEditor,
     indexLocalByRemote,
     localKeyForRepo,
     providerLabel,
@@ -71,8 +74,30 @@
     scan_ignore: [],
     gitlab_base_url: null,
     codeberg_base_url: null,
+    editor_command: null,
   });
   let savingSettings = $state(false);
+  /** Local mirror of settings.editor_command so the input has its own
+   *  uncommitted state and we only persist on blur / Enter. */
+  let editorInput = $state('');
+  $effect(() => {
+    editorInput = settings.editor_command ?? '';
+  });
+
+  async function persistEditorCommand() {
+    const next = editorInput.trim();
+    const normalised = next.length === 0 ? null : next;
+    if (normalised === (settings.editor_command ?? null)) return;
+    settings = { ...settings, editor_command: normalised };
+    await persistSettings();
+  }
+
+  // Context menu state — shared instance, opened on right-click of any
+  // row. `menuItems` is recomputed per-target when the menu opens.
+  let menuOpen = $state(false);
+  let menuX = $state(0);
+  let menuY = $state(0);
+  let menuItems: MenuItem[] = $state([]);
 
   let connected = $derived(viewer !== null || gl !== null || cb !== null);
   /** Onboarding takes the screen unless we're explicitly in Settings —
@@ -293,6 +318,102 @@
     }
   }
 
+  // ── Quick actions / context menu ─────────────────────────────────────
+
+  /** Open the context menu at the cursor with items appropriate for the
+   *  given row target. */
+  function openRepoMenu(e: MouseEvent, r: Repo) {
+    e.preventDefault();
+    const local = localByKey.get(localKeyForRepo(r));
+    const localPath = local?.[0]?.path;
+    const hasEditor = !!(settings.editor_command && settings.editor_command.trim());
+
+    const items: MenuItem[] = [
+      { label: 'Open in browser', onclick: () => void openUrl(r.html_url) },
+    ];
+    if (localPath) {
+      items.push({ label: 'Show in Finder', onclick: () => void revealItemInDir(localPath) });
+      if (hasEditor) {
+        items.push({
+          label: `Open in editor (${settings.editor_command?.trim()})`,
+          onclick: async () => {
+            try {
+              await runEditor(localPath);
+            } catch (err) {
+              error = String(err);
+            }
+          },
+        });
+      }
+    }
+    items.push({ separator: true });
+    if (r.clone_url) {
+      items.push({
+        label: 'Copy clone URL (HTTPS)',
+        onclick: () => void writeText(r.clone_url ?? ''),
+      });
+    }
+    if (r.ssh_url) {
+      items.push({
+        label: 'Copy clone URL (SSH)',
+        onclick: () => void writeText(r.ssh_url ?? ''),
+      });
+    }
+
+    showMenu(e, items);
+  }
+
+  function openLocalRepoMenu(e: MouseEvent, l: LocalRepo) {
+    e.preventDefault();
+    const hasEditor = !!(settings.editor_command && settings.editor_command.trim());
+    const items: MenuItem[] = [
+      { label: 'Show in Finder', onclick: () => void revealItemInDir(l.path) },
+    ];
+    if (hasEditor) {
+      items.push({
+        label: `Open in editor (${settings.editor_command?.trim()})`,
+        onclick: async () => {
+          try {
+            await runEditor(l.path);
+          } catch (err) {
+            error = String(err);
+          }
+        },
+      });
+    }
+    if (l.remote?.raw_url) {
+      items.push({ separator: true });
+      items.push({
+        label: 'Copy origin URL',
+        onclick: () => void writeText(l.remote?.raw_url ?? ''),
+      });
+    }
+    showMenu(e, items);
+  }
+
+  function openItemMenu(e: MouseEvent, item: WaitingItem) {
+    e.preventDefault();
+    showMenu(e, [
+      { label: 'Open in browser', onclick: () => void openUrl(item.url) },
+      { label: 'Copy URL', onclick: () => void writeText(item.url) },
+    ]);
+  }
+
+  function openReleaseMenu(e: MouseEvent, r: Release) {
+    e.preventDefault();
+    showMenu(e, [
+      { label: 'Open release', onclick: () => void openUrl(r.html_url) },
+      { label: 'Copy release URL', onclick: () => void writeText(r.html_url) },
+    ]);
+  }
+
+  function showMenu(e: MouseEvent, items: MenuItem[]) {
+    menuItems = items;
+    menuX = e.clientX;
+    menuY = e.clientY;
+    menuOpen = true;
+  }
+
   async function refresh() {
     if (!connected) return;
     refreshing = true;
@@ -501,6 +622,26 @@
           >
             + Add folder…
           </button>
+        </section>
+
+        <section class="set-sec">
+          <h3>Open in <em>editor</em></h3>
+          <p class="set-help">
+            Command run when you pick <em>Open in editor</em> from a repo's
+            right-click menu. The repo's local path is appended. Common
+            values: <code>code</code>, <code>cursor</code>, <code>zed</code>,
+            <code>idea</code>. Leave empty to hide that menu entry.
+          </p>
+          <input
+            type="text"
+            class="set-input"
+            bind:value={editorInput}
+            onblur={persistEditorCommand}
+            onkeydown={(e) => e.key === 'Enter' && persistEditorCommand()}
+            placeholder="code"
+            spellcheck="false"
+            autocomplete="off"
+          />
         </section>
 
         <section class="set-sec">
@@ -805,7 +946,12 @@
             </div>
           {:else}
             {#each items as item (item.id)}
-              <button class="row" type="button" onclick={() => openExternal(item.url)}>
+              <button
+                class="row"
+                type="button"
+                onclick={() => openExternal(item.url)}
+                oncontextmenu={(e) => openItemMenu(e, item)}
+              >
                 <span class="chip {item.kind.toLowerCase()}">{item.kind}</span>
                 <span class="body">
                   <span class="title">{item.title}</span>
@@ -835,7 +981,12 @@
                 <span class="section-h-count">{orphans.length}</span>
               </div>
               {#each orphans as o (o.path)}
-                <div class="row repo-row orphan">
+                <div
+                  class="row repo-row orphan"
+                  role="button"
+                  tabindex="0"
+                  oncontextmenu={(e) => openLocalRepoMenu(e, o)}
+                >
                   <span class="pchip orphan-chip" data-tip="No matching remote account">?</span>
                   <span class="body">
                     <span class="title">
@@ -865,7 +1016,12 @@
               {@const local = localByKey.get(localKeyForRepo(r))}
               {@const localDiag = local?.[0]}
               {@const ci = ciByRepo.get(r.id) ?? 'none'}
-              <button class="row repo-row" type="button" onclick={() => openExternal(r.html_url)}>
+              <button
+                class="row repo-row"
+                type="button"
+                onclick={() => openExternal(r.html_url)}
+                oncontextmenu={(e) => openRepoMenu(e, r)}
+              >
                 <span class="pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
                 <span class="body">
                   <span class="title">
@@ -914,7 +1070,12 @@
             </div>
           {:else}
             {#each releases as r (r.repo_id)}
-              <button class="row release-row" type="button" onclick={() => openExternal(r.html_url)}>
+              <button
+                class="row release-row"
+                type="button"
+                onclick={() => openExternal(r.html_url)}
+                oncontextmenu={(e) => openReleaseMenu(e, r)}
+              >
                 <span class="pchip rel-chip">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M12 2 4 7v10l8 5 8-5V7z" />
@@ -956,6 +1117,8 @@
     </footer>
   </div>
 </div>
+
+<ContextMenu bind:open={menuOpen} x={menuX} y={menuY} items={menuItems} />
 
 <style>
   /* Stage gives a transparent margin so the panel's shadow can fade naturally
@@ -1286,6 +1449,25 @@
     color: var(--terracotta);
   }
   .set-add:disabled { opacity: 0.5; cursor: default; }
+
+  .set-input {
+    width: 100%;
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-sm);
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: var(--paper-2);
+    color: var(--ink);
+    outline: none;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .set-input:focus {
+    border-color: var(--terracotta);
+    background: var(--paper);
+  }
 
   .prov-list {
     list-style: none;

@@ -323,3 +323,34 @@ pub fn get_settings(app: AppHandle) -> Result<Settings, String> {
 pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     settings::save(&app, &settings)
 }
+
+/// Run the user-configured editor command with `path` appended as the final
+/// argument. Shells out via `sh -c` so PATH lookup (and aliases like `code`,
+/// `cursor`, `zed`) work without us having to teach the binary about every
+/// editor's install location.
+#[tauri::command]
+pub async fn run_editor(app: AppHandle, path: String) -> Result<(), String> {
+    let settings = settings::load(&app)?;
+    let cmd = settings.editor_command.unwrap_or_default();
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return Err("No editor command configured. Set one in Settings.".into());
+    }
+
+    // Single-arg shell escape: wrap path in single quotes, escape any
+    // literal single quotes inside. Good enough for filesystem paths,
+    // which can't contain newlines on macOS in normal use.
+    let escaped_path = format!("'{}'", path.replace('\'', "'\\''"));
+    let full = format!("{cmd} {escaped_path}");
+
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&full)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("spawning editor failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("editor task panicked: {e}"))?
+}
