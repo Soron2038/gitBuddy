@@ -29,6 +29,11 @@ use tauri::WindowEvent;
 /// Monochrome sprout silhouette embedded at compile time. Designed to read
 /// cleanly at 22pt in the macOS menu bar; used as a template image so macOS
 /// inverts it for the menu bar appearance (light/dark/translucent).
+///
+/// Regenerate with `python3 scripts/regenerate-tray-icon.py` — the SVG next
+/// to this PNG is the design reference, the Python script the canonical
+/// renderer (system-level SVG-to-PNG converters on macOS are unreliable for
+/// this kind of small template image).
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
