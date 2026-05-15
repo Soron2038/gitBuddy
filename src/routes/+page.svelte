@@ -28,10 +28,14 @@
     localKeyForRepo,
     providerChipText,
     providerCssClass,
+    providerLabel,
+    providerHost,
+    type Provider,
     type Viewer,
     type GitLabStatus,
     type CodebergStatus,
     type WaitingItem,
+    type ItemReason,
     type Repo,
     type LocalRepo,
     type Release,
@@ -41,6 +45,7 @@
   } from '$lib/data/api';
 
   type View = 'overview' | 'settings';
+  type Status = 'on-you' | 'all' | 'releases' | 'local';
 
   // ── Auth state ────────────────────────────────────────────────────────
   let viewer: Viewer | null = $state(null);
@@ -89,6 +94,18 @@
   let menuX = $state(0);
   let menuY = $state(0);
   let menuItems: MenuItem[] = $state([]);
+
+  // ── Filters / Search ─────────────────────────────────────────────────
+  let status = $state<Status>('all');
+  let searchQuery = $state('');
+  // Hosts the user has explicitly hidden. Default: empty → everything shown.
+  // Hosts that disappear (provider disconnected) stay in the set; if the same
+  // host reconnects later, the previous on/off choice is preserved.
+  let disabledHosts = $state<Set<string>>(new Set());
+  let reasonFilter = $state<Set<ItemReason>>(
+    new Set<ItemReason>(['assigned', 'review', 'authored', 'mentioned']),
+  );
+  let searchInputEl = $state<HTMLInputElement | null>(null);
 
   // ── Derived ───────────────────────────────────────────────────────────
   let connected = $derived(viewer !== null || gl !== null || cb !== null);
@@ -192,6 +209,98 @@
         return false;
       }
     }).length;
+  }
+
+  // ── Filter helpers ───────────────────────────────────────────────────
+  // Hostname an URL ableiten — fällt auf das statische providerHost zurück,
+  // falls die URL kaputt ist. Wichtig, damit self-hosted GitLab-Instanzen
+  // korrekt vom enabledHosts-Set adressiert werden.
+  function hostFor(p: Provider, url: string | null | undefined): string {
+    if (p === 'github') return 'github.com';
+    if (p === 'codeberg') return 'codeberg.org';
+    try {
+      if (url) return new URL(url).host;
+    } catch {
+      /* fall through */
+    }
+    return providerHost[p] ?? '';
+  }
+
+  function isRepoEnabled(r: Repo): boolean {
+    return !disabledHosts.has(hostFor(r.provider, r.html_url));
+  }
+  function isItemEnabled(it: WaitingItem): boolean {
+    return !disabledHosts.has(hostFor(it.provider, it.url));
+  }
+  function isReleaseEnabled(rel: Release): boolean {
+    return !disabledHosts.has(hostFor(rel.provider, rel.html_url));
+  }
+
+  function matchesSearch(r: Repo, q: string): boolean {
+    if (!q) return true;
+    const hay = `${r.owner}/${r.name} ${r.description ?? ''}`.toLowerCase();
+    return hay.includes(q);
+  }
+  function matchesSearchItem(it: WaitingItem, q: string): boolean {
+    if (!q) return true;
+    return `${it.repo} ${it.title}`.toLowerCase().includes(q);
+  }
+  function matchesSearchRelease(rel: Release, q: string): boolean {
+    if (!q) return true;
+    return `${rel.repo_full_name} ${rel.name} ${rel.tag}`.toLowerCase().includes(q);
+  }
+
+  let normalisedQuery = $derived(searchQuery.trim().toLowerCase());
+
+  let searchPlaceholder = $derived(
+    status === 'on-you'
+      ? 'Filter waiting items…'
+      : status === 'releases'
+        ? 'Filter releases…'
+        : status === 'local'
+          ? 'Filter local clones…'
+          : 'Search repos by name, owner, description…',
+  );
+
+  let filteredRepos = $derived(
+    repos.filter((r) => isRepoEnabled(r) && matchesSearch(r, normalisedQuery)),
+  );
+  let filteredLocals = $derived(
+    filteredRepos.filter((r) => localByKey.has(localKeyForRepo(r))),
+  );
+  let filteredItems = $derived(
+    items.filter(
+      (it) =>
+        isItemEnabled(it) &&
+        reasonFilter.has(it.reason) &&
+        matchesSearchItem(it, normalisedQuery),
+    ),
+  );
+  let filteredReleases = $derived(
+    releases.filter(
+      (rel) =>
+        rel.is_new &&
+        isReleaseEnabled(rel) &&
+        matchesSearchRelease(rel, normalisedQuery),
+    ),
+  );
+
+  function toggleHost(host: string) {
+    const next = new Set(disabledHosts);
+    if (next.has(host)) next.delete(host);
+    else next.add(host);
+    disabledHosts = next;
+  }
+
+  function toggleReason(reason: ItemReason) {
+    const next = new Set(reasonFilter);
+    if (next.has(reason)) next.delete(reason);
+    else next.add(reason);
+    reasonFilter = next;
+  }
+
+  function providerHomeUrl(p: ProvBadge): string {
+    return `https://${p.host}/${p.viewer.login}`;
   }
 
   // ── Data loading ──────────────────────────────────────────────────────
@@ -335,6 +444,20 @@
     return () => clearInterval(handle);
   });
 
+  // ── ⌘K / Ctrl+K → focus search ──────────────────────────────────────
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        if (view !== 'overview') return;
+        e.preventDefault();
+        searchInputEl?.focus();
+        searchInputEl?.select();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
   // ── Row actions ──────────────────────────────────────────────────────
   async function openExternal(url: string) {
     try {
@@ -370,6 +493,28 @@
     menuX = e.clientX;
     menuY = e.clientY;
     menuOpen = true;
+  }
+
+  function showMenu(e: MouseEvent, m: MenuItem[]) {
+    e.preventDefault();
+    menuItems = m;
+    menuX = e.clientX;
+    menuY = e.clientY;
+    menuOpen = true;
+  }
+
+  function openItemMenu(e: MouseEvent, it: WaitingItem) {
+    showMenu(e, [
+      { label: 'Open in browser', onclick: () => openExternal(it.url) },
+      { label: 'Copy URL', onclick: () => writeText(it.url) },
+    ]);
+  }
+
+  function openReleaseMenu(e: MouseEvent, rel: Release) {
+    showMenu(e, [
+      { label: 'Open release', onclick: () => openExternal(rel.html_url) },
+      { label: 'Copy release URL', onclick: () => writeText(rel.html_url) },
+    ]);
   }
 
   // ── Settings actions ─────────────────────────────────────────────────
@@ -547,7 +692,25 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" />
         </svg>
-        <input type="text" placeholder="Search by repo, owner, label, anything…" disabled />
+        <input
+          type="text"
+          placeholder={searchPlaceholder}
+          bind:value={searchQuery}
+          bind:this={searchInputEl}
+          disabled={!connected}
+          spellcheck="false"
+          autocomplete="off"
+        />
+        {#if searchQuery}
+          <button
+            type="button"
+            class="search-clear"
+            onclick={() => (searchQuery = '')}
+            aria-label="Clear search"
+          >
+            ×
+          </button>
+        {/if}
         <span class="sho">⌘ K</span>
       </label>
       <button
@@ -587,22 +750,61 @@
       </button>
     </div>
 
+    {#if status === 'on-you' && connected}
+      <div class="reason-chips">
+        <span class="reason-chips-label">Reasons</span>
+        {#each ['assigned', 'review', 'authored', 'mentioned'] as r}
+          {@const reason = r as ItemReason}
+          {@const on = reasonFilter.has(reason)}
+          <button
+            type="button"
+            class="chip-toggle"
+            class:on
+            onclick={() => toggleReason(reason)}
+            aria-pressed={on}
+          >
+            {reason === 'review' ? 'review requested' : reason}
+          </button>
+        {/each}
+      </div>
+    {/if}
+
     <div class="body">
       <aside class="side">
         <section class="sec">
           <h3>What's <em>waiting</em></h3>
-          <div class="pill on">
+          <button
+            type="button"
+            class="pill pill-btn"
+            class:on={status === 'on-you'}
+            onclick={() => (status = 'on-you')}
+          >
             <span class="sw t"></span> On you <span class="c">{waitingCount}</span>
-          </div>
-          <div class="pill">
+          </button>
+          <button
+            type="button"
+            class="pill pill-btn"
+            class:on={status === 'all'}
+            onclick={() => (status = 'all')}
+          >
             <span class="sw s"></span> All repos <span class="c">{repos.length}</span>
-          </div>
-          <div class="pill">
+          </button>
+          <button
+            type="button"
+            class="pill pill-btn"
+            class:on={status === 'releases'}
+            onclick={() => (status = 'releases')}
+          >
             <span class="sw b"></span> New releases <span class="c">{newReleasesCount}</span>
-          </div>
-          <div class="pill">
+          </button>
+          <button
+            type="button"
+            class="pill pill-btn"
+            class:on={status === 'local'}
+            onclick={() => (status = 'local')}
+          >
             <span class="sw p"></span> Local clones <span class="c">{localCount}</span>
-          </div>
+          </button>
         </section>
 
         <section class="sec">
@@ -611,13 +813,34 @@
             <p class="side-empty">No providers connected yet.</p>
           {:else}
             {#each connectedProviders as p (p.host)}
-              <div class="pill">
-                <span class="ava {avatarClass(p)}">{avatarText(p)}</span>
-                <span class="acct-name">
-                  {p.viewer.login}
-                  <span class="acct-host">{p.host}</span>
-                </span>
-                <span class="c">{repoCountForProvider(p)}</span>
+              {@const on = !disabledHosts.has(p.host)}
+              <div class="pill acct-pill" class:muted={!on}>
+                <button
+                  type="button"
+                  class="acct-toggle"
+                  onclick={() => toggleHost(p.host)}
+                  aria-pressed={on}
+                  data-tip={on ? 'Hide this account' : 'Show this account'}
+                >
+                  <span class="ava {avatarClass(p)}">{avatarText(p)}</span>
+                  <span class="acct-name">
+                    {p.viewer.login}
+                    <span class="acct-host">{p.host}</span>
+                  </span>
+                  <span class="c">{repoCountForProvider(p)}</span>
+                </button>
+                <button
+                  type="button"
+                  class="acct-open"
+                  onclick={() => openExternal(providerHomeUrl(p))}
+                  data-tip="Open profile in browser"
+                  aria-label="Open {p.viewer.login} on {p.host}"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M7 17 17 7" />
+                    <path d="M7 7h10v10" />
+                  </svg>
+                </button>
               </div>
             {/each}
           {/if}
@@ -683,70 +906,205 @@
             </div>
           </div>
 
-          <h2 class="section-h">
-            Your <em>repos</em>
-            <span class="count">{repos.length} shown</span>
-          </h2>
-
-          {#if repos.length === 0}
-            <p class="content-empty">
-              None of your accounts surfaced any repos yet. If you just connected,
-              give the first sync a moment — or hit Refresh.
-            </p>
-          {:else}
-            <div class="repo-grid">
-              {#each repos as r (r.id)}
-                {@const local = localByKey.get(localKeyForRepo(r))}
-                {@const localDiag = local?.[0]}
-                {@const ci = ciByRepo.get(r.id) ?? 'none'}
-                <button
-                  class="card"
-                  onclick={() => openExternal(r.html_url)}
-                  oncontextmenu={(e) => openRepoMenu(e, r)}
-                >
-                  <span class="pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
-                  <div class="rname">
-                    <span class="owner">{r.owner}</span> / <b>{r.name}</b>
-                    <div class="sub">
-                      {#if local}
-                        <span class="pin">
-                          <span
-                            class="d"
-                            class:off={localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged + localDiag.untracked > 0 || localDiag.ahead > 0)}
-                          ></span>
-                          {localDiag?.path ?? 'cloned'}
-                        </span>
-                      {:else}
-                        <span class="pin">
-                          <span class="d off"></span> not cloned
-                        </span>
-                      {/if}
-                      <span>{r.default_branch}</span>
-                      {#if r.is_private}<span>private</span>{/if}
-                      {#if r.is_fork}<span>fork</span>{/if}
-                      {#if localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged > 0)}
-                        <span class="warn">{localDiag.dirty_staged + localDiag.dirty_unstaged} uncommitted</span>
-                      {/if}
-                      {#if localDiag && localDiag.ahead > 0}
-                        <span class="warn">{localDiag.ahead} unpushed</span>
-                      {/if}
-                    </div>
-                  </div>
-                  <div class="rmeta">
-                    <span class="rci {ci}">
-                      <span class="b"></span>
-                      {#if ci === 'ok'}passing{:else if ci === 'fail'}failing{:else if ci === 'run'}running{:else if ci === 'cancelled'}cancelled{:else}no ci{/if}
+          {#snippet repoCardEntry(r: Repo)}
+            {@const local = localByKey.get(localKeyForRepo(r))}
+            {@const localDiag = local?.[0]}
+            {@const ci = ciByRepo.get(r.id) ?? 'none'}
+            <button
+              class="card"
+              onclick={() => openExternal(r.html_url)}
+              oncontextmenu={(e) => openRepoMenu(e, r)}
+            >
+              <span class="pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
+              <div class="rname">
+                <span class="owner">{r.owner}</span> / <b>{r.name}</b>
+                <div class="sub">
+                  {#if local}
+                    <span class="pin">
+                      <span
+                        class="d"
+                        class:off={localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged + localDiag.untracked > 0 || localDiag.ahead > 0)}
+                      ></span>
+                      {localDiag?.path ?? 'cloned'}
                     </span>
-                    {#if r.language}
-                      <span class="lang">{r.language}</span>
-                    {/if}
-                    {#if r.stars > 0}
-                      <span class="stars">★ {r.stars}</span>
-                    {/if}
-                  </div>
-                </button>
-              {/each}
-            </div>
+                  {:else}
+                    <span class="pin">
+                      <span class="d off"></span> not cloned
+                    </span>
+                  {/if}
+                  <span>{r.default_branch}</span>
+                  {#if r.is_private}<span>private</span>{/if}
+                  {#if r.is_fork}<span>fork</span>{/if}
+                  {#if localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged > 0)}
+                    <span class="warn">{localDiag.dirty_staged + localDiag.dirty_unstaged} uncommitted</span>
+                  {/if}
+                  {#if localDiag && localDiag.ahead > 0}
+                    <span class="warn">{localDiag.ahead} unpushed</span>
+                  {/if}
+                </div>
+              </div>
+              <div class="rmeta">
+                <span class="rci {ci}">
+                  <span class="b"></span>
+                  {#if ci === 'ok'}passing{:else if ci === 'fail'}failing{:else if ci === 'run'}running{:else if ci === 'cancelled'}cancelled{:else}no ci{/if}
+                </span>
+                {#if r.language}
+                  <span class="lang">{r.language}</span>
+                {/if}
+                {#if r.stars > 0}
+                  <span class="stars">★ {r.stars}</span>
+                {/if}
+              </div>
+            </button>
+          {/snippet}
+
+          {#if status === 'all'}
+            <h2 class="section-h">
+              Your <em>repos</em>
+              <span class="count">
+                {filteredRepos.length} shown{#if filteredRepos.length !== repos.length}
+                  <span class="muted-count"> · of {repos.length}</span>
+                {/if}
+              </span>
+            </h2>
+
+            {#if repos.length === 0}
+              <p class="content-empty">
+                None of your accounts surfaced any repos yet. If you just connected,
+                give the first sync a moment — or hit Refresh.
+              </p>
+            {:else if filteredRepos.length === 0}
+              <p class="content-empty">
+                No repos match these filters.
+              </p>
+            {:else}
+              <div class="repo-grid">
+                {#each filteredRepos as r (r.id)}
+                  {@render repoCardEntry(r)}
+                {/each}
+              </div>
+            {/if}
+          {:else if status === 'on-you'}
+            <h2 class="section-h">
+              Waiting on <em>you</em>
+              <span class="count">
+                {filteredItems.length} shown{#if filteredItems.length !== items.length}
+                  <span class="muted-count"> · of {items.length}</span>
+                {/if}
+              </span>
+            </h2>
+
+            {#if items.length === 0}
+              <p class="content-empty">
+                You're all caught up — nothing waiting on you right now.
+              </p>
+            {:else if filteredItems.length === 0}
+              <p class="content-empty">
+                No items match these filters.
+              </p>
+            {:else}
+              <div class="row-list">
+                {#each filteredItems as it (it.id)}
+                  <button
+                    type="button"
+                    class="row"
+                    onclick={() => openExternal(it.url)}
+                    oncontextmenu={(e) => openItemMenu(e, it)}
+                  >
+                    <span class="kind-chip {it.kind.toLowerCase()}">{it.kind}</span>
+                    <span class="row-body">
+                      <span class="row-title">{it.title}</span>
+                      <span class="row-meta">
+                        <span class="row-repo">{it.repo}</span>
+                        <span class="row-dot">·</span>
+                        <span class="row-reason">{it.reason === 'review' ? 'review requested' : it.reason}</span>
+                        <span class="row-dot">·</span>
+                        <span class="row-prov">{providerLabel(it)}</span>
+                      </span>
+                    </span>
+                    <span class="row-age">{it.age_human}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          {:else if status === 'releases'}
+            <h2 class="section-h">
+              New <em>releases</em>
+              <span class="count">
+                {filteredReleases.length} shown{#if filteredReleases.length !== newReleasesCount}
+                  <span class="muted-count"> · of {newReleasesCount}</span>
+                {/if}
+              </span>
+            </h2>
+
+            {#if newReleasesCount === 0}
+              <p class="content-empty">
+                No fresh releases in the last week.
+              </p>
+            {:else if filteredReleases.length === 0}
+              <p class="content-empty">
+                No releases match these filters.
+              </p>
+            {:else}
+              <div class="row-list">
+                {#each filteredReleases as rel (rel.repo_id + ':' + rel.tag)}
+                  <button
+                    type="button"
+                    class="row release-row"
+                    onclick={() => openExternal(rel.html_url)}
+                    oncontextmenu={(e) => openReleaseMenu(e, rel)}
+                  >
+                    <span class="kind-chip rel">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 2 4 7v10l8 5 8-5V7z" />
+                        <path d="m4 7 8 5 8-5" />
+                        <path d="M12 22V12" />
+                      </svg>
+                    </span>
+                    <span class="row-body">
+                      <span class="row-title">
+                        {rel.name || rel.tag}
+                        {#if rel.is_prerelease}<span class="badge-pre">pre</span>{/if}
+                      </span>
+                      <span class="row-meta">
+                        <span class="row-repo">{rel.repo_full_name}</span>
+                        <span class="row-dot">·</span>
+                        <span class="row-tag">{rel.tag}</span>
+                      </span>
+                    </span>
+                    <span class="row-age">
+                      {rel.age_human}
+                      {#if rel.is_new}<span class="new-badge">NEW</span>{/if}
+                    </span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          {:else}
+            <h2 class="section-h">
+              Local <em>clones</em>
+              <span class="count">
+                {filteredLocals.length} shown{#if filteredLocals.length !== localCount}
+                  <span class="muted-count"> · of {localCount}</span>
+                {/if}
+              </span>
+            </h2>
+
+            {#if localCount === 0}
+              <p class="content-empty">
+                No local clones found in your scan roots. Add a folder in Settings.
+              </p>
+            {:else if filteredLocals.length === 0}
+              <p class="content-empty">
+                No local clones match these filters.
+              </p>
+            {:else}
+              <div class="repo-grid">
+                {#each filteredLocals as r (r.id)}
+                  {@render repoCardEntry(r)}
+                {/each}
+              </div>
+            {/if}
           {/if}
 
           {#if error}
@@ -1267,6 +1625,14 @@
     text-align: left;
     margin-bottom: 2px;
   }
+  .pill-btn {
+    border: 0;
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .pill-btn:hover:not(.on) { background: var(--cream-2); }
   .pill.on {
     background: var(--terracotta-soft);
     color: var(--ink);
@@ -1279,6 +1645,8 @@
     color: var(--ink-3);
   }
   .pill.on .c { color: var(--terracotta); }
+  .pill.muted { opacity: 0.45; }
+  .pill.muted .c { text-decoration: line-through; }
   .sw {
     width: 10px;
     height: 10px;
@@ -1289,6 +1657,48 @@
   .sw.s { background: var(--sage); }
   .sw.b { background: var(--butter); }
   .sw.p { background: var(--plum); }
+
+  /* Account pill = main toggle button + small "open in browser" button. */
+  .acct-pill {
+    padding: 0;
+    gap: 0;
+  }
+  .acct-toggle {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 6px 9px 12px;
+    background: transparent;
+    border: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    border-radius: var(--r-md);
+    text-align: left;
+    transition: background 0.12s ease;
+  }
+  .acct-toggle:hover { background: var(--cream-2); }
+  .acct-open {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    margin-right: 6px;
+    border-radius: var(--r-sm);
+    background: transparent;
+    border: 0;
+    color: var(--ink-3);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .acct-open:hover {
+    background: var(--cream-2);
+    color: var(--terracotta);
+  }
+  .pill.muted .acct-open { opacity: 0.75; }
 
   .acct-name {
     display: flex;
@@ -1599,6 +2009,185 @@
     font-family: var(--font-mono);
     font-size: 11px;
     color: var(--ink-3);
+  }
+
+  /* Search clear button -------------------------------------------- */
+  .search-clear {
+    width: 22px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    border: 0;
+    background: var(--cream-2);
+    color: var(--ink-3);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .search-clear:hover {
+    background: var(--terracotta-soft);
+    color: var(--terracotta);
+  }
+
+  /* Reason chips row ---------------------------------------------- */
+  .reason-chips {
+    padding: 10px 18px 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--paper-2);
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .reason-chips-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-right: 4px;
+  }
+  .chip-toggle {
+    height: 26px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid var(--line-2);
+    background: var(--paper);
+    color: var(--ink-3);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    text-transform: capitalize;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+  }
+  .chip-toggle:hover { border-color: var(--terracotta); color: var(--terracotta); }
+  .chip-toggle.on {
+    background: var(--terracotta-soft);
+    color: var(--terracotta);
+    border-color: transparent;
+    font-weight: 600;
+  }
+  .chip-toggle:not(.on) {
+    opacity: 0.55;
+    text-decoration: line-through;
+  }
+
+  /* section-h secondary count ------------------------------------- */
+  .section-h .muted-count {
+    color: var(--ink-4);
+  }
+
+  /* Item / Release row list --------------------------------------- */
+  .row-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .row {
+    width: 100%;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 12px 16px;
+    display: grid;
+    grid-template-columns: 36px 1fr auto;
+    gap: 14px;
+    align-items: center;
+    text-align: left;
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+  }
+  .row:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-2);
+  }
+  .kind-chip {
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    display: grid;
+    place-items: center;
+    font-family: var(--font-display);
+    font-size: 11px;
+    font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+  }
+  .kind-chip.pr { background: linear-gradient(135deg, #80987B, #4A5E48); }
+  .kind-chip.mr { background: linear-gradient(135deg, #E8A06A, #C66243); }
+  .kind-chip.is { background: linear-gradient(135deg, #B6A5C9, #6E5E80); }
+  .kind-chip.rel {
+    background: linear-gradient(135deg, #F1D58A, #B68C2C);
+    color: var(--ink);
+  }
+  .row-body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .row-title {
+    font-weight: 500;
+    font-size: 14px;
+    color: var(--ink);
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .row-meta {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .row-dot { color: var(--ink-4); }
+  .row-repo { color: var(--ink-2); }
+  .row-reason { color: var(--terracotta); text-transform: lowercase; }
+  .row-prov { color: var(--ink-3); }
+  .row-tag {
+    background: var(--cream-2);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--ink-2);
+  }
+  .row-age {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .badge-pre {
+    background: var(--plum-soft);
+    color: var(--plum);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .new-badge {
+    background: var(--terracotta);
+    color: white;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    letter-spacing: 0.04em;
   }
 
   /* Settings view -------------------------------------------------- */
