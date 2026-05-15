@@ -99,17 +99,24 @@ jobs:
       # target/release/bundle/dmg/. Unsigned — signing & notarization will be
       # added once an Apple Developer ID is configured (see PRD §6.5).
       #
-      # `export PATH=...` is belt-and-braces against the rustup-init shim at
-      # /usr/local/bin/cargo: even though $GITHUB_PATH was prepended above,
-      # `npm run tauri build` spawns @tauri-apps/cli which calls `cargo
-      # metadata` in a subprocess, and intermittent runs still hit the shim.
-      # Pinning PATH in the script is the most explicit fix and also dumps
-      # `which cargo` to logs so future regressions are diagnosable in one
-      # glance.
+      # On macos-14-arm64 runners, ~/.cargo/bin/cargo is itself the
+      # rustup-init binary (verified via `cargo --version` printing
+      # "rustup-init 1.29.0"), so any PATH that resolves cargo from there
+      # ends up calling the shim and failing on subcommands like `metadata`
+      # or `fmt`. We have to reach into the actual toolchain dir installed
+      # by actions-rust-lang/setup-rust-toolchain. `rustup which cargo`
+      # might work too, but rustup is *also* shim-shaped on this image, so
+      # we go straight to ~/.rustup/toolchains/*/bin which is guaranteed
+      # to hold a real cargo after the toolchain install. Glob protects us
+      # from hardcoding the host triple.
       - name: Build app bundle
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          echo "PATH=$PATH"
+          TOOLCHAIN_BIN=$(ls -d "$HOME"/.rustup/toolchains/*/bin 2>/dev/null | head -n1)
+          if [ -z "$TOOLCHAIN_BIN" ] || [ ! -x "$TOOLCHAIN_BIN/cargo" ]; then
+            echo "Could not locate cargo under ~/.rustup/toolchains/*/bin" >&2
+            exit 1
+          fi
+          export PATH="$TOOLCHAIN_BIN:$PATH"
           which cargo
           cargo --version
           npm run tauri build -- --bundles app,dmg
