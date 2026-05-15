@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
-  import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import {
     isPermissionGranted,
@@ -18,17 +17,14 @@
     glSetToken,
     cbStatus,
     cbSetToken,
-    ghDisconnect,
-    glDisconnect,
-    cbDisconnect,
     openMainWindow,
+    openMainSettings,
     listWaiting,
     listRepos,
     listReleases,
     listCi,
     listLocalRepos,
     getSettings,
-    saveSettings,
     runEditor,
     indexLocalByRemote,
     localKeyForRepo,
@@ -67,18 +63,18 @@
   let refreshing = $state(false);
   let error: string | null = $state(null);
 
-  // Onboarding / add-provider state.
+  // Initial-onboarding state — used only when no provider is connected.
+  // Adding more providers later happens in the main window's Settings view,
+  // so we don't track an "adding another" mode here anymore.
   let chosenProvider: 'github' | 'gitlab' | 'codeberg' = $state('github');
   let tokenInput = $state('');
   let gitlabBaseInput = $state('https://gitlab.com');
   let codebergBaseInput = $state('https://codeberg.org');
   let connecting = $state(false);
-  /** Forces the onboarding form to appear even when one provider is already
-   *  connected, so the user can attach a second provider via the "+" button. */
-  let addingAnotherProvider = $state(false);
 
-  // Settings panel state — replaces the list view when the gear icon is clicked.
-  let showSettings = $state(false);
+  // Settings is read-only here — toggling lives in the main window. We
+  // still load it on mount so `notifications_enabled` gates the popover's
+  // notification firing without an extra round-trip per check.
   let settings: Settings = $state({
     scan_roots: [],
     scan_ignore: [],
@@ -87,37 +83,6 @@
     editor_command: null,
     notifications_enabled: true,
   });
-  let savingSettings = $state(false);
-  /** Local mirror of settings.editor_command so the input has its own
-   *  uncommitted state and we only persist on blur / Enter. */
-  let editorInput = $state('');
-  $effect(() => {
-    editorInput = settings.editor_command ?? '';
-  });
-
-  async function persistEditorCommand() {
-    const next = editorInput.trim();
-    const normalised = next.length === 0 ? null : next;
-    if (normalised === (settings.editor_command ?? null)) return;
-    settings = { ...settings, editor_command: normalised };
-    await persistSettings();
-  }
-
-  async function toggleNotifications(value: boolean) {
-    if (value === settings.notifications_enabled) return;
-    settings = { ...settings, notifications_enabled: value };
-    await persistSettings();
-    // If the user just turned them on but macOS denied permission, prompt
-    // again so they have a chance to flip it in System Settings.
-    if (value && notificationPermission !== 'granted') {
-      try {
-        const result = await requestPermission();
-        notificationPermission = result === 'granted' ? 'granted' : 'denied';
-      } catch {
-        notificationPermission = 'denied';
-      }
-    }
-  }
 
   // Context menu state — shared instance, opened on right-click of any
   // row. `menuItems` is recomputed per-target when the menu opens.
@@ -127,14 +92,12 @@
   let menuItems: MenuItem[] = $state([]);
 
   let connected = $derived(viewer !== null || gl !== null || cb !== null);
-  /** Onboarding takes the screen unless we're explicitly in Settings —
-   *  Settings is reachable even without a connected provider (so the user
-   *  can configure scan roots before adding any auth). */
-  let showOnboarding = $derived(!showSettings && (!connected || addingAnotherProvider));
+  /** The popover shows the onboarding form when *no* provider is connected.
+   *  Adding more providers after that lives in the main window's Settings. */
+  let showOnboarding = $derived(!connected);
   let canAddGithub = $derived(viewer === null);
   let canAddGitlab = $derived(gl === null);
   let canAddCodeberg = $derived(cb === null);
-  let canAddAny = $derived(canAddGithub || canAddGitlab || canAddCodeberg);
   let displayName = $derived.by(() => {
     if (viewer) return viewer.name ?? viewer.login;
     if (gl) return gl.viewer.name ?? gl.viewer.login;
@@ -353,124 +316,11 @@
         cb = await cbStatus();
       }
       tokenInput = '';
-      addingAnotherProvider = false;
       await loadInitialData();
     } catch (e) {
       error = String(e);
     } finally {
       connecting = false;
-    }
-  }
-
-  function startAddingProvider() {
-    addingAnotherProvider = true;
-    error = null;
-    // Default to whichever single provider still can be added; otherwise
-    // leave the current chosenProvider so the tab strip is visible.
-    const open = [
-      canAddGithub && 'github',
-      canAddGitlab && 'gitlab',
-      canAddCodeberg && 'codeberg',
-    ].filter(Boolean) as Array<'github' | 'gitlab' | 'codeberg'>;
-    if (open.length === 1) chosenProvider = open[0];
-  }
-
-  function cancelAdding() {
-    addingAnotherProvider = false;
-    tokenInput = '';
-    error = null;
-  }
-
-  /** Disconnect a provider. Confirms first so a misclick can't quietly
-   *  drop a session — re-pasting a PAT is annoying. */
-  async function disconnect(kind: 'github' | 'gitlab' | 'codeberg') {
-    const label =
-      kind === 'github' ? 'GitHub' : kind === 'gitlab' ? 'GitLab' : 'Codeberg';
-    if (!confirm(`Disconnect ${label}? The stored token will be removed from your Keychain.`)) {
-      return;
-    }
-    error = null;
-    try {
-      if (kind === 'github') {
-        await ghDisconnect();
-        viewer = null;
-      } else if (kind === 'gitlab') {
-        await glDisconnect();
-        gl = null;
-      } else {
-        await cbDisconnect();
-        cb = null;
-      }
-      // Re-fetch waiting items so the disconnected provider's entries drop
-      // out of the list immediately.
-      if (connected) {
-        items = await listWaiting();
-        lastSyncedAt = new Date();
-      } else {
-        items = [];
-      }
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  // ── Settings actions ───────────────────────────────────────────────────
-
-  function openSettings() {
-    showSettings = true;
-    error = null;
-  }
-  function closeSettings() {
-    showSettings = false;
-  }
-
-  /** Open a native folder picker, append the chosen path to scan_roots,
-   *  persist, and rescan so the new path shows up immediately. */
-  async function addScanRoot() {
-    let chosen: string | null = null;
-    try {
-      const result = await openDialog({
-        directory: true,
-        multiple: false,
-        title: 'Choose a folder to scan for Git repositories',
-      });
-      if (typeof result === 'string') chosen = result;
-    } catch (e) {
-      error = `Folder picker failed: ${e}`;
-      return;
-    }
-    if (!chosen) return;
-    if (settings.scan_roots.includes(chosen)) return;
-    settings = { ...settings, scan_roots: [...settings.scan_roots, chosen] };
-    await persistSettings();
-    await rescanLocals();
-  }
-
-  async function removeScanRoot(path: string) {
-    settings = {
-      ...settings,
-      scan_roots: settings.scan_roots.filter((p) => p !== path),
-    };
-    await persistSettings();
-    await rescanLocals();
-  }
-
-  async function persistSettings() {
-    savingSettings = true;
-    try {
-      await saveSettings(settings);
-    } catch (e) {
-      error = `Saving settings failed: ${e}`;
-    } finally {
-      savingSettings = false;
-    }
-  }
-
-  async function rescanLocals() {
-    try {
-      locals = await listLocalRepos();
-    } catch (e) {
-      error = `Local scan failed: ${e}`;
     }
   }
 
@@ -698,13 +548,14 @@
     return () => clearInterval(handle);
   });
 
-  // Cross-window sync. The main window emits no auth changes itself (yet),
-  // but it does listen for ours — and when this effect runs in the popover
-  // it also catches `provider-changed` events fired by our own auth
-  // commands, so the popover gets a free safety net if any code path
-  // forgets to update local state after a token op.
+  // Cross-window sync. The main window owns settings + the disconnect /
+  // add-provider UI, so we listen for its events and re-fetch on demand:
+  //   * `provider-changed` — token added or removed somewhere; refresh auth
+  //   * `settings-changed` — notifications toggle, editor command, etc.
   $effect(() => {
-    let unlisten: (() => void) | null = null;
+    let unlistenProvider: (() => void) | null = null;
+    let unlistenSettings: (() => void) | null = null;
+
     void listen<unknown>('provider-changed', async () => {
       try {
         const [ghViewer, glRes, cbRes] = await Promise.all([
@@ -725,10 +576,22 @@
         error = String(e);
       }
     }).then((u) => {
-      unlisten = u;
+      unlistenProvider = u;
     });
+
+    void listen<unknown>('settings-changed', async () => {
+      try {
+        settings = await getSettings();
+      } catch (e) {
+        error = String(e);
+      }
+    }).then((u) => {
+      unlistenSettings = u;
+    });
+
     return () => {
-      unlisten?.();
+      unlistenProvider?.();
+      unlistenSettings?.();
     };
   });
 </script>
@@ -764,10 +627,9 @@
       </button>
       <button
         class="ib"
-        class:on={showSettings}
-        data-tip={showSettings ? 'Back to overview' : 'Settings'}
+        data-tip="Settings (opens main window)"
         aria-label="Settings"
-        onclick={() => (showSettings ? closeSettings() : openSettings())}
+        onclick={() => void openMainSettings()}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
           <circle cx="12" cy="12" r="3" />
@@ -779,170 +641,6 @@
     {#if loading}
       <div class="state-pad">
         <p class="loading-text">Connecting…</p>
-      </div>
-    {:else if showSettings}
-      <!-- Settings panel — scan roots, connected providers, version. -->
-      <div class="settings">
-        <section class="set-sec">
-          <h3>Scan <em>roots</em></h3>
-          <p class="set-help">
-            gitBuddy walks these folders looking for <code>.git</code> checkouts.
-            <code>node_modules</code>, build outputs and macOS junk are skipped.
-          </p>
-          {#if settings.scan_roots.length === 0}
-            <p class="set-empty">No scan roots yet.</p>
-          {:else}
-            <ul class="path-list">
-              {#each settings.scan_roots as path (path)}
-                <li class="path-row">
-                  <span class="path-text" title={path}>{path}</span>
-                  <button
-                    type="button"
-                    class="path-remove"
-                    data-tip="Remove from scan list"
-                    aria-label="Remove {path}"
-                    onclick={() => removeScanRoot(path)}
-                    disabled={savingSettings}
-                  >
-                    ×
-                  </button>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-          <button
-            type="button"
-            class="set-add"
-            onclick={addScanRoot}
-            disabled={savingSettings}
-          >
-            + Add folder…
-          </button>
-        </section>
-
-        <section class="set-sec">
-          <h3><em>Notifications</em></h3>
-          <p class="set-help">
-            Fire a macOS notification when a poll surfaces a new issue, PR
-            or MR that's waiting on you. Releases and CI events join in a
-            later iteration.
-          </p>
-          <label class="set-toggle">
-            <input
-              type="checkbox"
-              checked={settings.notifications_enabled}
-              onchange={(e) => toggleNotifications((e.target as HTMLInputElement).checked)}
-            />
-            <span>Enable notifications</span>
-          </label>
-          {#if settings.notifications_enabled && notificationPermission === 'denied'}
-            <p class="set-warn">
-              macOS hasn't granted notification permission. Open
-              <em>System Settings → Notifications → gitBuddy</em> to allow them.
-            </p>
-          {/if}
-        </section>
-
-        <section class="set-sec">
-          <h3>Open in <em>editor</em></h3>
-          <p class="set-help">
-            Command run when you pick <em>Open in editor</em> from a repo's
-            right-click menu. The repo's local path is appended. Common
-            values: <code>code</code>, <code>cursor</code>, <code>zed</code>,
-            <code>idea</code>. Leave empty to hide that menu entry.
-          </p>
-          <input
-            type="text"
-            class="set-input"
-            bind:value={editorInput}
-            onblur={persistEditorCommand}
-            onkeydown={(e) => e.key === 'Enter' && persistEditorCommand()}
-            placeholder="code"
-            spellcheck="false"
-            autocomplete="off"
-          />
-        </section>
-
-        <section class="set-sec">
-          <h3>Connected <em>providers</em></h3>
-          {#if !connected}
-            <p class="set-empty">No providers yet.</p>
-          {:else}
-            <ul class="prov-list">
-              {#if viewer}
-                <li class="prov-row">
-                  <span class="pchip gh">gh</span>
-                  <div class="prov-meta">
-                    <div class="prov-name">{viewer.name ?? viewer.login}</div>
-                    <div class="prov-host">github.com</div>
-                  </div>
-                  <button
-                    type="button"
-                    class="prov-disconnect"
-                    data-tip="Remove this account"
-                    onclick={() => disconnect('github')}
-                  >
-                    Disconnect
-                  </button>
-                </li>
-              {/if}
-              {#if gl}
-                <li class="prov-row">
-                  <span class="pchip {gl.base_url.includes('gitlab.com') ? 'gl' : 'gl-self'}">
-                    {gl.base_url.includes('gitlab.com')
-                      ? 'gl'
-                      : providerChipText({ provider: 'mpsd-gitlab', html_url: gl.base_url })}
-                  </span>
-                  <div class="prov-meta">
-                    <div class="prov-name">{gl.viewer.name ?? gl.viewer.login}</div>
-                    <div class="prov-host">{new URL(gl.base_url).host}</div>
-                  </div>
-                  <button
-                    type="button"
-                    class="prov-disconnect"
-                    data-tip="Remove this account"
-                    onclick={() => disconnect('gitlab')}
-                  >
-                    Disconnect
-                  </button>
-                </li>
-              {/if}
-              {#if cb}
-                <li class="prov-row">
-                  <span class="pchip cb">cb</span>
-                  <div class="prov-meta">
-                    <div class="prov-name">{cb.viewer.name ?? cb.viewer.login}</div>
-                    <div class="prov-host">{new URL(cb.base_url).host}</div>
-                  </div>
-                  <button
-                    type="button"
-                    class="prov-disconnect"
-                    data-tip="Remove this account"
-                    onclick={() => disconnect('codeberg')}
-                  >
-                    Disconnect
-                  </button>
-                </li>
-              {/if}
-            </ul>
-          {/if}
-          {#if canAddAny}
-            <button
-              type="button"
-              class="set-add"
-              onclick={() => {
-                closeSettings();
-                startAddingProvider();
-              }}
-            >
-              + Add provider…
-            </button>
-          {/if}
-        </section>
-
-        {#if error}
-          <p class="err">{error}</p>
-        {/if}
       </div>
     {:else if showOnboarding}
       <!-- Onboarding: no account, or user clicked "+ add provider". -->
@@ -1125,11 +823,6 @@
         {/if}
 
         <div class="setup-actions">
-          {#if connected}
-            <button type="button" class="secondary" onclick={cancelAdding} disabled={connecting}>
-              Cancel
-            </button>
-          {/if}
           <button
             class="primary"
             onclick={connect}
@@ -1597,236 +1290,6 @@
   }
   .add-provider:hover { text-decoration: underline; }
 
-  /* Settings panel ------------------------------------------------- */
-  .settings {
-    flex: 1;
-    overflow-y: auto;
-    padding: 18px 18px 22px;
-    display: flex;
-    flex-direction: column;
-    gap: 22px;
-  }
-  .ib.on {
-    background: var(--terracotta-soft);
-    color: var(--terracotta);
-  }
-  .set-sec h3 {
-    margin: 0 0 4px;
-    font-family: var(--font-display);
-    font-size: 18px;
-    font-weight: 400;
-    letter-spacing: -0.01em;
-    color: var(--ink);
-  }
-  .set-sec h3 em {
-    font-style: italic;
-    color: var(--terracotta);
-  }
-  .set-help {
-    margin: 0 0 12px;
-    font-size: 11.5px;
-    color: var(--ink-3);
-    line-height: 1.5;
-  }
-  .set-help code {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    background: var(--cream-2);
-    padding: 1px 4px;
-    border-radius: 4px;
-    color: var(--ink-2);
-  }
-  .set-empty {
-    margin: 0 0 10px;
-    font-size: 12px;
-    color: var(--ink-3);
-    font-style: italic;
-    font-family: var(--font-display);
-  }
-  .path-list {
-    list-style: none;
-    padding: 0;
-    margin: 0 0 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .path-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 10px;
-    background: var(--paper-2);
-    border: 1px solid var(--line);
-    border-radius: var(--r-sm);
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    color: var(--ink-2);
-  }
-  .path-text {
-    flex: 1;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .path-remove {
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    color: var(--ink-3);
-    font-size: 16px;
-    line-height: 1;
-    display: grid;
-    place-items: center;
-    transition: background 0.15s, color 0.15s;
-  }
-  .path-remove:hover:not(:disabled) {
-    background: var(--terracotta-soft);
-    color: var(--terracotta);
-  }
-  .path-remove:disabled { opacity: 0.4; cursor: default; }
-  .set-add {
-    align-self: flex-start;
-    padding: 7px 12px;
-    border: 1px dashed var(--line-2);
-    border-radius: var(--r-sm);
-    font-size: 12.5px;
-    color: var(--ink-2);
-    background: transparent;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
-  }
-  .set-add:hover:not(:disabled) {
-    background: var(--cream-2);
-    border-color: var(--terracotta);
-    color: var(--terracotta);
-  }
-  .set-add:disabled { opacity: 0.5; cursor: default; }
-
-  .set-input {
-    width: 100%;
-    height: 34px;
-    padding: 0 12px;
-    border: 1px solid var(--line-2);
-    border-radius: var(--r-sm);
-    font: inherit;
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    background: var(--paper-2);
-    color: var(--ink);
-    outline: none;
-    transition: border-color 0.15s, background 0.15s;
-  }
-  .set-input:focus {
-    border-color: var(--terracotta);
-    background: var(--paper);
-  }
-  .set-toggle {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 13px;
-    color: var(--ink);
-    cursor: pointer;
-    user-select: none;
-  }
-  .set-toggle input[type='checkbox'] {
-    appearance: none;
-    width: 32px;
-    height: 18px;
-    border-radius: 999px;
-    background: var(--cream-3);
-    position: relative;
-    cursor: pointer;
-    transition: background 0.15s;
-    flex-shrink: 0;
-  }
-  .set-toggle input[type='checkbox']::after {
-    content: '';
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--paper);
-    transition: transform 0.18s ease;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
-  }
-  .set-toggle input[type='checkbox']:checked {
-    background: var(--sage);
-  }
-  .set-toggle input[type='checkbox']:checked::after {
-    transform: translateX(14px);
-  }
-  .set-warn {
-    margin: 8px 0 0;
-    font-size: 11.5px;
-    color: var(--plum);
-    background: var(--plum-soft);
-    padding: 6px 10px;
-    border-radius: var(--r-sm);
-  }
-  .set-warn em {
-    font-style: italic;
-    color: inherit;
-  }
-
-  .prov-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .prov-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 10px;
-    background: var(--paper-2);
-    border: 1px solid var(--line);
-    border-radius: var(--r-sm);
-  }
-  .prov-meta { flex: 1; min-width: 0; }
-  .prov-disconnect {
-    font-size: 11.5px;
-    color: var(--ink-3);
-    padding: 5px 10px;
-    border-radius: var(--r-sm);
-    background: transparent;
-    transition: background 0.15s, color 0.15s;
-  }
-  .prov-disconnect:hover {
-    background: var(--plum-soft);
-    color: var(--plum);
-  }
-  .prov-row .pchip {
-    width: 26px; height: 26px;
-    border-radius: var(--r-sm);
-    display: grid; place-items: center;
-    font-family: var(--font-mono);
-    font-size: 9.5px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    color: var(--paper);
-    text-transform: lowercase;
-  }
-  .prov-row .pchip.gh      { background: #2E211B; }
-  .prov-row .pchip.gl      { background: linear-gradient(135deg, #E89C5C, #C66243); }
-  .prov-row .pchip.gl-self { background: linear-gradient(135deg, #B6A5C9, #6E5E80); }
-  .prov-row .pchip.cb      { background: linear-gradient(135deg, #8DBBC9, #4E7A8A); }
-  .prov-name {
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--ink);
-  }
-  .prov-host {
-    font-size: 11px;
-    color: var(--ink-3);
-    font-family: var(--font-mono);
-    margin-top: 1px;
-  }
   .err {
     margin: 0;
     color: var(--plum);

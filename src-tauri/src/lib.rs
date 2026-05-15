@@ -53,6 +53,7 @@ pub fn run() {
             commands::cb_status,
             commands::cb_disconnect,
             commands::open_main,
+            commands::open_main_settings,
             commands::list_waiting,
             commands::list_repos,
             commands::list_releases,

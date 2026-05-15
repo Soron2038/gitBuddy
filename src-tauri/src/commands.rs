@@ -24,6 +24,10 @@ use tokio::sync::RwLock;
 /// popover and the main window subscribe and re-fetch on receipt, so the
 /// two stay consistent without per-window polling at the auth layer.
 const EVT_PROVIDER_CHANGED: &str = "provider-changed";
+/// Fired by `save_settings` so both windows pick up changes to the editor
+/// command, notification toggle, scan roots, etc. without waiting for a
+/// restart or the next 5-minute poll.
+const EVT_SETTINGS_CHANGED: &str = "settings-changed";
 
 const GH_KEYCHAIN_KEY: &str = "github";
 const GL_KEYCHAIN_KEY: &str = "gitlab";
@@ -274,6 +278,16 @@ pub fn open_main(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Same as `open_main` but also tells the main window to switch to its
+/// Settings view. The popover wires its gear icon here so settings live in
+/// the spacious main window rather than inside the 360 px popover.
+#[tauri::command]
+pub fn open_main_settings(app: AppHandle) -> Result<(), String> {
+    open_main(app.clone())?;
+    let _ = app.emit("main-window-navigate", "settings");
+    Ok(())
+}
+
 // ── Aggregated data commands ───────────────────────────────────────────────
 //
 // These fan out across every connected provider. A failure in one provider
@@ -393,7 +407,9 @@ pub fn get_settings(app: AppHandle) -> Result<Settings, String> {
 
 #[tauri::command]
 pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
-    settings::save(&app, &settings)
+    settings::save(&app, &settings)?;
+    let _ = app.emit(EVT_SETTINGS_CHANGED, ());
+    Ok(())
 }
 
 /// Run the user-configured editor command with `path` appended as the final

@@ -209,9 +209,13 @@ export const cbSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
   invoke('cb_set_token', { token, baseUrl });
 export const cbDisconnect = (): Promise<void> => invoke('cb_disconnect');
 
-/** Reveal the main window. (Currently still shows stub data — proper
- *  wiring to the live providers is on the roadmap.) */
+/** Reveal the main window. */
 export const openMainWindow = (): Promise<void> => invoke('open_main');
+
+/** Reveal the main window and navigate it to its Settings view. The popover
+ *  forwards its gear-icon click here — settings live in the main window so
+ *  they have room to breathe. */
+export const openMainSettings = (): Promise<void> => invoke('open_main_settings');
 
 // ── Aggregated data (across all connected providers) ───────────────────────
 
