@@ -95,6 +95,9 @@
   let menuY = $state(0);
   let menuItems: MenuItem[] = $state([]);
 
+  // ── Detail pane ──────────────────────────────────────────────────────
+  let selectedRepo = $state<Repo | null>(null);
+
   // ── Filters / Search ─────────────────────────────────────────────────
   let status = $state<Status>('all');
   let searchQuery = $state('');
@@ -303,6 +306,46 @@
     return `https://${p.host}/${p.viewer.login}`;
   }
 
+  // ── Detail-pane derivations ─────────────────────────────────────────
+  // Modus-Wechsel verwirft die Selektion: das selektierte Repo könnte im
+  // neuen Filter gar nicht mehr existieren.
+  $effect(() => {
+    void status;
+    selectedRepo = null;
+  });
+
+  function repoFullName(r: Repo): string {
+    return `${r.owner}/${r.name}`;
+  }
+
+  let detailPaneOpen = $derived(
+    selectedRepo !== null && (status === 'all' || status === 'local'),
+  );
+
+  let selectedFullName = $derived(
+    selectedRepo ? repoFullName(selectedRepo) : null,
+  );
+  let selectedLocalDiag = $derived(
+    selectedRepo
+      ? (localByKey.get(localKeyForRepo(selectedRepo)) ?? [])
+      : [],
+  );
+  let selectedCi = $derived(
+    selectedRepo ? (ciRuns.find((c) => c.repo_id === selectedRepo!.id) ?? null) : null,
+  );
+  let selectedRelease = $derived.by(() => {
+    if (!selectedFullName) return null;
+    return (
+      releases.find((r) => r.repo_full_name === selectedFullName) ?? null
+    );
+  });
+  let selectedItems = $derived(
+    selectedFullName
+      ? items.filter((it) => it.repo === selectedFullName)
+      : [],
+  );
+  let selectedEditorCmd = $derived(settings.editor_command?.trim() ?? '');
+
   // ── Data loading ──────────────────────────────────────────────────────
   async function loadAllData() {
     const [
@@ -444,14 +487,24 @@
     return () => clearInterval(handle);
   });
 
-  // ── ⌘K / Ctrl+K → focus search ──────────────────────────────────────
+  // ── Window-local keyboard shortcuts ─────────────────────────────────
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (view !== 'overview') return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        if (view !== 'overview') return;
         e.preventDefault();
         searchInputEl?.focus();
         searchInputEl?.select();
+        return;
+      }
+      if (e.key === 'Escape' && selectedRepo !== null) {
+        // Wenn ein Input fokussiert ist, lass Escape den Fokus räumen,
+        // statt direkt die Selektion zu schließen.
+        const target = e.target as HTMLElement | null;
+        const inField =
+          target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+        if (inField) return;
+        selectedRepo = null;
       }
     };
     window.addEventListener('keydown', onKey);
@@ -769,7 +822,7 @@
       </div>
     {/if}
 
-    <div class="body">
+    <div class="body" class:has-detail={detailPaneOpen}>
       <aside class="side">
         <section class="sec">
           <h3>What's <em>waiting</em></h3>
@@ -912,7 +965,8 @@
             {@const ci = ciByRepo.get(r.id) ?? 'none'}
             <button
               class="card"
-              onclick={() => openExternal(r.html_url)}
+              class:selected={selectedRepo?.id === r.id}
+              onclick={() => (selectedRepo = selectedRepo?.id === r.id ? null : r)}
               oncontextmenu={(e) => openRepoMenu(e, r)}
             >
               <span class="pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
@@ -1112,6 +1166,226 @@
           {/if}
         {/if}
       </main>
+
+      {#if detailPaneOpen && selectedRepo}
+        {@const r = selectedRepo}
+        {@const fullName = repoFullName(r)}
+        {@const localDiag = selectedLocalDiag[0]}
+        {@const editorCmd = selectedEditorCmd}
+        <aside class="detail-pane" aria-label="Repo details">
+          <header class="dp-header">
+            <span class="pchip dp-pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
+            <div class="dp-titles">
+              <h2 class="dp-name">
+                <span class="dp-owner">{r.owner}/</span><span class="dp-rname">{r.name}</span>
+              </h2>
+              <div class="dp-meta">
+                <span>{providerLabel({ provider: r.provider, html_url: r.html_url })}</span>
+                {#if r.is_private}<span class="dp-badge">private</span>{/if}
+                {#if r.is_fork}<span class="dp-badge">fork</span>{/if}
+                <span class="dp-branch">{r.default_branch}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              class="dp-close"
+              onclick={() => (selectedRepo = null)}
+              aria-label="Close detail pane"
+              data-tip="Close (Esc)"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+            </button>
+          </header>
+
+          {#if r.description}
+            <p class="dp-desc">{r.description}</p>
+          {/if}
+
+          <div class="dp-actions">
+            <button
+              type="button"
+              class="dp-action primary"
+              onclick={() => openExternal(r.html_url)}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M7 17 17 7" />
+                <path d="M7 7h10v10" />
+              </svg>
+              Open in browser
+            </button>
+            {#if localDiag}
+              <button
+                type="button"
+                class="dp-action"
+                onclick={() => revealItemInDir(localDiag.path)}
+                data-tip="Reveal in Finder"
+              >
+                Show in Finder
+              </button>
+              {#if editorCmd.length > 0}
+                <button
+                  type="button"
+                  class="dp-action"
+                  onclick={() => runEditor(localDiag.path)}
+                  data-tip="Open with {editorCmd}"
+                >
+                  Open in {editorCmd}
+                </button>
+              {/if}
+            {/if}
+            {#if r.clone_url}
+              {@const cloneUrl = r.clone_url}
+              <button
+                type="button"
+                class="dp-action"
+                onclick={() => writeText(cloneUrl)}
+                data-tip="Copy to clipboard"
+              >
+                Copy HTTPS
+              </button>
+            {/if}
+            {#if r.ssh_url}
+              {@const sshUrl = r.ssh_url}
+              <button
+                type="button"
+                class="dp-action"
+                onclick={() => writeText(sshUrl)}
+                data-tip="Copy to clipboard"
+              >
+                Copy SSH
+              </button>
+            {/if}
+          </div>
+
+          <section class="dp-sec">
+            <h3 class="dp-sec-h">Clone</h3>
+            {#if selectedLocalDiag.length === 0}
+              <p class="dp-empty">
+                Not cloned locally.
+                {#if settings.scan_roots.length === 0}
+                  Add a folder in <button
+                    type="button"
+                    class="link-inline"
+                    onclick={() => (view = 'settings')}
+                  >Settings</button> for gitBuddy to find local copies.
+                {/if}
+              </p>
+            {:else}
+              {#each selectedLocalDiag as l (l.path)}
+                {@const dirty = l.dirty_staged + l.dirty_unstaged}
+                <div class="dp-clone">
+                  <div class="dp-clone-path" title={l.path}>{l.path}</div>
+                  <div class="dp-clone-row">
+                    <span class="dp-clone-branch">
+                      <span class="d" class:off={l.detached}></span>
+                      {l.branch ?? (l.detached ? 'detached' : '—')}
+                    </span>
+                    {#if l.ahead > 0}<span class="dp-clone-stat warn">{l.ahead} ahead</span>{/if}
+                    {#if l.behind > 0}<span class="dp-clone-stat warn">{l.behind} behind</span>{/if}
+                    {#if dirty > 0}<span class="dp-clone-stat warn">{dirty} uncommitted</span>{/if}
+                    {#if l.untracked > 0}<span class="dp-clone-stat">{l.untracked} untracked</span>{/if}
+                    {#if l.ahead === 0 && l.behind === 0 && dirty === 0 && l.untracked === 0}
+                      <span class="dp-clone-stat clean">clean</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            {/if}
+          </section>
+
+          <section class="dp-sec">
+            <h3 class="dp-sec-h">CI</h3>
+            {#if selectedCi === null || selectedCi.status === 'none'}
+              <p class="dp-empty">No recent workflow runs.</p>
+            {:else}
+              {@const ci = selectedCi}
+              <div class="dp-ci">
+                <span class="rci {ci.status}">
+                  <span class="b"></span>
+                  {#if ci.status === 'ok'}passing
+                  {:else if ci.status === 'fail'}failing
+                  {:else if ci.status === 'run'}running
+                  {:else if ci.status === 'cancelled'}cancelled
+                  {/if}
+                </span>
+                <span class="dp-ci-meta">
+                  {ci.workflow_name ?? 'workflow'}
+                  {#if ci.branch}<span class="dp-ci-branch">on {ci.branch}</span>{/if}
+                </span>
+                {#if ci.html_url}
+                  {@const ciUrl = ci.html_url}
+                  <button
+                    type="button"
+                    class="dp-link"
+                    onclick={() => openExternal(ciUrl)}
+                  >View run →</button>
+                {/if}
+              </div>
+            {/if}
+          </section>
+
+          <section class="dp-sec">
+            <h3 class="dp-sec-h">Latest release</h3>
+            {#if selectedRelease === null}
+              <p class="dp-empty">No releases published.</p>
+            {:else}
+              {@const rel = selectedRelease}
+              <div class="dp-release">
+                <div class="dp-release-title">
+                  <span class="dp-release-name">{rel.name || rel.tag}</span>
+                  {#if rel.is_prerelease}<span class="badge-pre">pre</span>{/if}
+                  {#if rel.is_new}<span class="new-badge">NEW</span>{/if}
+                </div>
+                <div class="dp-release-meta">
+                  <span class="row-tag">{rel.tag}</span>
+                  <span class="row-dot">·</span>
+                  <span>{rel.age_human}</span>
+                  <button
+                    type="button"
+                    class="dp-link"
+                    onclick={() => openExternal(rel.html_url)}
+                  >View release →</button>
+                </div>
+              </div>
+            {/if}
+          </section>
+
+          <section class="dp-sec">
+            <h3 class="dp-sec-h">
+              Waiting on you
+              {#if selectedItems.length > 0}
+                <span class="dp-sec-count">{selectedItems.length}</span>
+              {/if}
+            </h3>
+            {#if selectedItems.length === 0}
+              <p class="dp-empty">Nothing waiting in this repo.</p>
+            {:else}
+              <div class="dp-items">
+                {#each selectedItems as it (it.id)}
+                  <button
+                    type="button"
+                    class="row dp-item"
+                    onclick={() => openExternal(it.url)}
+                    oncontextmenu={(e) => openItemMenu(e, it)}
+                  >
+                    <span class="kind-chip {it.kind.toLowerCase()}">{it.kind}</span>
+                    <span class="row-body">
+                      <span class="row-title">{it.title}</span>
+                      <span class="row-meta">
+                        <span class="row-reason">{it.reason === 'review' ? 'review requested' : it.reason}</span>
+                      </span>
+                    </span>
+                    <span class="row-age">{it.age_human}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </section>
+        </aside>
+      {/if}
     </div>
   {:else}
     <!-- ─────────── Settings ─────────── -->
@@ -1592,6 +1866,9 @@
     display: grid;
     grid-template-columns: 240px 1fr;
     min-height: 0;
+  }
+  .body.has-detail {
+    grid-template-columns: 240px minmax(0, 1.4fr) minmax(360px, 1fr);
   }
   .side {
     padding: 22px 14px;
@@ -2566,10 +2843,314 @@
   }
 
   /* Responsive collapse for narrow windows */
+  @media (max-width: 1024px) {
+    .body.has-detail {
+      grid-template-columns: minmax(0, 1.4fr) minmax(360px, 1fr);
+    }
+    .body.has-detail .side { display: none; }
+  }
   @media (max-width: 720px) {
     .body { grid-template-columns: 1fr; }
+    .body.has-detail { grid-template-columns: 1fr; }
+    .body.has-detail .content { display: none; }
     .side { display: none; }
     .stats { grid-template-columns: repeat(2, 1fr); }
     .repo-grid { grid-template-columns: 1fr; }
+  }
+
+  /* Detail pane --------------------------------------------------- */
+  .detail-pane {
+    border-left: 1px solid var(--line);
+    background: var(--paper-2);
+    padding: 22px 24px 26px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    animation: dp-in 0.18s ease-out;
+  }
+  @keyframes dp-in {
+    from {
+      opacity: 0;
+      transform: translateX(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .card.selected {
+    background: var(--terracotta-soft);
+    border-color: rgba(198, 98, 67, 0.22);
+    box-shadow: var(--shadow-2);
+  }
+  .card.selected:hover {
+    transform: none;
+  }
+
+  .dp-header {
+    display: grid;
+    grid-template-columns: 36px 1fr auto;
+    gap: 12px;
+    align-items: start;
+  }
+  .dp-pchip {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    font-size: 13px;
+  }
+  .dp-titles {
+    min-width: 0;
+  }
+  .dp-name {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    margin: 0 0 4px;
+    line-height: 1.15;
+    word-break: break-word;
+  }
+  .dp-owner { color: var(--ink-3); }
+  .dp-rname { font-weight: 600; }
+  .dp-meta {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-3);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .dp-badge {
+    background: var(--cream-2);
+    color: var(--ink-2);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .dp-branch {
+    background: var(--cream-2);
+    color: var(--ink-2);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .dp-close {
+    width: 28px;
+    height: 28px;
+    border-radius: var(--r-sm);
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .dp-close:hover {
+    background: var(--cream-2);
+    color: var(--terracotta);
+  }
+
+  .dp-desc {
+    margin: 0;
+    font-size: 13.5px;
+    color: var(--ink-2);
+    line-height: 1.55;
+  }
+
+  .dp-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .dp-action {
+    height: 30px;
+    padding: 0 12px;
+    background: var(--paper);
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-sm);
+    font-size: 12.5px;
+    color: var(--ink-2);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  }
+  .dp-action:hover {
+    background: var(--cream-2);
+    border-color: var(--terracotta);
+    color: var(--terracotta);
+  }
+  .dp-action.primary {
+    background: var(--terracotta);
+    color: white;
+    border-color: transparent;
+  }
+  .dp-action.primary:hover {
+    background: #B05738;
+    color: white;
+    border-color: transparent;
+  }
+
+  .dp-sec {
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .dp-sec-h {
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--ink-3);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .dp-sec-count {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--terracotta-soft);
+    color: var(--terracotta);
+    padding: 1px 7px;
+    border-radius: 999px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 600;
+  }
+  .dp-empty {
+    margin: 0;
+    color: var(--ink-3);
+    font-size: 12.5px;
+    font-style: italic;
+  }
+
+  .dp-clone {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .dp-clone + .dp-clone { margin-top: 8px; }
+  .dp-clone-path {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-2);
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    padding: 6px 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dp-clone-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+  .dp-clone-branch {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--ink-2);
+  }
+  .dp-clone-branch .d {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--sage);
+  }
+  .dp-clone-branch .d.off { background: var(--ink-4); }
+  .dp-clone-stat { color: var(--ink-3); }
+  .dp-clone-stat.warn { color: var(--terracotta); }
+  .dp-clone-stat.clean { color: var(--sage); }
+
+  .dp-ci {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .dp-ci-meta {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-2);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .dp-ci-branch {
+    color: var(--ink-3);
+  }
+
+  .dp-release {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .dp-release-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .dp-release-name {
+    font-size: 14px;
+    color: var(--ink);
+    font-weight: 500;
+  }
+  .dp-release-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    flex-wrap: wrap;
+  }
+
+  .dp-link {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--terracotta);
+    font-size: 12px;
+    cursor: pointer;
+    margin-left: auto;
+  }
+  .dp-link:hover { text-decoration: underline; }
+
+  .dp-items {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .dp-item {
+    padding: 10px 12px;
+    grid-template-columns: 28px 1fr auto;
+    gap: 10px;
+  }
+  .dp-item .kind-chip {
+    width: 26px;
+    height: 26px;
+    font-size: 10px;
+  }
+  .dp-item .row-title {
+    font-size: 13px;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
 </style>
