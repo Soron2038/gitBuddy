@@ -98,8 +98,21 @@ jobs:
       # Produces target/release/bundle/macos/gitBuddy.app and a .dmg under
       # target/release/bundle/dmg/. Unsigned — signing & notarization will be
       # added once an Apple Developer ID is configured (see PRD §6.5).
+      #
+      # `export PATH=...` is belt-and-braces against the rustup-init shim at
+      # /usr/local/bin/cargo: even though $GITHUB_PATH was prepended above,
+      # `npm run tauri build` spawns @tauri-apps/cli which calls `cargo
+      # metadata` in a subprocess, and intermittent runs still hit the shim.
+      # Pinning PATH in the script is the most explicit fix and also dumps
+      # `which cargo` to logs so future regressions are diagnosable in one
+      # glance.
       - name: Build app bundle
-        run: npm run tauri build -- --bundles app,dmg
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "PATH=$PATH"
+          which cargo
+          cargo --version
+          npm run tauri build -- --bundles app,dmg
 
       - name: Upload artifact (DMG)
         uses: actions/upload-artifact@v4
