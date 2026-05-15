@@ -17,8 +17,13 @@ use crate::{
     types::*,
 };
 use std::sync::Arc;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::RwLock;
+
+/// Event name fired whenever a provider connects or disconnects. Both the
+/// popover and the main window subscribe and re-fetch on receipt, so the
+/// two stay consistent without per-window polling at the auth layer.
+const EVT_PROVIDER_CHANGED: &str = "provider-changed";
 
 const GH_KEYCHAIN_KEY: &str = "github";
 const GL_KEYCHAIN_KEY: &str = "gitlab";
@@ -90,6 +95,7 @@ impl AppState {
 #[tauri::command]
 pub async fn gh_set_token(
     state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
     token: String,
 ) -> Result<Viewer, String> {
     let provider = GitHubProvider::connect(token.clone())
@@ -100,6 +106,7 @@ pub async fn gh_set_token(
         .await
         .map_err(|e| format!("keychain: {e}"))?;
     *state.github.write().await = Some(Arc::new(provider));
+    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(viewer)
 }
 
@@ -113,12 +120,16 @@ pub async fn gh_status(
 }
 
 #[tauri::command]
-pub async fn gh_disconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+pub async fn gh_disconnect(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     // Delete the keychain entry before clearing in-memory state so a crash
     // mid-disconnect doesn't leave a stale token that would re-auth on
     // next launch.
     let _ = keychain::delete(GH_KEYCHAIN_KEY).await;
     *state.github.write().await = None;
+    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(())
 }
 
@@ -144,6 +155,7 @@ pub async fn gl_set_token(
     settings::save(&app, &s)?;
 
     *state.gitlab.write().await = Some(Arc::new(provider));
+    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(viewer)
 }
 
@@ -179,6 +191,7 @@ pub async fn gl_disconnect(
     let mut s = settings::load(&app).unwrap_or_default();
     s.gitlab_base_url = None;
     settings::save(&app, &s)?;
+    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(())
 }
 
@@ -201,6 +214,7 @@ pub async fn cb_set_token(
     settings::save(&app, &s)?;
 
     *state.codeberg.write().await = Some(Arc::new(provider));
+    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(viewer)
 }
 
@@ -237,6 +251,7 @@ pub async fn cb_disconnect(
     let mut s = settings::load(&app).unwrap_or_default();
     s.codeberg_base_url = None;
     settings::save(&app, &s)?;
+    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(())
 }
 

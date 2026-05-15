@@ -21,12 +21,8 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, PhysicalPosition, Position,
+    Manager, PhysicalPosition, Position, WindowEvent,
 };
-
-// Only used in release builds — see the focus-hide block in `run()`.
-#[cfg(not(debug_assertions))]
-use tauri::WindowEvent;
 
 /// Monochrome sprout silhouette embedded at compile time. Designed to read
 /// cleanly at 22pt in the macOS menu bar; used as a template image so macOS
@@ -122,6 +118,27 @@ pub fn run() {
                 popover.on_window_event(move |event| {
                     if let WindowEvent::Focused(false) = event {
                         let _ = popover_clone.hide();
+                    }
+                });
+            }
+
+            // Close-to-hide on the main window. macOS convention for menu-bar
+            // apps: Cmd+W (or red traffic light) shouldn't quit the app, it
+            // should hide the window — the popover and tray stay live. We
+            // also flip the activation policy back to Accessory so the dock
+            // icon disappears, signalling "main window is closed".
+            if let Some(main) = app.get_webview_window("main") {
+                let main_clone = main.clone();
+                let app_handle = app.handle().clone();
+                main.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = main_clone.hide();
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = app_handle
+                                .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                        }
                     }
                 });
             }

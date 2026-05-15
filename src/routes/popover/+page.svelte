@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
   import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -695,6 +696,40 @@
       void refresh();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(handle);
+  });
+
+  // Cross-window sync. The main window emits no auth changes itself (yet),
+  // but it does listen for ours — and when this effect runs in the popover
+  // it also catches `provider-changed` events fired by our own auth
+  // commands, so the popover gets a free safety net if any code path
+  // forgets to update local state after a token op.
+  $effect(() => {
+    let unlisten: (() => void) | null = null;
+    void listen<unknown>('provider-changed', async () => {
+      try {
+        const [ghViewer, glRes, cbRes] = await Promise.all([
+          ghStatus(),
+          glStatus(),
+          cbStatus(),
+        ]);
+        viewer = ghViewer;
+        gl = glRes;
+        cb = cbRes;
+        if (viewer || gl || cb) {
+          items = await listWaiting();
+          lastSyncedAt = new Date();
+        } else {
+          items = [];
+        }
+      } catch (e) {
+        error = String(e);
+      }
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => {
+      unlisten?.();
+    };
   });
 </script>
 
