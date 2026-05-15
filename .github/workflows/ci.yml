@@ -37,16 +37,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # actions-rust-lang/setup-rust-toolchain puts ~/.cargo/bin at the front
-      # of $GITHUB_PATH. On macos-14 runners /usr/local/bin/cargo is a
-      # rustup-init shim that doesn't accept subcommands like `fmt`; without
-      # the prepend the shim wins and `cargo fmt` fails with
-      # "unexpected argument 'fmt'".
+      # actions-rust-lang/setup-rust-toolchain@v1 installs cargo into
+      # ~/.cargo/bin but only prepends it to $GITHUB_PATH when rustup is
+      # absent — and macos-14-arm64 ships a rustup-init shim as
+      # /usr/local/bin/cargo, so the prepend is skipped and the shim wins,
+      # breaking `cargo fmt` with "unexpected argument 'fmt'". The
+      # Force-cargo step below restores the expected ordering.
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           components: clippy, rustfmt
+
+      - name: Force cargo from ~/.cargo/bin over rustup-init shim
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
@@ -79,6 +83,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+
+      - name: Force cargo from ~/.cargo/bin over rustup-init shim
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
