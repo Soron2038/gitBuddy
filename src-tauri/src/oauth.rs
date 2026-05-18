@@ -20,11 +20,6 @@
 //!      cadence so the frontend can render a countdown and react to
 //!      `SlowDown` without the backend having to emit events.
 
-// The Tauri commands that consume this module land in the next commit; until
-// then nothing inside the binary calls these symbols. The unit tests cover
-// the parsing logic so the module isn't shipping completely unexercised.
-#![allow(dead_code)]
-
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

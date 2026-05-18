@@ -49,6 +49,8 @@ pub fn run() {
             commands::gh_set_token,
             commands::gh_status,
             commands::gh_disconnect,
+            commands::gh_oauth_begin,
+            commands::gh_oauth_poll,
             commands::gl_set_token,
             commands::gl_status,
             commands::gl_disconnect,

@@ -14,6 +14,7 @@ use crate::{
     gitlab::GitLabProvider,
     keychain, local_index,
     local_index::LocalRepo,
+    oauth::{self, DeviceCodeResponse, PollOutcome},
     settings::{self, Settings},
     types::*,
 };
@@ -195,7 +196,7 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
     };
 
     for account in file.accounts {
-        let token = match keychain::load(&account.id).await {
+        let raw = match keychain::load(&account.id).await {
             Ok(Some(t)) => t,
             Ok(None) => {
                 eprintln!(
@@ -207,6 +208,25 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
             Err(e) => {
                 eprintln!("gitbuddy: keychain load ({}) failed: {e}", account.id);
                 continue;
+            }
+        };
+
+        // PAT entries are bare token strings; OAuth entries are a JSON blob
+        // wrapping the access_token plus its scope and obtained_at. The
+        // providers all want a bare bearer token, so unpack here.
+        let token = match account.auth {
+            AuthMethod::Pat => raw,
+            AuthMethod::OauthDevice => {
+                match serde_json::from_str::<crate::oauth::OAuthTokens>(&raw) {
+                    Ok(t) => t.access_token,
+                    Err(e) => {
+                        eprintln!(
+                            "gitbuddy: oauth tokens blob for {} unparseable: {e}",
+                            account.id
+                        );
+                        continue;
+                    }
+                }
             }
         };
 
@@ -314,6 +334,85 @@ pub async fn gh_status(
 ) -> Result<Option<Viewer>, String> {
     state.ensure_initialized(&app).await;
     Ok(state.github.read().await.as_ref().map(|p| p.viewer.clone()))
+}
+
+/// Kick off the GitHub OAuth Device Flow. Returns the user_code (for the
+/// human to enter at `verification_uri`) plus the device_code + poll interval
+/// the caller must echo back into `gh_oauth_poll`. The browser is opened by
+/// the frontend via `tauri-plugin-opener`, consistent with how the existing
+/// "Create a token" links work.
+#[tauri::command]
+pub async fn gh_oauth_begin() -> Result<DeviceCodeResponse, String> {
+    let client = oauth_http_client()?;
+    oauth::begin_github(&client)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Outcome of a single Device Flow poll, returned to the frontend so it can
+/// either keep polling (Pending / SlowDown), surface an error (Denied /
+/// Expired), or transition to the connected state (Success). The discriminant
+/// tag is `kind` to match `oauth::PollOutcome`, with the connected viewer
+/// merged in for the Success arm so the UI can show "Connected as @login"
+/// without a follow-up round-trip.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GhOAuthPollResult {
+    Success { viewer: Viewer },
+    Pending,
+    SlowDown { interval: u64 },
+    Denied,
+    Expired,
+}
+
+#[tauri::command]
+pub async fn gh_oauth_poll(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+    device_code: String,
+) -> Result<GhOAuthPollResult, String> {
+    let client = oauth_http_client()?;
+    let outcome = oauth::poll_github(&client, &device_code)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match outcome {
+        PollOutcome::Pending => Ok(GhOAuthPollResult::Pending),
+        PollOutcome::SlowDown { interval } => Ok(GhOAuthPollResult::SlowDown { interval }),
+        PollOutcome::Denied => Ok(GhOAuthPollResult::Denied),
+        PollOutcome::Expired => Ok(GhOAuthPollResult::Expired),
+        PollOutcome::Success(tokens) => {
+            // Validate the token works against /user and populate the viewer.
+            // If GitHub immediately rejects it, surface as an error so the
+            // UI can ask the user to retry rather than pretending the
+            // connection succeeded.
+            let provider = GitHubProvider::connect(tokens.access_token.clone())
+                .await
+                .map_err(|e| format!("validating OAuth token: {e}"))?;
+            let viewer = provider.viewer.clone();
+            let account =
+                accounts::account_from(Provider::Github, &viewer, AuthMethod::OauthDevice, None);
+            // Persist the full tokens blob, not just the access_token —
+            // future fields (refresh_token if an org enables expiration,
+            // obtained_at for staleness checks) live there.
+            let blob = serde_json::to_string(&tokens)
+                .map_err(|e| format!("serialising oauth tokens: {e}"))?;
+            keychain::save(&account.id, &blob)
+                .await
+                .map_err(|e| format!("keychain: {e}"))?;
+            accounts::upsert(&app, account)?;
+            *state.github.write().await = Some(Arc::new(provider));
+            let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+            Ok(GhOAuthPollResult::Success { viewer })
+        }
+    }
+}
+
+fn oauth_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(concat!("gitBuddy/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("http client: {e}"))
 }
 
 #[tauri::command]
