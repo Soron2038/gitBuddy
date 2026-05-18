@@ -27,7 +27,6 @@
     providerChipText,
     providerCssClass,
     providerLabel,
-    providerHost,
     type Provider,
     type Viewer,
     type GitLabStatus,
@@ -124,13 +123,15 @@
   // ── Filters / Search ─────────────────────────────────────────────────
   let status = $state<Status>('all');
   let searchQuery = $state('');
-  // Hosts the user has explicitly hidden. Default: empty → everything shown.
-  // Hosts that disappear (provider disconnected) stay in the set; if the same
-  // host reconnects later, the previous on/off choice is preserved.
-  let disabledHosts = $state<Set<string>>(new Set());
   let reasonFilter = $state<Set<ItemReason>>(
     new Set<ItemReason>(['assigned', 'review', 'authored', 'mentioned']),
   );
+  /** Account ids the user wants to see. The set starts containing every
+   *  connected account; toggling a chip removes/adds. An effect reconciles
+   *  the set whenever the accounts list changes: newly added accounts
+   *  auto-appear in views (added to the set), disconnected ones drop out
+   *  (removed from the set). Same Set-membership shape as `reasonFilter`. */
+  let accountFilter = $state<Set<string>>(new Set());
   let searchInputEl = $state<HTMLInputElement | null>(null);
 
   // ── Derived ───────────────────────────────────────────────────────────
@@ -146,6 +147,18 @@
   let ciByRepo = $derived(
     new Map(ciRuns.map((r) => [r.repo_id, r.status] as [string, CiStatus])),
   );
+  /** O(1) lookup of an account by id — driven by every UI surface that
+   *  renders per-account chips/badges. Recomputed only when `accounts`
+   *  changes. */
+  let accountById = $derived(new Map(accounts.map((a) => [a.id, a])));
+  /** Distinct repos in the (unfiltered) raw list — used for the
+   *  "{shown} of {total}" label so the denominator reflects deduped
+   *  repos rather than the post-fan-out row count. */
+  let repoTotalCount = $derived(new Set(repos.map((r) => r.html_url)).size);
+  /** When true, the repo card shows one chip per contributing account so
+   *  the user can tell which of their accounts surfaced each row. With
+   *  only one account, those chips would be redundant noise. */
+  let showAccountBadges = $derived(accounts.length > 1);
 
   let waitingCount = $derived(items.length);
   let newReleasesCount = $derived(releases.filter((r) => r.is_new).length);
@@ -235,40 +248,62 @@
     return p.viewer.login.charAt(0).toUpperCase();
   }
   function repoCountForProvider(p: ProvBadge): number {
-    if (p.kind === 'github') return repos.filter((r) => r.provider === 'github').length;
-    if (p.kind === 'codeberg') return repos.filter((r) => r.provider === 'codeberg').length;
-    return repos.filter((r) => {
-      try {
-        return new URL(r.html_url).host === p.host;
-      } catch {
-        return false;
-      }
-    }).length;
+    // Count of distinct repos this specific account surfaces. Two accounts
+    // on the same host (and the same repo seen via both) each get their own
+    // count, which matches the per-account chip's mental model.
+    const seen = new Set<string>();
+    for (const r of repos) {
+      if (r.account_id !== p.accountId) continue;
+      seen.add(r.html_url);
+    }
+    return seen.size;
   }
 
   // ── Filter helpers ───────────────────────────────────────────────────
-  // Hostname an URL ableiten — fällt auf das statische providerHost zurück,
-  // falls die URL kaputt ist. Wichtig, damit self-hosted GitLab-Instanzen
-  // korrekt vom enabledHosts-Set adressiert werden.
-  function hostFor(p: Provider, url: string | null | undefined): string {
-    if (p === 'github') return 'github.com';
-    if (p === 'codeberg') return 'codeberg.org';
-    try {
-      if (url) return new URL(url).host;
-    } catch {
-      /* fall through */
-    }
-    return providerHost[p] ?? '';
+
+  /** True iff the item's source account is selected in the filter. Records
+   *  without an account_id (defensive — aggregator always sets it) pass
+   *  through, since dropping unattributed data is worse than showing it.
+   *  Supersedes the older host-based `disabledHosts` filter (M6.4): one
+   *  account-id is more granular than a host since two accounts can
+   *  share a host. */
+  function isAccountSelected(item: { account_id: string | null }): boolean {
+    if (!item.account_id) return true;
+    return accountFilter.has(item.account_id);
   }
 
-  function isRepoEnabled(r: Repo): boolean {
-    return !disabledHosts.has(hostFor(r.provider, r.html_url));
+  // Keep accountFilter in lockstep with the accounts list: newly connected
+  // accounts auto-appear in views; disconnected ones drop out.
+  $effect(() => {
+    const liveIds = new Set(accounts.map((a) => a.id));
+    let changed = false;
+    const next = new Set(accountFilter);
+    for (const id of liveIds) {
+      if (!next.has(id)) {
+        next.add(id);
+        changed = true;
+      }
+    }
+    for (const id of accountFilter) {
+      if (!liveIds.has(id)) {
+        next.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) accountFilter = next;
+  });
+
+  function toggleAccountFilter(id: string) {
+    const next = new Set(accountFilter);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    accountFilter = next;
   }
-  function isItemEnabled(it: WaitingItem): boolean {
-    return !disabledHosts.has(hostFor(it.provider, it.url));
+  function selectOnlyAccount(id: string) {
+    accountFilter = new Set([id]);
   }
-  function isReleaseEnabled(rel: Release): boolean {
-    return !disabledHosts.has(hostFor(rel.provider, rel.html_url));
+  function selectAllAccounts() {
+    accountFilter = new Set(accounts.map((a) => a.id));
   }
 
   function matchesSearch(r: Repo, q: string): boolean {
@@ -297,16 +332,39 @@
           : 'Search repos by name, owner, description…',
   );
 
-  let filteredRepos = $derived(
-    repos.filter((r) => isRepoEnabled(r) && matchesSearch(r, normalisedQuery)),
-  );
+  /** A Repo enriched with the list of accounts that surfaced it — after
+   *  dedup, one entry per unique html_url with a badge for each origin
+   *  account. The aggregator in `list_repos` returns one row per
+   *  (account, repo) pair; this is where we collapse them for display. */
+  type RepoEntry = Repo & { account_ids: string[] };
+
+  let filteredRepos = $derived.by((): RepoEntry[] => {
+    const filtered = repos.filter(
+      (r) => isAccountSelected(r) && matchesSearch(r, normalisedQuery),
+    );
+    const map = new Map<string, RepoEntry>();
+    for (const r of filtered) {
+      const existing = map.get(r.html_url);
+      if (existing) {
+        if (r.account_id && !existing.account_ids.includes(r.account_id)) {
+          existing.account_ids.push(r.account_id);
+        }
+      } else {
+        map.set(r.html_url, {
+          ...r,
+          account_ids: r.account_id ? [r.account_id] : [],
+        });
+      }
+    }
+    return Array.from(map.values());
+  });
   let filteredLocals = $derived(
     filteredRepos.filter((r) => localByKey.has(localKeyForRepo(r))),
   );
   let filteredItems = $derived(
     items.filter(
       (it) =>
-        isItemEnabled(it) &&
+        isAccountSelected(it) &&
         reasonFilter.has(it.reason) &&
         matchesSearchItem(it, normalisedQuery),
     ),
@@ -315,17 +373,10 @@
     releases.filter(
       (rel) =>
         rel.is_new &&
-        isReleaseEnabled(rel) &&
+        isAccountSelected(rel) &&
         matchesSearchRelease(rel, normalisedQuery),
     ),
   );
-
-  function toggleHost(host: string) {
-    const next = new Set(disabledHosts);
-    if (next.has(host)) next.delete(host);
-    else next.add(host);
-    disabledHosts = next;
-  }
 
   function toggleReason(reason: ItemReason) {
     const next = new Set(reasonFilter);
@@ -1015,7 +1066,7 @@
             class:on={status === 'all'}
             onclick={() => (status = 'all')}
           >
-            <span class="sw s"></span> All repos <span class="c">{repos.length}</span>
+            <span class="sw s"></span> All repos <span class="c">{repoTotalCount}</span>
           </button>
           <button
             type="button"
@@ -1041,14 +1092,26 @@
             <p class="side-empty">No providers connected yet.</p>
           {:else}
             {#each connectedProviders as p (p.accountId)}
-              {@const on = !disabledHosts.has(p.host)}
+              {@const on = accountFilter.has(p.accountId)}
               <div class="pill acct-pill" class:muted={!on}>
                 <button
                   type="button"
                   class="acct-toggle"
-                  onclick={() => toggleHost(p.host)}
+                  onclick={(e) => {
+                    // Plain click toggles inclusion; ⌥/Alt-click isolates to
+                    // just this account (and ⌥-clicking the only-on chip
+                    // re-selects all). Mirrors macOS list multi-select.
+                    if (e.altKey) {
+                      if (accountFilter.size === 1 && on) selectAllAccounts();
+                      else selectOnlyAccount(p.accountId);
+                    } else {
+                      toggleAccountFilter(p.accountId);
+                    }
+                  }}
                   aria-pressed={on}
-                  data-tip={on ? 'Hide this account' : 'Show this account'}
+                  data-tip={on
+                    ? 'Hide this account · ⌥-click to solo'
+                    : 'Show this account · ⌥-click to solo'}
                 >
                   <span class="ava {avatarClass(p)}">{avatarText(p)}</span>
                   <span class="acct-name">
@@ -1134,7 +1197,7 @@
             </div>
           </div>
 
-          {#snippet repoCardEntry(r: Repo)}
+          {#snippet repoCardEntry(r: RepoEntry)}
             {@const local = localByKey.get(localKeyForRepo(r))}
             {@const localDiag = local?.[0]}
             {@const ci = ciByRepo.get(r.id) ?? 'none'}
@@ -1144,7 +1207,32 @@
               onclick={() => (selectedRepo = selectedRepo?.id === r.id ? null : r)}
               oncontextmenu={(e) => openRepoMenu(e, r)}
             >
-              <span class="pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
+              {#if showAccountBadges && r.account_ids.length > 0}
+                <span class="acct-badges">
+                  {#each r.account_ids as id (id)}
+                    {@const a = accountById.get(id)}
+                    {#if a}
+                      {@const aHost = a.base_url
+                        ? (() => {
+                            try {
+                              return new URL(a.base_url!).host;
+                            } catch {
+                              return a.base_url!;
+                            }
+                          })()
+                        : 'github.com'}
+                      <span
+                        class="pchip {providerCssClass(a.provider)}"
+                        title="{a.login}@{aHost}"
+                      >
+                        {providerChipText({ provider: a.provider, html_url: a.base_url ?? '' })}
+                      </span>
+                    {/if}
+                  {/each}
+                </span>
+              {:else}
+                <span class="pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
+              {/if}
               <div class="rname">
                 <span class="owner">{r.owner}</span> / <b>{r.name}</b>
                 <div class="sub">
@@ -1191,8 +1279,8 @@
             <h2 class="section-h">
               Your <em>repos</em>
               <span class="count">
-                {filteredRepos.length} shown{#if filteredRepos.length !== repos.length}
-                  <span class="muted-count"> · of {repos.length}</span>
+                {filteredRepos.length} shown{#if filteredRepos.length !== repoTotalCount}
+                  <span class="muted-count"> · of {repoTotalCount}</span>
                 {/if}
               </span>
             </h2>
@@ -2463,6 +2551,16 @@
   .pchip.gl { background: linear-gradient(135deg, #E89C5C, #C66243); color: white; }
   .pchip.cb { background: linear-gradient(135deg, #8DBBC9, #4E7A8A); color: white; }
   .pchip.gl-self { background: linear-gradient(135deg, #B6A5C9, #6E5E80); color: white; }
+
+  /* Stack of provider/host chips on a repo card — appears in place of the
+     single .pchip when more than one account is connected, so the user can
+     see which of their accounts surface this repo. */
+  .acct-badges {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+  }
 
   .rname { line-height: 1.25; min-width: 0; }
   .rname .owner { color: var(--ink-3); font-weight: 400; font-size: 12.5px; }
