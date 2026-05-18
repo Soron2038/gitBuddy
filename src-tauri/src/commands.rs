@@ -18,6 +18,7 @@ use crate::{
     settings::{self, Settings},
     types::*,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::RwLock;
@@ -40,11 +41,16 @@ const GH_LEGACY_KEY: &str = "github";
 const GL_LEGACY_KEY: &str = "gitlab";
 const CB_LEGACY_KEY: &str = "codeberg";
 
+/// In-memory provider registry. One HashMap per provider type, keyed by
+/// `Account.id` (the v2 `<provider>:<host>:<login>` string). A single user
+/// can hold multiple accounts per provider — e.g. two GitLab instances or a
+/// personal + work GitHub — and each is restored / refreshed / removed
+/// independently.
 #[derive(Default)]
 pub struct AppState {
-    pub github: RwLock<Option<Arc<GitHubProvider>>>,
-    pub gitlab: RwLock<Option<Arc<GitLabProvider>>>,
-    pub codeberg: RwLock<Option<Arc<CodebergProvider>>>,
+    pub github: RwLock<HashMap<String, Arc<GitHubProvider>>>,
+    pub gitlab: RwLock<HashMap<String, Arc<GitLabProvider>>>,
+    pub codeberg: RwLock<HashMap<String, Arc<CodebergProvider>>>,
     /// Gates the one-time keychain restore so commands can wait for the
     /// initial auth attempt before reporting "no providers connected".
     init_attempted: tokio::sync::Mutex<bool>,
@@ -258,8 +264,9 @@ async fn finalise_migration(
 }
 
 /// Restore providers from `accounts.json` into the in-memory `AppState`.
-/// Currently single-account-per-provider in the UI, so we just pick the
-/// first record per provider; multi-account UI later will iterate.
+/// Every account is restored — keyed by its id — so two GitLab instances or
+/// a personal-plus-work GitHub end up co-resident in their respective
+/// HashMaps. Each connect failure is logged but doesn't blank the rest.
 async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
     let file = match accounts::load(app) {
         Ok(f) => f,
@@ -304,9 +311,12 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
             }
         };
 
+        let id = account.id.clone();
         match account.provider {
             Provider::Github => match GitHubProvider::connect(token).await {
-                Ok(p) => *state.github.write().await = Some(Arc::new(p)),
+                Ok(p) => {
+                    state.github.write().await.insert(id, Arc::new(p));
+                }
                 Err(e) => eprintln!("gitbuddy: restoring github session failed: {e}"),
             },
             Provider::Gitlab | Provider::MpsdGitlab => {
@@ -318,7 +328,9 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
                     continue;
                 };
                 match GitLabProvider::connect(token, base_url).await {
-                    Ok(p) => *state.gitlab.write().await = Some(Arc::new(p)),
+                    Ok(p) => {
+                        state.gitlab.write().await.insert(id, Arc::new(p));
+                    }
                     Err(e) => eprintln!("gitbuddy: restoring gitlab session failed: {e}"),
                 }
             }
@@ -328,61 +340,14 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
                     .clone()
                     .unwrap_or_else(|| "https://codeberg.org".to_string());
                 match CodebergProvider::connect(token, base_url).await {
-                    Ok(p) => *state.codeberg.write().await = Some(Arc::new(p)),
+                    Ok(p) => {
+                        state.codeberg.write().await.insert(id, Arc::new(p));
+                    }
                     Err(e) => eprintln!("gitbuddy: restoring codeberg session failed: {e}"),
                 }
             }
         }
     }
-}
-
-/// Look up the v2 composite-key id of the currently-connected account for a
-/// given provider. The in-memory provider state is the freshest source;
-/// `accounts.json` is the persistent fallback for disconnect calls that
-/// race against an in-memory clear. Returns `None` when the provider isn't
-/// connected at all (and the caller should fall through to legacy-key
-/// cleanup as a belt-and-braces).
-///
-/// Will be replaced by per-account commands in the multi-account UI work;
-/// this is a single-account-era helper kept alive until that ships.
-async fn current_account_id(
-    state: tauri::State<'_, Arc<AppState>>,
-    provider: Provider,
-    app: &AppHandle,
-) -> Option<String> {
-    // (login, base_url) — host derivation is shared via accounts::account_host
-    // so the in-memory id matches what migration / connect-time code writes.
-    let in_memory: Option<(String, Option<String>)> = match provider {
-        Provider::Github => state
-            .github
-            .read()
-            .await
-            .as_ref()
-            .map(|p| (p.viewer.login.clone(), None)),
-        Provider::Gitlab | Provider::MpsdGitlab => state
-            .gitlab
-            .read()
-            .await
-            .as_ref()
-            .map(|p| (p.viewer.login.clone(), Some(p.base_url().to_string()))),
-        Provider::Codeberg => state
-            .codeberg
-            .read()
-            .await
-            .as_ref()
-            .map(|p| (p.viewer.login.clone(), Some(p.base_url().to_string()))),
-    };
-    if let Some((login, base_url)) = in_memory {
-        let host = accounts::account_host(provider, base_url.as_deref());
-        return Some(accounts::make_id(provider, &host, &login));
-    }
-
-    accounts::load(app)
-        .ok()?
-        .accounts
-        .into_iter()
-        .find(|a| a.provider == provider)
-        .map(|a| a.id)
 }
 
 // ── Per-provider auth commands ─────────────────────────────────────────────
@@ -398,11 +363,12 @@ pub async fn gh_set_token(
         .map_err(|e| e.to_string())?;
     let viewer = provider.viewer.clone();
     let account = accounts::account_from(Provider::Github, &viewer, AuthMethod::Pat, None);
+    let id = account.id.clone();
     keychain::save(&account.id, &token)
         .await
         .map_err(|e| format!("keychain: {e}"))?;
     accounts::upsert(&app, account)?;
-    *state.github.write().await = Some(Arc::new(provider));
+    state.github.write().await.insert(id, Arc::new(provider));
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(viewer)
 }
@@ -413,7 +379,17 @@ pub async fn gh_status(
     app: AppHandle,
 ) -> Result<Option<Viewer>, String> {
     state.ensure_initialized(&app).await;
-    Ok(state.github.read().await.as_ref().map(|p| p.viewer.clone()))
+    // Legacy single-account status: returns the first connected GitHub
+    // account's viewer if any. Replaced wholesale by `accounts_list` once
+    // the per-account UI lands in the next frontend commit; until then the
+    // existing settings screen calls this and shows one row.
+    Ok(state
+        .github
+        .read()
+        .await
+        .values()
+        .next()
+        .map(|p| p.viewer.clone()))
 }
 
 /// Kick off the GitHub OAuth Device Flow. Returns the user_code (for the
@@ -480,8 +456,9 @@ pub async fn gh_oauth_poll(
             keychain::save(&account.id, &blob)
                 .await
                 .map_err(|e| format!("keychain: {e}"))?;
+            let id = account.id.clone();
             accounts::upsert(&app, account)?;
-            *state.github.write().await = Some(Arc::new(provider));
+            state.github.write().await.insert(id, Arc::new(provider));
             let _ = app.emit(EVT_PROVIDER_CHANGED, ());
             Ok(GhOAuthPollResult::Success { viewer })
         }
@@ -500,18 +477,13 @@ pub async fn gh_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    // Resolve the composite key from whatever source we have. Prefer the
-    // in-memory provider (always current); fall back to accounts.json in
-    // case the in-memory state was cleared but the registry record lingers;
-    // last-ditch the legacy key for any install that's somehow still in
-    // pre-migration shape.
-    if let Some(id) = current_account_id(state.clone(), Provider::Github, &app).await {
-        let _ = keychain::delete(&id).await;
-        let _ = accounts::remove(&app, &id);
-    } else {
-        let _ = keychain::delete(GH_LEGACY_KEY).await;
-    }
-    *state.github.write().await = None;
+    // Legacy "disconnect from this provider entirely" semantics — wipes
+    // every GitHub account at once, with a last-ditch legacy-key sweep for
+    // any pre-migration install whose state somehow didn't get cleaned up
+    // by `migrate_legacy_keychain`. Per-account disconnect lives in
+    // `accounts_disconnect`; this command goes away once the UI migrates.
+    disconnect_all_for_provider(&state, &app, Provider::Github).await;
+    let _ = keychain::delete(GH_LEGACY_KEY).await;
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(())
 }
@@ -536,6 +508,7 @@ pub async fn gl_set_token(
     keychain::save(&account.id, &token)
         .await
         .map_err(|e| format!("keychain: {e}"))?;
+    let id = account.id.clone();
     accounts::upsert(&app, account)?;
     // Keep gitlab_base_url in settings up to date — `ensure_initialized` no
     // longer reads it, but it's still consumed by the onboarding modal to
@@ -544,7 +517,7 @@ pub async fn gl_set_token(
     s.gitlab_base_url = Some(provider.base_url().to_string());
     settings::save(&app, &s)?;
 
-    *state.gitlab.write().await = Some(Arc::new(provider));
+    state.gitlab.write().await.insert(id, Arc::new(provider));
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(viewer)
 }
@@ -555,10 +528,16 @@ pub async fn gl_status(
     app: AppHandle,
 ) -> Result<Option<GitLabStatus>, String> {
     state.ensure_initialized(&app).await;
-    Ok(state.gitlab.read().await.as_ref().map(|p| GitLabStatus {
-        viewer: p.viewer.clone(),
-        base_url: p.base_url().to_string(),
-    }))
+    Ok(state
+        .gitlab
+        .read()
+        .await
+        .values()
+        .next()
+        .map(|p| GitLabStatus {
+            viewer: p.viewer.clone(),
+            base_url: p.base_url().to_string(),
+        }))
 }
 
 /// Returned by `gl_status`. The base URL is useful in the UI so we can show
@@ -574,13 +553,8 @@ pub async fn gl_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    if let Some(id) = current_account_id(state.clone(), Provider::Gitlab, &app).await {
-        let _ = keychain::delete(&id).await;
-        let _ = accounts::remove(&app, &id);
-    } else {
-        let _ = keychain::delete(GL_LEGACY_KEY).await;
-    }
-    *state.gitlab.write().await = None;
+    disconnect_all_for_provider(&state, &app, Provider::Gitlab).await;
+    let _ = keychain::delete(GL_LEGACY_KEY).await;
     // Clear the base URL too so the next `+ Add` flow starts from
     // gitlab.com rather than re-suggesting the disconnected host.
     let mut s = settings::load(&app).unwrap_or_default();
@@ -610,12 +584,13 @@ pub async fn cb_set_token(
     keychain::save(&account.id, &token)
         .await
         .map_err(|e| format!("keychain: {e}"))?;
+    let id = account.id.clone();
     accounts::upsert(&app, account)?;
     let mut s = settings::load(&app).unwrap_or_default();
     s.codeberg_base_url = Some(provider.base_url().to_string());
     settings::save(&app, &s)?;
 
-    *state.codeberg.write().await = Some(Arc::new(provider));
+    state.codeberg.write().await.insert(id, Arc::new(provider));
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(viewer)
 }
@@ -630,7 +605,8 @@ pub async fn cb_status(
         .codeberg
         .read()
         .await
-        .as_ref()
+        .values()
+        .next()
         .map(|p| CodebergStatus {
             viewer: p.viewer.clone(),
             base_url: p.base_url().to_string(),
@@ -648,18 +624,85 @@ pub async fn cb_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    if let Some(id) = current_account_id(state.clone(), Provider::Codeberg, &app).await {
-        let _ = keychain::delete(&id).await;
-        let _ = accounts::remove(&app, &id);
-    } else {
-        let _ = keychain::delete(CB_LEGACY_KEY).await;
-    }
-    *state.codeberg.write().await = None;
+    disconnect_all_for_provider(&state, &app, Provider::Codeberg).await;
+    let _ = keychain::delete(CB_LEGACY_KEY).await;
     let mut s = settings::load(&app).unwrap_or_default();
     s.codeberg_base_url = None;
     settings::save(&app, &s)?;
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(())
+}
+
+/// Per-account disconnect — the multi-account-aware primitive. The legacy
+/// per-provider `*_disconnect` commands above call into this for each
+/// matching account, and the upcoming Settings UI uses it directly with
+/// one specific account_id.
+///
+/// Belt-and-braces: removes the id from every provider HashMap (only one
+/// will have it), deletes the Keychain entry, and drops the registry
+/// record. The triple-remove on HashMaps is O(1) per call and avoids
+/// having to know upfront which provider owns the id.
+#[tauri::command]
+pub async fn accounts_disconnect(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+    account_id: String,
+) -> Result<(), String> {
+    state.github.write().await.remove(&account_id);
+    state.gitlab.write().await.remove(&account_id);
+    state.codeberg.write().await.remove(&account_id);
+    let _ = keychain::delete(&account_id).await;
+    let _ = accounts::remove(&app, &account_id);
+    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+    Ok(())
+}
+
+/// Helper for the legacy per-provider disconnects: collect every id that
+/// belongs to this provider (from both the in-memory HashMap and the
+/// registry, in case they've drifted), then call `accounts_disconnect`
+/// equivalent on each. Doesn't emit `provider-changed` itself — the caller
+/// emits once after the sweep.
+async fn disconnect_all_for_provider(state: &AppState, app: &AppHandle, provider: Provider) {
+    let mut ids = std::collections::HashSet::new();
+    match provider {
+        Provider::Github => ids.extend(state.github.read().await.keys().cloned()),
+        Provider::Gitlab | Provider::MpsdGitlab => {
+            ids.extend(state.gitlab.read().await.keys().cloned())
+        }
+        Provider::Codeberg => ids.extend(state.codeberg.read().await.keys().cloned()),
+    }
+    if let Ok(file) = accounts::load(app) {
+        for a in file.accounts {
+            let matches = matches!(
+                (a.provider, provider),
+                (Provider::Github, Provider::Github)
+                    | (Provider::Gitlab | Provider::MpsdGitlab, Provider::Gitlab)
+                    | (
+                        Provider::Gitlab | Provider::MpsdGitlab,
+                        Provider::MpsdGitlab
+                    )
+                    | (Provider::Codeberg, Provider::Codeberg)
+            );
+            if matches {
+                ids.insert(a.id);
+            }
+        }
+    }
+    for id in ids {
+        match provider {
+            Provider::Github => {
+                state.github.write().await.remove(&id);
+            }
+            Provider::Gitlab | Provider::MpsdGitlab => {
+                state.gitlab.write().await.remove(&id);
+            }
+            Provider::Codeberg => {
+                state.codeberg.write().await.remove(&id);
+            }
+        }
+        let _ = keychain::delete(&id).await;
+        let _ = accounts::remove(app, &id);
+    }
 }
 
 /// Reveal the main window and switch the app's activation policy to Regular
@@ -691,52 +734,18 @@ pub fn open_main_settings(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// List all connected accounts.
-///
-/// Reads `accounts.json` first; if it's empty (pre-M6.3 installs that
-/// haven't been migrated yet, or fresh installs that just connected via the
-/// legacy single-account commands), synthesises records from whichever
-/// providers are currently restored in memory. Once the migration in the
-/// next commit runs on first launch, the synthesised path becomes a no-op
-/// and `accounts.json` is the sole source of truth.
+/// List all connected accounts from `accounts.json`. The source of truth
+/// is the registry — every set-token / oauth-poll command upserts here, so
+/// the registry never lags the in-memory state. Account order is
+/// preserved as-written (set-token / OAuth-poll append, so the result
+/// reads chronologically by add date).
 #[tauri::command]
 pub async fn accounts_list(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<Vec<Account>, String> {
     state.ensure_initialized(&app).await;
-
-    let stored = accounts::load(&app)?;
-    if !stored.accounts.is_empty() {
-        return Ok(stored.accounts);
-    }
-
-    let mut out = Vec::new();
-    if let Some(p) = state.github.read().await.as_ref() {
-        out.push(accounts::account_from(
-            Provider::Github,
-            &p.viewer,
-            AuthMethod::Pat,
-            None,
-        ));
-    }
-    if let Some(p) = state.gitlab.read().await.as_ref() {
-        out.push(accounts::account_from(
-            Provider::Gitlab,
-            &p.viewer,
-            AuthMethod::Pat,
-            Some(p.base_url().to_string()),
-        ));
-    }
-    if let Some(p) = state.codeberg.read().await.as_ref() {
-        out.push(accounts::account_from(
-            Provider::Codeberg,
-            &p.viewer,
-            AuthMethod::Pat,
-            Some(p.base_url().to_string()),
-        ));
-    }
-    Ok(out)
+    Ok(accounts::load(&app)?.accounts)
 }
 
 // ── Aggregated data commands ───────────────────────────────────────────────
@@ -751,24 +760,24 @@ pub async fn list_waiting(
     app: AppHandle,
 ) -> Result<Vec<WaitingItem>, String> {
     state.ensure_initialized(&app).await;
-    let gh = state.github.read().await.clone();
-    let gl = state.gitlab.read().await.clone();
-    let cb = state.codeberg.read().await.clone();
+    let gh: Vec<_> = state.github.read().await.values().cloned().collect();
+    let gl: Vec<_> = state.gitlab.read().await.values().cloned().collect();
+    let cb: Vec<_> = state.codeberg.read().await.values().cloned().collect();
 
     let mut out = Vec::new();
-    if let Some(p) = gh {
+    for p in gh {
         match p.list_waiting().await {
             Ok(mut v) => out.append(&mut v),
             Err(e) => eprintln!("gitbuddy: github list_waiting failed: {e}"),
         }
     }
-    if let Some(p) = gl {
+    for p in gl {
         match p.list_waiting().await {
             Ok(mut v) => out.append(&mut v),
             Err(e) => eprintln!("gitbuddy: gitlab list_waiting failed: {e}"),
         }
     }
-    if let Some(p) = cb {
+    for p in cb {
         match p.list_waiting().await {
             Ok(mut v) => out.append(&mut v),
             Err(e) => eprintln!("gitbuddy: codeberg list_waiting failed: {e}"),
@@ -784,24 +793,24 @@ pub async fn list_repos(
     app: AppHandle,
 ) -> Result<Vec<Repo>, String> {
     state.ensure_initialized(&app).await;
-    let gh = state.github.read().await.clone();
-    let gl = state.gitlab.read().await.clone();
-    let cb = state.codeberg.read().await.clone();
+    let gh: Vec<_> = state.github.read().await.values().cloned().collect();
+    let gl: Vec<_> = state.gitlab.read().await.values().cloned().collect();
+    let cb: Vec<_> = state.codeberg.read().await.values().cloned().collect();
 
     let mut out = Vec::new();
-    if let Some(p) = gh {
+    for p in gh {
         match p.list_repos().await {
             Ok(mut v) => out.append(&mut v),
             Err(e) => eprintln!("gitbuddy: github list_repos failed: {e}"),
         }
     }
-    if let Some(p) = gl {
+    for p in gl {
         match p.list_repos().await {
             Ok(mut v) => out.append(&mut v),
             Err(e) => eprintln!("gitbuddy: gitlab list_repos failed: {e}"),
         }
     }
-    if let Some(p) = cb {
+    for p in cb {
         match p.list_repos().await {
             Ok(mut v) => out.append(&mut v),
             Err(e) => eprintln!("gitbuddy: codeberg list_repos failed: {e}"),
@@ -820,11 +829,15 @@ pub async fn list_releases(
     // GitLab release listing isn't implemented yet (needs per-project release
     // fetches, gated to "recently active" projects to stay within rate limits).
     // For now, only GitHub contributes releases.
-    let gh = state.github.read().await.clone();
-    let Some(p) = gh else {
-        return Ok(Vec::new());
-    };
-    p.list_releases().await.map_err(|e| e.to_string())
+    let gh: Vec<_> = state.github.read().await.values().cloned().collect();
+    let mut out = Vec::new();
+    for p in gh {
+        match p.list_releases().await {
+            Ok(mut v) => out.append(&mut v),
+            Err(e) => eprintln!("gitbuddy: github list_releases failed: {e}"),
+        }
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -834,11 +847,15 @@ pub async fn list_ci(
 ) -> Result<Vec<CiRun>, String> {
     state.ensure_initialized(&app).await;
     // Same as releases: GitLab CI surface is a separate landing.
-    let gh = state.github.read().await.clone();
-    let Some(p) = gh else {
-        return Ok(Vec::new());
-    };
-    p.list_ci().await.map_err(|e| e.to_string())
+    let gh: Vec<_> = state.github.read().await.values().cloned().collect();
+    let mut out = Vec::new();
+    for p in gh {
+        match p.list_ci().await {
+            Ok(mut v) => out.append(&mut v),
+            Err(e) => eprintln!("gitbuddy: github list_ci failed: {e}"),
+        }
+    }
+    Ok(out)
 }
 
 // ── Local index ─────────────────────────────────────────────────────────────
