@@ -33,11 +33,12 @@ thiserror = "2"
 
 # M3 — Local index: filesystem walking + libgit2 for per-repo diagnostics.
 # `vendored-libgit2` ships libgit2 in-tree so we don't need a system package.
-# `vendored-openssl` adds an in-tree OpenSSL — without it libgit2 has no TLS
-# backend and HTTPS clones fail with "no TLS stream available" (the clone-from-
-# detail-pane path is the first network operation we do via git2). Adds a few
-# minutes to the first build; cached after that.
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
+# `https` turns on libgit2's HTTPS support (the `-DUSE_HTTPS=` flag during
+# the libgit2 build); without it clones fail at runtime with "no TLS stream
+# available". `vendored-openssl` ships an in-tree OpenSSL so that backend
+# resolves consistently across machines instead of relying on the system
+# install. Adds a few minutes to the first build; cached after that.
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 walkdir = "2"
 dirs = "6"
 
