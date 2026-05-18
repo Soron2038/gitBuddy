@@ -270,9 +270,14 @@ fn normalise_base_url(raw: &str) -> Result<String> {
             "base URL must not be empty".into(),
         ));
     }
-    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+    // HTTPS-only: a self-hosted GitLab base URL is the channel the PAT goes
+    // over on every API call. Accepting `http://` here would send the bearer
+    // token in clear if the user pastes (or is phished into) a plain-HTTP
+    // host. If a localhost dev-instance ever needs `http://`, gate it
+    // explicitly on `localhost` / `127.0.0.1` / `::1` then.
+    if !trimmed.starts_with("https://") {
         return Err(GitLabError::InvalidBaseUrl(format!(
-            "base URL must start with http:// or https://: {trimmed}"
+            "base URL must start with https://: {trimmed}"
         )));
     }
     Ok(trimmed)
@@ -711,6 +716,11 @@ mod tests {
     #[test]
     fn rejects_missing_scheme() {
         assert!(normalise_base_url("gitlab.example.com").is_err());
+    }
+
+    #[test]
+    fn rejects_http_scheme() {
+        assert!(normalise_base_url("http://gitlab.example.com").is_err());
     }
 
     #[test]

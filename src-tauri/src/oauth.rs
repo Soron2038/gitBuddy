@@ -75,12 +75,29 @@ pub struct DeviceCodeResponse {
 /// If an org later enables user-to-server token expiration, the access_token
 /// will start failing with 401 and the UI will surface a "reconnect" path,
 /// same as for an expired PAT.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
     pub access_token: String,
     pub token_type: String,
     pub scope: String,
     pub obtained_at: String,
+}
+
+// Hand-rolled Debug redacts `access_token` so a future `dbg!(tokens)` or
+// `eprintln!("{tokens:?}")` can't accidentally route a bearer token into
+// stderr / Console.app / a panic message.
+impl std::fmt::Debug for OAuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokens")
+            .field(
+                "access_token",
+                &format!("<redacted, {} bytes>", self.access_token.len()),
+            )
+            .field("token_type", &self.token_type)
+            .field("scope", &self.scope)
+            .field("obtained_at", &self.obtained_at)
+            .finish()
+    }
 }
 
 /// Per-poll outcome, mapping RFC 8628 §3.5 error codes onto explicit
@@ -145,8 +162,11 @@ pub async fn poll_github(client: &reqwest::Client, device_code: &str) -> Result<
 // ── Pure parsing helpers (unit-tested) ──────────────────────────────────────
 
 fn parse_device_code(body: &str) -> Result<DeviceCodeResponse> {
+    // Body is deliberately not echoed into the error — a malformed success
+    // response could carry `user_code`/`device_code` which together complete
+    // the auth flow. The serde error itself carries enough debug info.
     serde_json::from_str::<DeviceCodeResponse>(body)
-        .map_err(|e| OAuthError::BadResponse(format!("device_code: {e} — body: {body}")))
+        .map_err(|e| OAuthError::BadResponse(format!("device_code: {e}")))
 }
 
 /// GitHub returns 200 OK for both the in-progress error cases and the
@@ -170,8 +190,11 @@ fn parse_poll(body: &str) -> Result<PollOutcome> {
         scope: Option<String>,
     }
 
-    let raw: Raw = serde_json::from_str(body)
-        .map_err(|e| OAuthError::BadResponse(format!("poll: {e} — body: {body}")))?;
+    // As with parse_device_code, the body is not echoed — a partial-success
+    // shape could contain `access_token`. Serde's error carries position info
+    // that's enough to diagnose schema drift.
+    let raw: Raw =
+        serde_json::from_str(body).map_err(|e| OAuthError::BadResponse(format!("poll: {e}")))?;
 
     if let Some(err) = raw.error.as_deref() {
         return Ok(match err {
@@ -191,18 +214,29 @@ fn parse_poll(body: &str) -> Result<PollOutcome> {
         });
     }
 
-    let (Some(access_token), Some(token_type), Some(scope)) =
-        (raw.access_token, raw.token_type, raw.scope)
-    else {
+    // Report *which* fields are missing without echoing the body — the body
+    // could carry the access_token even when other fields are absent.
+    if raw.access_token.is_none() || raw.token_type.is_none() || raw.scope.is_none() {
+        let mut missing = Vec::new();
+        if raw.access_token.is_none() {
+            missing.push("access_token");
+        }
+        if raw.token_type.is_none() {
+            missing.push("token_type");
+        }
+        if raw.scope.is_none() {
+            missing.push("scope");
+        }
         return Err(OAuthError::BadResponse(format!(
-            "success response missing fields — body: {body}"
+            "success response missing fields: {}",
+            missing.join(", ")
         )));
-    };
+    }
 
     Ok(PollOutcome::Success(OAuthTokens {
-        access_token,
-        token_type,
-        scope,
+        access_token: raw.access_token.unwrap(),
+        token_type: raw.token_type.unwrap(),
+        scope: raw.scope.unwrap(),
         obtained_at: Utc::now().to_rfc3339(),
     }))
 }

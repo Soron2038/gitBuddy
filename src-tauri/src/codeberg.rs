@@ -209,9 +209,13 @@ fn normalise_base_url(raw: &str) -> Result<String> {
             "base URL must not be empty".into(),
         ));
     }
-    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+    // HTTPS-only: a self-hosted Gitea/Forgejo base URL is the channel the PAT
+    // travels on for every API call. `http://` here would send the bearer
+    // token in clear. If a localhost dev-instance ever needs `http://`, gate
+    // it explicitly on `localhost` / `127.0.0.1` / `::1` then.
+    if !trimmed.starts_with("https://") {
         return Err(CodebergError::InvalidBaseUrl(format!(
-            "base URL must start with http:// or https://: {trimmed}"
+            "base URL must start with https://: {trimmed}"
         )));
     }
     Ok(trimmed)
@@ -618,5 +622,15 @@ mod tests {
             normalise_base_url("https://codeberg.org/").unwrap(),
             "https://codeberg.org"
         );
+    }
+
+    #[test]
+    fn rejects_http_scheme() {
+        assert!(normalise_base_url("http://codeberg.example.com").is_err());
+    }
+
+    #[test]
+    fn rejects_missing_scheme() {
+        assert!(normalise_base_url("codeberg.example.com").is_err());
     }
 }

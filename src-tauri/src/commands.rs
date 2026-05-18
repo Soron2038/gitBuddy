@@ -100,6 +100,12 @@ async fn migrate_id_scheme_to_v2(app: &AppHandle) {
     }
 
     let mut migrated = Vec::with_capacity(file.accounts.len());
+    // Bump `accounts.json`'s version only if every account either was already
+    // on v2 or got cleanly upgraded. Leaving the version at v1 on partial
+    // failure lets the next launch retry; otherwise the early-return at the
+    // top of this function would skip migration forever and the failed
+    // accounts would be stuck on v1 ids despite the file claiming v2.
+    let mut all_clean = true;
     for mut account in file.accounts {
         let host = accounts::account_host(account.provider, account.base_url.as_deref());
         let new_id = accounts::make_id(account.provider, &host, &account.login);
@@ -113,6 +119,7 @@ async fn migrate_id_scheme_to_v2(app: &AppHandle) {
                 if let Err(e) = keychain::save(&new_id, &secret).await {
                     eprintln!("gitbuddy: writing v2 keychain entry under {new_id} failed: {e}");
                     migrated.push(account);
+                    all_clean = false;
                     continue;
                 }
                 if let Err(e) = keychain::delete(&account.id).await {
@@ -125,6 +132,9 @@ async fn migrate_id_scheme_to_v2(app: &AppHandle) {
                 migrated.push(account);
             }
             Ok(None) => {
+                // Record without a Keychain entry: bumping or not bumping the
+                // version doesn't change anything for it — the record is
+                // orphaned regardless. Don't block the version bump on it.
                 eprintln!(
                     "gitbuddy: v1 account {} has no keychain entry, leaving orphan record",
                     account.id
@@ -137,12 +147,15 @@ async fn migrate_id_scheme_to_v2(app: &AppHandle) {
                     account.id
                 );
                 migrated.push(account);
+                all_clean = false;
             }
         }
     }
 
     file.accounts = migrated;
-    file.version = accounts::CURRENT_VERSION;
+    if all_clean {
+        file.version = accounts::CURRENT_VERSION;
+    }
     if let Err(e) = accounts::save(app, &file) {
         eprintln!("gitbuddy: writing v2 accounts.json failed: {e}");
     }
@@ -482,10 +495,10 @@ pub async fn gh_disconnect(
     // any pre-migration install whose state somehow didn't get cleaned up
     // by `migrate_legacy_keychain`. Per-account disconnect lives in
     // `accounts_disconnect`; this command goes away once the UI migrates.
-    disconnect_all_for_provider(&state, &app, Provider::Github).await;
+    let sweep = disconnect_all_for_provider(&state, &app, Provider::Github).await;
     let _ = keychain::delete(GH_LEGACY_KEY).await;
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
-    Ok(())
+    sweep
 }
 
 #[tauri::command]
@@ -553,7 +566,7 @@ pub async fn gl_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    disconnect_all_for_provider(&state, &app, Provider::Gitlab).await;
+    let sweep = disconnect_all_for_provider(&state, &app, Provider::Gitlab).await;
     let _ = keychain::delete(GL_LEGACY_KEY).await;
     // Clear the base URL too so the next `+ Add` flow starts from
     // gitlab.com rather than re-suggesting the disconnected host.
@@ -561,7 +574,7 @@ pub async fn gl_disconnect(
     s.gitlab_base_url = None;
     settings::save(&app, &s)?;
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
-    Ok(())
+    sweep
 }
 
 #[tauri::command]
@@ -624,13 +637,13 @@ pub async fn cb_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    disconnect_all_for_provider(&state, &app, Provider::Codeberg).await;
+    let sweep = disconnect_all_for_provider(&state, &app, Provider::Codeberg).await;
     let _ = keychain::delete(CB_LEGACY_KEY).await;
     let mut s = settings::load(&app).unwrap_or_default();
     s.codeberg_base_url = None;
     settings::save(&app, &s)?;
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
-    Ok(())
+    sweep
 }
 
 /// Per-account disconnect — the multi-account-aware primitive. The legacy
@@ -638,31 +651,48 @@ pub async fn cb_disconnect(
 /// matching account, and the upcoming Settings UI uses it directly with
 /// one specific account_id.
 ///
-/// Belt-and-braces: removes the id from every provider HashMap (only one
-/// will have it), deletes the Keychain entry, and drops the registry
-/// record. The triple-remove on HashMaps is O(1) per call and avoids
-/// having to know upfront which provider owns the id.
+/// Ordering is deliberate: Keychain delete *first*, registry *second*,
+/// in-memory state *last*. If the Keychain delete fails (locked, permission
+/// revoked, transient I/O), we bail before touching anything else so the
+/// system stays consistent and the user can retry. A half-disconnect with
+/// the registry wiped but the token still in the Keychain would leak the
+/// secret indefinitely — `restore_from_accounts` only iterates the
+/// registry, so the orphaned token would never get re-cleaned.
 #[tauri::command]
 pub async fn accounts_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
     account_id: String,
 ) -> Result<(), String> {
+    keychain::delete(&account_id)
+        .await
+        .map_err(|e| format!("removing token from keychain failed: {e}"))?;
+    accounts::remove(&app, &account_id)?;
+    // Triple-remove on HashMaps is O(1) per call and avoids having to know
+    // upfront which provider owns the id. Only one will actually hold it.
     state.github.write().await.remove(&account_id);
     state.gitlab.write().await.remove(&account_id);
     state.codeberg.write().await.remove(&account_id);
-    let _ = keychain::delete(&account_id).await;
-    let _ = accounts::remove(&app, &account_id);
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(())
 }
 
 /// Helper for the legacy per-provider disconnects: collect every id that
 /// belongs to this provider (from both the in-memory HashMap and the
-/// registry, in case they've drifted), then call `accounts_disconnect`
-/// equivalent on each. Doesn't emit `provider-changed` itself — the caller
-/// emits once after the sweep.
-async fn disconnect_all_for_provider(state: &AppState, app: &AppHandle, provider: Provider) {
+/// registry, in case they've drifted), then disconnect each. Doesn't emit
+/// `provider-changed` itself — the caller emits once after the sweep.
+///
+/// Per-account ordering matches `accounts_disconnect`: Keychain first,
+/// registry second, in-memory last. Unlike the single-account path, a
+/// Keychain failure on one id doesn't abort the whole sweep — the failing
+/// account is left intact and the other accounts still get cleaned. All
+/// errors are collected and surfaced together so the UI can show the user
+/// which accounts didn't disconnect cleanly.
+async fn disconnect_all_for_provider(
+    state: &AppState,
+    app: &AppHandle,
+    provider: Provider,
+) -> Result<(), String> {
     let mut ids = std::collections::HashSet::new();
     match provider {
         Provider::Github => ids.extend(state.github.read().await.keys().cloned()),
@@ -688,7 +718,16 @@ async fn disconnect_all_for_provider(state: &AppState, app: &AppHandle, provider
             }
         }
     }
+    let mut errors = Vec::new();
     for id in ids {
+        if let Err(e) = keychain::delete(&id).await {
+            errors.push(format!("keychain delete for {id}: {e}"));
+            continue;
+        }
+        if let Err(e) = accounts::remove(app, &id) {
+            errors.push(format!("registry remove for {id}: {e}"));
+            continue;
+        }
         match provider {
             Provider::Github => {
                 state.github.write().await.remove(&id);
@@ -700,8 +739,11 @@ async fn disconnect_all_for_provider(state: &AppState, app: &AppHandle, provider
                 state.codeberg.write().await.remove(&id);
             }
         }
-        let _ = keychain::delete(&id).await;
-        let _ = accounts::remove(app, &id);
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -1006,6 +1048,18 @@ pub async fn clone_repo(
     account_id: Option<String>,
 ) -> Result<String, String> {
     state.ensure_initialized(&app).await;
+
+    // Boundary check: the credentials callback below hands the account token
+    // to libgit2 for whatever URL we pass. If that URL were `http://` or
+    // `git://`, the PAT would travel in clear. All URLs we receive in
+    // practice come from a provider's API and are https://, but the frontend
+    // input isn't trust-bounded — codify the assumption here. URL is not
+    // echoed back on rejection to avoid surfacing potentially-credentialed
+    // URLs (e.g. `https://user:pass@host/...`) in error toasts.
+    let url = url.trim().to_string();
+    if !url.starts_with("https://") {
+        return Err("Clone URL must use https://.".into());
+    }
 
     let folder_name = folder_name.trim();
     if folder_name.is_empty() {
