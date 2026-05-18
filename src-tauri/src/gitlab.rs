@@ -6,7 +6,9 @@
 //! `Authorization: Bearer …`, which works for both classic PATs and the
 //! newer project/group access tokens.
 
-use crate::types::{ItemKind, ItemReason, Provider, Repo, Viewer, WaitingItem};
+use crate::types::{
+    CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
+};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -183,6 +185,69 @@ impl GitLabProvider {
         }
 
         Ok(all)
+    }
+
+    /// Latest release per project, for the N most-recently-active projects
+    /// the viewer has access to. Bounded for the same reason as the GitHub
+    /// equivalent — one HTTP call per project, and dormant archives don't
+    /// merit the spend.
+    pub async fn list_releases(&self) -> Result<Vec<Release>> {
+        const MAX_PROJECTS_TO_CHECK: usize = 60;
+
+        let mut repos = self.list_repos().await?;
+        repos.truncate(MAX_PROJECTS_TO_CHECK);
+        let self_hosted = self.is_self_hosted();
+
+        let mut handles = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let client = self.client.clone();
+            let token = self.token.clone();
+            let base = self.base_url.clone();
+            handles.push(tokio::spawn(async move {
+                fetch_latest_release(&client, &token, &base, &repo, self_hosted).await
+            }));
+        }
+
+        let now = Utc::now();
+        let mut releases = Vec::new();
+        for h in handles {
+            if let Ok(Ok(Some(mut r))) = h.await {
+                r.is_new = within_days(&r.published_at, &now, 7);
+                r.age_human = humanise_age(&r.published_at, now);
+                releases.push(r);
+            }
+        }
+
+        releases.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+        Ok(releases)
+    }
+
+    /// Latest pipeline run on each project's default branch. Used by the UI's
+    /// per-repo CI status dot. GitLab's pipeline list endpoint is filtered
+    /// by `ref` (branch) and `per_page=1` to get just the head.
+    pub async fn list_ci(&self) -> Result<Vec<CiRun>> {
+        const MAX_PROJECTS_TO_CHECK: usize = 60;
+
+        let mut repos = self.list_repos().await?;
+        repos.truncate(MAX_PROJECTS_TO_CHECK);
+
+        let mut handles = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let client = self.client.clone();
+            let token = self.token.clone();
+            let base = self.base_url.clone();
+            handles.push(tokio::spawn(async move {
+                fetch_latest_pipeline(&client, &token, &base, &repo).await
+            }));
+        }
+
+        let mut runs = Vec::new();
+        for h in handles {
+            if let Ok(Ok(Some(r))) = h.await {
+                runs.push(r);
+            }
+        }
+        Ok(runs)
     }
 
     /// Heuristic — anything other than gitlab.com is treated as a "self-
@@ -422,6 +487,207 @@ fn reason_priority(r: ItemReason) -> u8 {
         ItemReason::Review => 1,
         ItemReason::Authored => 2,
         ItemReason::Mentioned => 3,
+    }
+}
+
+fn within_days(timestamp: &str, now: &DateTime<Utc>, days: i64) -> bool {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|t| (*now - t.with_timezone(&Utc)).num_days() <= days)
+        .unwrap_or(false)
+}
+
+/// Repo.id from `into_repo` is shaped `"gl:<numeric>"` so the local-index
+/// join can tell GitLab and GitHub ids apart. The release/pipeline
+/// endpoints want the raw numeric id back; this peels the prefix.
+fn project_id_from_repo(repo: &Repo) -> Option<&str> {
+    repo.id.strip_prefix("gl:")
+}
+
+async fn fetch_latest_release(
+    client: &Client,
+    token: &str,
+    base_url: &str,
+    repo: &Repo,
+    self_hosted: bool,
+) -> Result<Option<Release>> {
+    let Some(project_id) = project_id_from_repo(repo) else {
+        return Ok(None);
+    };
+    let url = format!("{base_url}/api/v4/projects/{project_id}/releases");
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .query(&[("per_page", "1")])
+        .send()
+        .await?;
+
+    match resp.status() {
+        s if s.is_success() => {}
+        // 404 means the project has no releases yet (or the project itself
+        // is gone) — not an error.
+        StatusCode::NOT_FOUND => return Ok(None),
+        StatusCode::UNAUTHORIZED => return Err(GitLabError::Unauthorized),
+        // 403 happens on archived projects under some visibility settings —
+        // graceful no-op rather than failing the whole batch.
+        StatusCode::FORBIDDEN => return Ok(None),
+        s => {
+            return Err(GitLabError::HttpStatus {
+                base_url: base_url.to_string(),
+                status: s,
+            });
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct RawRelease {
+        tag_name: String,
+        name: Option<String>,
+        released_at: Option<String>,
+        #[serde(default)]
+        upcoming_release: bool,
+        #[serde(default)]
+        #[serde(rename = "_links")]
+        links: Option<RawLinks>,
+    }
+    #[derive(Deserialize)]
+    struct RawLinks {
+        #[serde(rename = "self")]
+        self_url: Option<String>,
+    }
+
+    let raw: Vec<RawRelease> = resp.json().await?;
+    let Some(r) = raw.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(released_at) = r.released_at else {
+        // GitLab can list a release without `released_at` (drafts /
+        // upcoming) — skip those, the UI only shows published ones.
+        return Ok(None);
+    };
+
+    let name = r
+        .name
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| r.tag_name.clone());
+    // Prefer the canonical release page URL when GitLab provides it; fall
+    // back to a constructed one keyed off the project's web_url so the
+    // "Open release" button always lands somewhere sensible.
+    let html_url = r
+        .links
+        .and_then(|l| l.self_url)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{}/-/releases/{}", repo.html_url, r.tag_name));
+
+    Ok(Some(Release {
+        repo_id: repo.id.clone(),
+        repo_full_name: format!("{}/{}", repo.owner, repo.name),
+        provider: if self_hosted {
+            Provider::MpsdGitlab
+        } else {
+            Provider::Gitlab
+        },
+        tag: r.tag_name,
+        name,
+        published_at: released_at,
+        html_url,
+        is_prerelease: r.upcoming_release,
+        is_new: false, // filled in by list_releases against a consistent `now`
+        age_human: String::new(),
+        account_id: None,
+    }))
+}
+
+async fn fetch_latest_pipeline(
+    client: &Client,
+    token: &str,
+    base_url: &str,
+    repo: &Repo,
+) -> Result<Option<CiRun>> {
+    let Some(project_id) = project_id_from_repo(repo) else {
+        return Ok(None);
+    };
+    let url = format!("{base_url}/api/v4/projects/{project_id}/pipelines");
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .query(&[("ref", repo.default_branch.as_str()), ("per_page", "1")])
+        .send()
+        .await?;
+
+    match resp.status() {
+        s if s.is_success() => {}
+        // Project has no pipelines / CI not configured — emit a None marker
+        // so the repo row still gets a "no ci" dot rather than vanishing.
+        StatusCode::NOT_FOUND => {
+            return Ok(Some(CiRun {
+                repo_id: repo.id.clone(),
+                repo_full_name: format!("{}/{}", repo.owner, repo.name),
+                status: CiStatus::None,
+                html_url: None,
+                branch: Some(repo.default_branch.clone()),
+                workflow_name: None,
+                account_id: None,
+            }));
+        }
+        StatusCode::UNAUTHORIZED => return Err(GitLabError::Unauthorized),
+        StatusCode::FORBIDDEN => return Ok(None),
+        s => {
+            return Err(GitLabError::HttpStatus {
+                base_url: base_url.to_string(),
+                status: s,
+            });
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct RawPipeline {
+        status: String,
+        web_url: String,
+        #[serde(rename = "ref")]
+        ref_: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    }
+
+    let raw: Vec<RawPipeline> = resp.json().await?;
+    let Some(p) = raw.into_iter().next() else {
+        return Ok(Some(CiRun {
+            repo_id: repo.id.clone(),
+            repo_full_name: format!("{}/{}", repo.owner, repo.name),
+            status: CiStatus::None,
+            html_url: None,
+            branch: Some(repo.default_branch.clone()),
+            workflow_name: None,
+            account_id: None,
+        }));
+    };
+
+    Ok(Some(CiRun {
+        repo_id: repo.id.clone(),
+        repo_full_name: format!("{}/{}", repo.owner, repo.name),
+        status: collapse_pipeline_status(&p.status),
+        html_url: Some(p.web_url),
+        branch: p.ref_,
+        workflow_name: p.name,
+        account_id: None,
+    }))
+}
+
+/// Map GitLab's pipeline status onto the four buckets the UI cares about.
+/// GitLab's full set: created, waiting_for_resource, preparing, pending,
+/// running, success, failed, canceled, skipped, manual, scheduled.
+/// "manual" pipelines wait for a human to click "play" — surfacing them as
+/// "no ci" rather than "running" matches the actual user-visible state.
+fn collapse_pipeline_status(status: &str) -> CiStatus {
+    match status {
+        "success" => CiStatus::Ok,
+        "failed" => CiStatus::Fail,
+        "running" | "pending" | "preparing" | "created" | "waiting_for_resource" | "scheduled" => {
+            CiStatus::Run
+        }
+        "canceled" | "skipped" => CiStatus::Cancelled,
+        // "manual" or anything we don't recognise yet
+        _ => CiStatus::None,
     }
 }
 

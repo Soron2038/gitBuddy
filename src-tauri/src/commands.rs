@@ -862,11 +862,15 @@ pub async fn list_releases(
     app: AppHandle,
 ) -> Result<Vec<Release>, String> {
     state.ensure_initialized(&app).await;
-    // GitLab release listing isn't implemented yet (needs per-project release
-    // fetches, gated to "recently active" projects to stay within rate limits).
-    // For now, only GitHub contributes releases.
     let gh: Vec<(String, _)> = state
         .github
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
+    let gl: Vec<(String, _)> = state
+        .gitlab
         .read()
         .await
         .iter()
@@ -879,6 +883,12 @@ pub async fn list_releases(
             Err(e) => eprintln!("gitbuddy: github[{id}] list_releases failed: {e}"),
         }
     }
+    for (id, p) in gl {
+        match p.list_releases().await {
+            Ok(v) => tag_and_extend_releases(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_releases failed: {e}"),
+        }
+    }
     Ok(out)
 }
 
@@ -888,9 +898,15 @@ pub async fn list_ci(
     app: AppHandle,
 ) -> Result<Vec<CiRun>, String> {
     state.ensure_initialized(&app).await;
-    // Same as releases: GitLab CI surface is a separate landing.
     let gh: Vec<(String, _)> = state
         .github
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
+    let gl: Vec<(String, _)> = state
+        .gitlab
         .read()
         .await
         .iter()
@@ -901,6 +917,12 @@ pub async fn list_ci(
         match p.list_ci().await {
             Ok(v) => tag_and_extend_ci(&mut out, v, &id),
             Err(e) => eprintln!("gitbuddy: github[{id}] list_ci failed: {e}"),
+        }
+    }
+    for (id, p) in gl {
+        match p.list_ci().await {
+            Ok(v) => tag_and_extend_ci(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_ci failed: {e}"),
         }
     }
     Ok(out)
