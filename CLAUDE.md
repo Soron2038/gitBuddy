@@ -18,13 +18,14 @@ All commands run from repo root unless noted.
 | Frontend type-check | `npm run check` |
 | Frontend type-check (watch) | `npm run check:watch` |
 | Rust check | `cd src-tauri && cargo check --all-targets` |
-| Rust lint (CI gate) | `cd src-tauri && cargo clippy --all-targets -- -D warnings` |
-| Rust format check (CI gate) | `cd src-tauri && cargo fmt --all -- --check` |
+| Rust lint | `cd src-tauri && cargo clippy --all-targets -- -D warnings` |
+| Rust format check | `cd src-tauri && cargo fmt --all -- --check` |
 | Rust format apply | `cd src-tauri && cargo fmt --all` |
+| Rust tests | `cd src-tauri && cargo test --lib` |
 | Release bundle (unsigned, local) | `npm run tauri build` |
 | Tray icon regen | `python3 scripts/regenerate-tray-icon.py` |
 
-CI runs all four check/lint commands plus an unsigned Tauri bundle on `macos-14`. Anything that fails CI fails locally with the same command — there is no Linux/Windows runner.
+There is no CI — the commands above are the local verification gate. Before a release, run `npm run tauri build` to smoke-test the macOS bundle.
 
 ### First `cargo build` is slow
 
