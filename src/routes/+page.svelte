@@ -7,17 +7,13 @@
   import Buddy from '$lib/Buddy.svelte';
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
   import {
-    ghStatus,
     ghSetToken,
-    ghDisconnect,
     ghOAuthBegin,
     ghOAuthPoll,
-    glStatus,
     glSetToken,
-    glDisconnect,
-    cbStatus,
     cbSetToken,
-    cbDisconnect,
+    accountsList,
+    accountsDisconnect,
     listWaiting,
     listRepos,
     listReleases,
@@ -36,6 +32,7 @@
     type Viewer,
     type GitLabStatus,
     type CodebergStatus,
+    type Account,
     type WaitingItem,
     type ItemReason,
     type Repo,
@@ -50,6 +47,12 @@
   type Status = 'on-you' | 'all' | 'releases' | 'local';
 
   // ── Auth state ────────────────────────────────────────────────────────
+  // `accounts` is the source of truth. The viewer/gl/cb fields are kept as
+  // raw state (rather than $derived) so the rest of the legacy UI that
+  // assumes a single account per provider type keeps working unchanged —
+  // every refreshAuth() rebuilds them by picking the first account of each
+  // type out of `accounts`.
+  let accounts: Account[] = $state([]);
   let viewer: Viewer | null = $state(null);
   let gl: GitLabStatus | null = $state(null);
   let cb: CodebergStatus | null = $state(null);
@@ -154,31 +157,34 @@
   let ciTotalCount = $derived(ciRuns.length);
   let ciFailingCount = $derived(ciRuns.filter((r) => r.status === 'fail').length);
   let ciRunningCount = $derived(ciRuns.filter((r) => r.status === 'run').length);
-  let providerCount = $derived((viewer ? 1 : 0) + (gl ? 1 : 0) + (cb ? 1 : 0));
+  let providerCount = $derived(accounts.length);
 
-  let canAddGithub = $derived(viewer === null);
-  let canAddGitlab = $derived(gl === null);
-  let canAddCodeberg = $derived(cb === null);
-  let canAddAny = $derived(canAddGithub || canAddGitlab || canAddCodeberg);
-  let availableProviderTabs = $derived(
-    [
-      canAddGithub && 'github',
-      canAddGitlab && 'gitlab',
-      canAddCodeberg && 'codeberg',
-    ].filter(Boolean) as Array<'github' | 'gitlab' | 'codeberg'>,
-  );
+  // Multi-account: every provider tab is always available — you can stack
+  // multiple GitLab instances, a personal + work GitHub, etc. The constant
+  // list keeps the tab order stable across renders.
+  const availableProviderTabs = ['github', 'gitlab', 'codeberg'] as const;
 
   /** Hosts seen in local orphan clones, filtered by which provider tab the
    *  user is in. Drives the quick-pick chips for GitLab and Codeberg
-   *  onboarding so self-hosted hostnames don't have to be retyped. */
+   *  onboarding so self-hosted hostnames don't have to be retyped. Hosts
+   *  already connected via any account are filtered out to avoid offering
+   *  duplicates. */
   function hostSuggestionsFor(target: 'gitlab' | 'codeberg'): string[] {
+    const alreadyConnected = new Set<string>();
+    for (const a of accounts) {
+      if (!a.base_url) continue;
+      try {
+        alreadyConnected.add(new URL(a.base_url).host);
+      } catch {
+        /* malformed base_url — skip */
+      }
+    }
     const out = new Set<string>();
     for (const o of locals) {
       const h = o.remote?.host;
       if (!h) continue;
       if (h === 'github.com') continue;
-      if (gl && gl.base_url.includes(h)) continue;
-      if (cb && cb.base_url.includes(h)) continue;
+      if (alreadyConnected.has(h)) continue;
       const isGitlabLike = h.includes('gitlab');
       if (target === 'gitlab' && !isGitlabLike && out.size > 0) continue;
       if (target === 'codeberg' && isGitlabLike) continue;
@@ -190,26 +196,32 @@
   let codebergHostSuggestions = $derived(hostSuggestionsFor('codeberg'));
 
   type ProvBadge = {
+    /** Account.id — used as Svelte each-key and as the click-through target. */
+    accountId: string;
     kind: 'github' | 'gitlab' | 'codeberg';
     viewer: Viewer;
     host: string;
   };
   let connectedProviders = $derived.by(() => {
     const out: ProvBadge[] = [];
-    if (viewer) out.push({ kind: 'github', viewer, host: 'github.com' });
-    if (gl) {
-      try {
-        out.push({ kind: 'gitlab', viewer: gl.viewer, host: new URL(gl.base_url).host });
-      } catch {
-        /* malformed URL */
-      }
-    }
-    if (cb) {
-      try {
-        out.push({ kind: 'codeberg', viewer: cb.viewer, host: new URL(cb.base_url).host });
-      } catch {
-        /* malformed URL */
-      }
+    for (const a of accounts) {
+      const host = a.base_url
+        ? (() => {
+            try {
+              return new URL(a.base_url!).host;
+            } catch {
+              return '';
+            }
+          })()
+        : 'github.com';
+      if (!host) continue;
+      const kind =
+        a.provider === 'github'
+          ? 'github'
+          : a.provider === 'codeberg'
+            ? 'codeberg'
+            : 'gitlab';
+      out.push({ accountId: a.id, kind, viewer: a.viewer, host });
     }
     return out;
   });
@@ -393,10 +405,22 @@
   }
 
   async function refreshAuth() {
-    const [ghViewer, glRes, cbRes] = await Promise.all([ghStatus(), glStatus(), cbStatus()]);
-    viewer = ghViewer;
-    gl = glRes;
-    cb = cbRes;
+    accounts = await accountsList();
+    // Legacy single-account-per-provider helpers used by the rest of the
+    // UI; rebuilt from the canonical accounts list each refresh. Picking
+    // "first match per provider" preserves the existing render paths
+    // while the multi-account-aware Account-Liste in Settings shows
+    // every entry.
+    const gh = accounts.find((a) => a.provider === 'github');
+    const glAcct = accounts.find((a) => a.provider === 'gitlab' || a.provider === 'mpsd-gitlab');
+    const cbAcct = accounts.find((a) => a.provider === 'codeberg');
+    viewer = gh?.viewer ?? null;
+    gl = glAcct && glAcct.base_url
+      ? { viewer: glAcct.viewer, base_url: glAcct.base_url }
+      : null;
+    cb = cbAcct && cbAcct.base_url
+      ? { viewer: cbAcct.viewer, base_url: cbAcct.base_url }
+      : null;
   }
 
   onMount(() => {
@@ -653,28 +677,30 @@
     await persistSettings();
   }
 
-  async function disconnect(kind: 'github' | 'gitlab' | 'codeberg') {
-    const label =
-      kind === 'github' ? 'GitHub' : kind === 'gitlab' ? 'GitLab' : 'Codeberg';
-    if (!confirm(`Disconnect ${label}? The stored token will be removed from your Keychain.`)) {
+  async function disconnectAccount(account: Account) {
+    const where = account.base_url
+      ? (() => {
+          try {
+            return new URL(account.base_url!).host;
+          } catch {
+            return account.base_url!;
+          }
+        })()
+      : 'github.com';
+    if (
+      !confirm(
+        `Disconnect ${account.login} (${where})? The stored token will be removed from your Keychain.`,
+      )
+    ) {
       return;
     }
     error = null;
     try {
-      if (kind === 'github') {
-        await ghDisconnect();
-        viewer = null;
-      } else if (kind === 'gitlab') {
-        await glDisconnect();
-        gl = null;
-      } else {
-        await cbDisconnect();
-        cb = null;
-      }
-      // The provider-changed event listener will re-fetch data; nothing to do
-      // here. But we explicitly null the local copy of the disconnected
-      // provider for the UI to update instantly without waiting for the
-      // event to bounce back.
+      await accountsDisconnect(account.id);
+      // Optimistic local update so the row disappears without waiting for
+      // the provider-changed event to bounce back via Tauri.
+      accounts = accounts.filter((a) => a.id !== account.id);
+      await refreshAuth();
     } catch (e) {
       error = String(e);
     }
@@ -686,10 +712,11 @@
     error = null;
     githubAuthMethod = 'oauth';
     resetOAuthState();
-    if (availableProviderTabs.length === 1) {
-      chosenProvider = availableProviderTabs[0];
-    } else if (!availableProviderTabs.includes(chosenProvider)) {
-      chosenProvider = availableProviderTabs[0] ?? 'github';
+    // Multi-account: every provider tab is always available. Default to
+    // GitHub if the previous chosen tab is no longer in the (constant)
+    // list — kept defensive in case the tab list shrinks again later.
+    if (!availableProviderTabs.includes(chosenProvider)) {
+      chosenProvider = 'github';
     }
   }
 
@@ -800,9 +827,9 @@
           }
           break;
         case 'success':
-          viewer = r.viewer;
           resetOAuthState();
           addingProvider = false;
+          await refreshAuth();
           await loadAllData();
           break;
       }
@@ -834,16 +861,15 @@
     error = null;
     try {
       if (chosenProvider === 'github') {
-        viewer = await ghSetToken(tokenInput.trim());
+        await ghSetToken(tokenInput.trim());
       } else if (chosenProvider === 'gitlab') {
         await glSetToken(tokenInput.trim(), gitlabBaseInput.trim());
-        gl = await glStatus();
       } else {
         await cbSetToken(tokenInput.trim(), codebergBaseInput.trim());
-        cb = await cbStatus();
       }
       tokenInput = '';
       addingProvider = false;
+      await refreshAuth();
       // Trigger a data reload so the freshly connected provider's repos
       // appear immediately when the user returns to the overview.
       await loadAllData();
@@ -1014,7 +1040,7 @@
           {#if connectedProviders.length === 0}
             <p class="side-empty">No providers connected yet.</p>
           {:else}
-            {#each connectedProviders as p (p.host)}
+            {#each connectedProviders as p (p.accountId)}
               {@const on = !disabledHosts.has(p.host)}
               <div class="pill acct-pill" class:muted={!on}>
                 <button
@@ -1544,69 +1570,53 @@
 
         <!-- Connected providers -->
         <section class="set-sec">
-          <h3>Connected <em>providers</em></h3>
-          {#if !connected}
-            <p class="set-empty">No providers yet — add one below.</p>
+          <h3>Connected <em>accounts</em></h3>
+          {#if accounts.length === 0}
+            <p class="set-empty">No accounts yet — add one below.</p>
           {:else}
             <ul class="prov-list">
-              {#if viewer}
+              {#each accounts as account (account.id)}
+                {@const acctHost = account.base_url
+                  ? (() => {
+                      try {
+                        return new URL(account.base_url!).host;
+                      } catch {
+                        return account.base_url!;
+                      }
+                    })()
+                  : 'github.com'}
+                {@const chipText = providerChipText({
+                  provider: account.provider,
+                  html_url: account.base_url ?? '',
+                })}
+                {@const chipClass = providerCssClass(account.provider)}
                 <li class="prov-row">
-                  <span class="pchip gh">gh</span>
+                  <span class="pchip {chipClass}">{chipText}</span>
                   <div class="prov-meta">
-                    <div class="prov-name">{viewer.name ?? viewer.login}</div>
-                    <div class="prov-host">github.com</div>
+                    <div class="prov-name">
+                      {account.viewer.name ?? account.login}
+                      {#if account.auth === 'oauth_device'}
+                        <span class="prov-auth-badge" data-tip="OAuth Device Flow"
+                          >oauth</span>
+                      {/if}
+                    </div>
+                    <div class="prov-host">{acctHost}</div>
                   </div>
                   <button
                     type="button"
                     class="prov-disconnect"
-                    onclick={() => disconnect('github')}
+                    onclick={() => disconnectAccount(account)}
                   >
                     Disconnect
                   </button>
                 </li>
-              {/if}
-              {#if gl}
-                <li class="prov-row">
-                  <span class="pchip {gl.base_url.includes('gitlab.com') ? 'gl' : 'gl-self'}">
-                    {gl.base_url.includes('gitlab.com')
-                      ? 'gl'
-                      : providerChipText({ provider: 'mpsd-gitlab', html_url: gl.base_url })}
-                  </span>
-                  <div class="prov-meta">
-                    <div class="prov-name">{gl.viewer.name ?? gl.viewer.login}</div>
-                    <div class="prov-host">{new URL(gl.base_url).host}</div>
-                  </div>
-                  <button
-                    type="button"
-                    class="prov-disconnect"
-                    onclick={() => disconnect('gitlab')}
-                  >
-                    Disconnect
-                  </button>
-                </li>
-              {/if}
-              {#if cb}
-                <li class="prov-row">
-                  <span class="pchip cb">cb</span>
-                  <div class="prov-meta">
-                    <div class="prov-name">{cb.viewer.name ?? cb.viewer.login}</div>
-                    <div class="prov-host">{new URL(cb.base_url).host}</div>
-                  </div>
-                  <button
-                    type="button"
-                    class="prov-disconnect"
-                    onclick={() => disconnect('codeberg')}
-                  >
-                    Disconnect
-                  </button>
-                </li>
-              {/if}
+              {/each}
             </ul>
           {/if}
 
-          {#if canAddAny && !addingProvider}
+          {#if !addingProvider}
             <button type="button" class="set-add" onclick={startAddingProvider}>
-              + Add provider…
+              + Add account…
             </button>
           {/if}
 
@@ -1626,7 +1636,7 @@
                 </div>
               {/if}
 
-              {#if chosenProvider === 'github' && canAddGithub}
+              {#if chosenProvider === 'github'}
                 <div class="auth-method">
                   <button
                     type="button"
@@ -1742,7 +1752,7 @@
                     />
                   </label>
                 {/if}
-              {:else if chosenProvider === 'gitlab' && canAddGitlab}
+              {:else if chosenProvider === 'gitlab'}
                 <label class="token-input">
                   <span class="lbl">Instance URL</span>
                   <input
@@ -1792,7 +1802,7 @@
                     spellcheck="false"
                   />
                 </label>
-              {:else if chosenProvider === 'codeberg' && canAddCodeberg}
+              {:else if chosenProvider === 'codeberg'}
                 <label class="token-input">
                   <span class="lbl">Instance URL</span>
                   <input
@@ -2872,6 +2882,20 @@
     font-weight: 500;
     color: var(--ink);
     font-size: 13.5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .prov-auth-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--sage);
+    background: var(--sage-soft);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 600;
   }
   .prov-host {
     font-family: var(--font-mono);
