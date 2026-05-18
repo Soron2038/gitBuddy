@@ -2,7 +2,9 @@
 //! Forgejo/Gitea instance. Both expose a deliberately GitHub-compatible
 //! REST API at `/api/v1/`, so this module mirrors github.rs closely.
 
-use crate::types::{ItemKind, ItemReason, Provider, Repo, Viewer, WaitingItem};
+use crate::types::{
+    CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
+};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -131,6 +133,67 @@ impl CodebergProvider {
         }
 
         Ok(all)
+    }
+
+    /// Latest release per repo, for the N most-recently-updated repos. Same
+    /// shape and caps as the github / gitlab equivalents — one call per
+    /// repo, failures tolerated per-repo.
+    pub async fn list_releases(&self) -> Result<Vec<Release>> {
+        const MAX_REPOS_TO_CHECK: usize = 60;
+
+        let mut repos = self.list_repos().await?;
+        repos.truncate(MAX_REPOS_TO_CHECK);
+
+        let mut handles = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let client = self.client.clone();
+            let token = self.token.clone();
+            let base = self.base_url.clone();
+            handles.push(tokio::spawn(async move {
+                fetch_latest_release(&client, &token, &base, &repo).await
+            }));
+        }
+
+        let now = Utc::now();
+        let mut releases = Vec::new();
+        for h in handles {
+            if let Ok(Ok(Some(mut r))) = h.await {
+                r.is_new = within_days(&r.published_at, &now, 7);
+                r.age_human = humanise_age(&r.published_at, now);
+                releases.push(r);
+            }
+        }
+
+        releases.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+        Ok(releases)
+    }
+
+    /// Latest Gitea Actions workflow run on each repo's default branch.
+    /// Best-effort — repos without Actions enabled return 404 and we
+    /// surface a "no ci" marker so the row still gets a coloured dot.
+    pub async fn list_ci(&self) -> Result<Vec<CiRun>> {
+        const MAX_REPOS_TO_CHECK: usize = 60;
+
+        let mut repos = self.list_repos().await?;
+        repos.truncate(MAX_REPOS_TO_CHECK);
+
+        let mut handles = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let client = self.client.clone();
+            let token = self.token.clone();
+            let base = self.base_url.clone();
+            handles.push(tokio::spawn(async move {
+                fetch_latest_ci_run(&client, &token, &base, &repo).await
+            }));
+        }
+
+        let mut runs = Vec::new();
+        for h in handles {
+            if let Ok(Ok(Some(r))) = h.await {
+                runs.push(r);
+            }
+        }
+        Ok(runs)
     }
 }
 
@@ -348,6 +411,187 @@ fn reason_priority(r: ItemReason) -> u8 {
         ItemReason::Review => 1,
         ItemReason::Authored => 2,
         ItemReason::Mentioned => 3,
+    }
+}
+
+fn within_days(timestamp: &str, now: &DateTime<Utc>, days: i64) -> bool {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|t| (*now - t.with_timezone(&Utc)).num_days() <= days)
+        .unwrap_or(false)
+}
+
+async fn fetch_latest_release(
+    client: &Client,
+    token: &str,
+    base_url: &str,
+    repo: &Repo,
+) -> Result<Option<Release>> {
+    let url = format!(
+        "{base_url}/api/v1/repos/{}/{}/releases",
+        repo.owner, repo.name
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Accept", ACCEPT)
+        .query(&[("limit", "1")])
+        .send()
+        .await?;
+
+    match resp.status() {
+        s if s.is_success() => {}
+        // 404 = no releases yet, not an error.
+        StatusCode::NOT_FOUND => return Ok(None),
+        StatusCode::UNAUTHORIZED => return Err(CodebergError::Unauthorized),
+        StatusCode::FORBIDDEN => return Ok(None),
+        s => {
+            return Err(CodebergError::HttpStatus {
+                base_url: base_url.to_string(),
+                status: s,
+            });
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct RawRelease {
+        tag_name: String,
+        name: Option<String>,
+        html_url: String,
+        published_at: Option<String>,
+        #[serde(default)]
+        prerelease: bool,
+        #[serde(default)]
+        draft: bool,
+    }
+
+    let raw: Vec<RawRelease> = resp.json().await?;
+    // Drafts shouldn't surface in the Releases tab — only published.
+    let Some(r) = raw.into_iter().find(|r| !r.draft) else {
+        return Ok(None);
+    };
+    let Some(published_at) = r.published_at else {
+        return Ok(None);
+    };
+
+    let name = r
+        .name
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| r.tag_name.clone());
+
+    Ok(Some(Release {
+        repo_id: repo.id.clone(),
+        repo_full_name: format!("{}/{}", repo.owner, repo.name),
+        provider: Provider::Codeberg,
+        tag: r.tag_name,
+        name,
+        published_at,
+        html_url: r.html_url,
+        is_prerelease: r.prerelease,
+        is_new: false, // filled in by list_releases against a consistent `now`
+        age_human: String::new(),
+        account_id: None,
+    }))
+}
+
+async fn fetch_latest_ci_run(
+    client: &Client,
+    token: &str,
+    base_url: &str,
+    repo: &Repo,
+) -> Result<Option<CiRun>> {
+    let url = format!(
+        "{base_url}/api/v1/repos/{}/{}/actions/runs",
+        repo.owner, repo.name
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Accept", ACCEPT)
+        .query(&[("branch", repo.default_branch.as_str()), ("limit", "1")])
+        .send()
+        .await?;
+
+    match resp.status() {
+        s if s.is_success() => {}
+        // Gitea Actions not enabled on this instance, or the repo doesn't
+        // have it on. Surface a "no ci" marker so the row still shows a
+        // dot (consistent with github/gitlab behaviour).
+        StatusCode::NOT_FOUND => {
+            return Ok(Some(CiRun {
+                repo_id: repo.id.clone(),
+                repo_full_name: format!("{}/{}", repo.owner, repo.name),
+                status: CiStatus::None,
+                html_url: None,
+                branch: Some(repo.default_branch.clone()),
+                workflow_name: None,
+                account_id: None,
+            }));
+        }
+        StatusCode::UNAUTHORIZED => return Err(CodebergError::Unauthorized),
+        StatusCode::FORBIDDEN => return Ok(None),
+        s => {
+            return Err(CodebergError::HttpStatus {
+                base_url: base_url.to_string(),
+                status: s,
+            });
+        }
+    }
+
+    // Gitea wraps the runs in a `workflow_runs` envelope, mirroring GitHub.
+    #[derive(Deserialize)]
+    struct WorkflowRunsResp {
+        workflow_runs: Vec<RawRun>,
+    }
+    #[derive(Deserialize)]
+    struct RawRun {
+        status: String,
+        #[serde(default)]
+        conclusion: Option<String>,
+        html_url: String,
+        #[serde(default)]
+        head_branch: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    }
+
+    let body: WorkflowRunsResp = resp.json().await?;
+    let Some(run) = body.workflow_runs.into_iter().next() else {
+        return Ok(Some(CiRun {
+            repo_id: repo.id.clone(),
+            repo_full_name: format!("{}/{}", repo.owner, repo.name),
+            status: CiStatus::None,
+            html_url: None,
+            branch: Some(repo.default_branch.clone()),
+            workflow_name: None,
+            account_id: None,
+        }));
+    };
+
+    Ok(Some(CiRun {
+        repo_id: repo.id.clone(),
+        repo_full_name: format!("{}/{}", repo.owner, repo.name),
+        status: collapse_ci_status(&run.status, run.conclusion.as_deref()),
+        html_url: Some(run.html_url),
+        branch: run.head_branch,
+        workflow_name: run.name,
+        account_id: None,
+    }))
+}
+
+/// Gitea Actions reuse GitHub's status/conclusion vocabulary, so the same
+/// matrix applies. Kept as a separate function (rather than importing
+/// github::collapse_ci_status) to keep provider modules independent — if
+/// Gitea ever diverges, the change lands here.
+fn collapse_ci_status(status: &str, conclusion: Option<&str>) -> CiStatus {
+    if status != "completed" {
+        return CiStatus::Run;
+    }
+    match conclusion {
+        Some("success") => CiStatus::Ok,
+        Some("failure" | "timed_out" | "action_required" | "startup_failure") => CiStatus::Fail,
+        Some("cancelled" | "skipped") => CiStatus::Cancelled,
+        Some("neutral") => CiStatus::Ok,
+        _ => CiStatus::None,
     }
 }
 

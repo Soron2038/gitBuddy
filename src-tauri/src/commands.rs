@@ -876,6 +876,13 @@ pub async fn list_releases(
         .iter()
         .map(|(id, p)| (id.clone(), p.clone()))
         .collect();
+    let cb: Vec<(String, _)> = state
+        .codeberg
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
     let mut out = Vec::new();
     for (id, p) in gh {
         match p.list_releases().await {
@@ -887,6 +894,12 @@ pub async fn list_releases(
         match p.list_releases().await {
             Ok(v) => tag_and_extend_releases(&mut out, v, &id),
             Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_releases failed: {e}"),
+        }
+    }
+    for (id, p) in cb {
+        match p.list_releases().await {
+            Ok(v) => tag_and_extend_releases(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_releases failed: {e}"),
         }
     }
     Ok(out)
@@ -912,6 +925,13 @@ pub async fn list_ci(
         .iter()
         .map(|(id, p)| (id.clone(), p.clone()))
         .collect();
+    let cb: Vec<(String, _)> = state
+        .codeberg
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
     let mut out = Vec::new();
     for (id, p) in gh {
         match p.list_ci().await {
@@ -923,6 +943,12 @@ pub async fn list_ci(
         match p.list_ci().await {
             Ok(v) => tag_and_extend_ci(&mut out, v, &id),
             Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_ci failed: {e}"),
+        }
+    }
+    for (id, p) in cb {
+        match p.list_ci().await {
+            Ok(v) => tag_and_extend_ci(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_ci failed: {e}"),
         }
     }
     Ok(out)
