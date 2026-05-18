@@ -1,0 +1,15 @@
+# Project-local Cargo config. Only the macOS runner is set here for now.
+
+# On macOS, every `cargo run` (and therefore every `tauri dev` cycle)
+# detours through scripts/sign-and-run.sh, which re-signs the freshly
+# built debug binary with a stable ad-hoc identifier
+# (`dev.soron2038.gitbuddy`) before exec'ing it. Without that, macOS
+# treats each rebuild as a brand-new app and the Keychain's
+# "Always Allow" grants stop sticking — see the script header for the
+# longer explanation.
+#
+# Linux and Windows builds aren't affected by this entry: the cfg gate
+# scopes the runner to macOS only.
+
+[target.'cfg(target_os = "macos")']
+runner = "./scripts/sign-and-run.sh"

@@ -34,6 +34,35 @@ not the only option.
   commands. The poll is one HTTP call per invocation; the frontend drives
   the cadence and respects the `slow_down` interval bumps.
 
+## 2026-05-18 — Stable ad-hoc codesign for dev builds
+
+**Decision:** Every `cargo run` on macOS detours through
+`src-tauri/scripts/sign-and-run.sh`, which re-signs the freshly built
+debug binary with a stable ad-hoc identifier
+(`dev.soron2038.gitbuddy`) before exec'ing it. Wired up via
+`src-tauri/.cargo/config.toml` under
+`[target.'cfg(target_os = "macos")']`.
+
+**Why:** Without the wrapper, macOS assigns each fresh `cargo build`
+output a unique transient identifier. The Keychain binds its
+"Always Allow" grants to that identifier, so every Rust-side rebuild
+invalidated all previously granted permissions — six fresh prompts
+on every relaunch during dev. Forcing the identifier to a stable
+value makes the grants stick across rebuilds.
+
+**Caveats:**
+
+- Linux and Windows are unaffected — the cfg gate scopes the runner to
+  macOS only.
+- `tauri build` (release/bundle) doesn't go through this path; signing
+  for production happens via Apple Developer ID and is M7's concern.
+- The first launch after this lands still surfaces the Keychain
+  prompts once. Click **Always Allow** on each; subsequent rebuilds
+  shouldn't re-prompt.
+- If the prompts ever come back, check that the binary's identifier
+  is still stable with
+  `codesign -d --verbose=4 src-tauri/target/debug/gitbuddy 2>&1 | grep Identifier=`.
+
 ## 2026-05-18 — No OAuth for GitLab or Codeberg (for now)
 
 **Decision:** OAuth Device Flow stays GitHub-only. GitLab and
