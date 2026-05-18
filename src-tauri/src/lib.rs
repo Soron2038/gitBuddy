@@ -12,6 +12,7 @@ mod github;
 mod gitlab;
 mod keychain;
 mod local_index;
+mod oauth;
 mod settings;
 mod types;
 mod util;
