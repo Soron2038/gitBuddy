@@ -52,9 +52,13 @@ pub struct AppState {
 
 impl AppState {
     /// On the first command call after launch:
-    ///   1. Migrate any pre-M6.3 legacy single-account Keychain entries to
-    ///      per-account composite keys + record them in `accounts.json`.
-    ///   2. Restore providers from `accounts.json`. Each account is restored
+    ///   1. Migrate `accounts.json` from v1 ids (`<provider>:<login>`, M6.3)
+    ///      to v2 ids (`<provider>:<host>:<login>`, M6.4), moving each
+    ///      Keychain entry to its new key.
+    ///   2. Migrate any pre-M6.3 legacy flat Keychain entries
+    ///      (`"github"` / `"gitlab"` / `"codeberg"`) directly into v2-format
+    ///      account records.
+    ///   3. Restore providers from `accounts.json`. Each account is restored
     ///      independently — a failure for one doesn't blank the rest.
     pub async fn ensure_initialized(&self, app: &AppHandle) {
         let mut attempted = self.init_attempted.lock().await;
@@ -63,8 +67,78 @@ impl AppState {
         }
         *attempted = true;
 
+        migrate_id_scheme_to_v2(app).await;
         migrate_legacy_keychain(app).await;
         restore_from_accounts(app, self).await;
+    }
+}
+
+/// One-shot upgrade from v1 (`<provider>:<login>`) to v2
+/// (`<provider>:<host>:<login>`) account ids. Walks every record in
+/// `accounts.json`; for any whose computed v2 id differs from its stored id,
+/// the Keychain entry is copied under the new id and the old entry deleted.
+/// Records whose Keychain entries can't be read are left with the old id in
+/// the registry so a later launch can retry — failing-open here would
+/// destroy state. After the walk, `accounts.json` is bumped to
+/// `CURRENT_VERSION` and saved.
+async fn migrate_id_scheme_to_v2(app: &AppHandle) {
+    let mut file = match accounts::load(app) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("gitbuddy: load accounts.json for v2 migration failed: {e}");
+            return;
+        }
+    };
+    if file.version >= accounts::CURRENT_VERSION {
+        return;
+    }
+
+    let mut migrated = Vec::with_capacity(file.accounts.len());
+    for mut account in file.accounts {
+        let host = accounts::account_host(account.provider, account.base_url.as_deref());
+        let new_id = accounts::make_id(account.provider, &host, &account.login);
+        if new_id == account.id {
+            migrated.push(account);
+            continue;
+        }
+
+        match keychain::load(&account.id).await {
+            Ok(Some(secret)) => {
+                if let Err(e) = keychain::save(&new_id, &secret).await {
+                    eprintln!("gitbuddy: writing v2 keychain entry under {new_id} failed: {e}");
+                    migrated.push(account);
+                    continue;
+                }
+                if let Err(e) = keychain::delete(&account.id).await {
+                    eprintln!(
+                        "gitbuddy: deleting v1 keychain entry {} failed: {e} — leftover key is harmless",
+                        account.id
+                    );
+                }
+                account.id = new_id;
+                migrated.push(account);
+            }
+            Ok(None) => {
+                eprintln!(
+                    "gitbuddy: v1 account {} has no keychain entry, leaving orphan record",
+                    account.id
+                );
+                migrated.push(account);
+            }
+            Err(e) => {
+                eprintln!(
+                    "gitbuddy: keychain load for v2 migration of {} failed: {e}",
+                    account.id
+                );
+                migrated.push(account);
+            }
+        }
+    }
+
+    file.accounts = migrated;
+    file.version = accounts::CURRENT_VERSION;
+    if let Err(e) = accounts::save(app, &file) {
+        eprintln!("gitbuddy: writing v2 accounts.json failed: {e}");
     }
 }
 
@@ -262,39 +336,45 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
     }
 }
 
-/// Look up the composite-key id of the currently-connected account for a
+/// Look up the v2 composite-key id of the currently-connected account for a
 /// given provider. The in-memory provider state is the freshest source;
 /// `accounts.json` is the persistent fallback for disconnect calls that
 /// race against an in-memory clear. Returns `None` when the provider isn't
 /// connected at all (and the caller should fall through to legacy-key
 /// cleanup as a belt-and-braces).
+///
+/// Will be replaced by per-account commands in the multi-account UI work;
+/// this is a single-account-era helper kept alive until that ships.
 async fn current_account_id(
     state: tauri::State<'_, Arc<AppState>>,
     provider: Provider,
     app: &AppHandle,
 ) -> Option<String> {
-    let in_memory_login = match provider {
+    // (login, base_url) — host derivation is shared via accounts::account_host
+    // so the in-memory id matches what migration / connect-time code writes.
+    let in_memory: Option<(String, Option<String>)> = match provider {
         Provider::Github => state
             .github
             .read()
             .await
             .as_ref()
-            .map(|p| p.viewer.login.clone()),
+            .map(|p| (p.viewer.login.clone(), None)),
         Provider::Gitlab | Provider::MpsdGitlab => state
             .gitlab
             .read()
             .await
             .as_ref()
-            .map(|p| p.viewer.login.clone()),
+            .map(|p| (p.viewer.login.clone(), Some(p.base_url().to_string()))),
         Provider::Codeberg => state
             .codeberg
             .read()
             .await
             .as_ref()
-            .map(|p| p.viewer.login.clone()),
+            .map(|p| (p.viewer.login.clone(), Some(p.base_url().to_string()))),
     };
-    if let Some(login) = in_memory_login {
-        return Some(accounts::make_id(provider, &login));
+    if let Some((login, base_url)) = in_memory {
+        let host = accounts::account_host(provider, base_url.as_deref());
+        return Some(accounts::make_id(provider, &host, &login));
     }
 
     accounts::load(app)

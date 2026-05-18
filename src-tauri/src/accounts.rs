@@ -1,11 +1,20 @@
 //! Multi-account-ready account registry. Each connected account (GitHub PAT,
-//! GitHub OAuth Device Flow, GitLab PAT, …) is one entry in `accounts.json`,
-//! with its secret material stored separately in the Keychain under the
-//! same `id`.
+//! GitHub OAuth Device Flow, GitLab PAT on gitlab.com, GitLab PAT on
+//! gitlab.gwdg.de, …) is one entry in `accounts.json`, with its secret
+//! material stored separately in the Keychain under the same `id`.
 //!
-//! Schema is versioned (`version: 1`) so future migrations can detect old
-//! files. The UI in this milestone is still single-account-per-provider —
-//! the storage just stops actively preventing the multi-account case.
+//! ## File version
+//!
+//! - **v1** (M6.3): ids shaped `<provider-slug>:<login>`. Worked while the UI
+//!   was still single-account-per-provider; collides as soon as two
+//!   self-hosted GitLab accounts share a login.
+//! - **v2** (current): ids shaped `<provider-slug>:<host>:<login>`. Host is
+//!   included for every provider — including GitHub (`github.com`) — so the
+//!   scheme has no per-provider special case and stays stable if GitHub
+//!   Enterprise ever lands.
+//!
+//! `commands::migrate_id_scheme_to_v2` upgrades v1 files on first launch,
+//! moving each account's Keychain entry to the new id at the same time.
 
 use crate::types::{Account, AuthMethod, Provider, Viewer};
 use crate::util::atomic_write;
@@ -14,7 +23,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 const ACCOUNTS_FILE: &str = "accounts.json";
-const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountsFile {
@@ -51,7 +60,6 @@ pub fn load(app: &AppHandle) -> Result<AccountsFile, String> {
     serde_json::from_str(&raw).map_err(|e| format!("parsing {path:?}: {e}"))
 }
 
-#[allow(dead_code)] // wired up by the migration in the next commit
 pub fn save(app: &AppHandle, file: &AccountsFile) -> Result<(), String> {
     let path = accounts_path(app)?;
     if let Some(parent) = path.parent() {
@@ -62,41 +70,88 @@ pub fn save(app: &AppHandle, file: &AccountsFile) -> Result<(), String> {
     atomic_write(&path, json.as_bytes())
 }
 
-/// Slug used both in `Account.id` and as the Keychain account key. Kept stable
-/// and ASCII so it survives round-trips through the macOS Security framework
-/// without surprises.
+/// Slug used as the first segment of `Account.id`. Kept stable and ASCII so
+/// it survives round-trips through the macOS Security framework without
+/// surprises. `MpsdGitlab` was a historical convenience variant; today it
+/// shares the `gitlab` slug and is disambiguated entirely by host.
 pub fn provider_slug(provider: Provider) -> &'static str {
     match provider {
         Provider::Github => "github",
-        // Self-hosted GitLab installations share the same slug; the base_url
-        // field carries the host distinction. Multi-account UI later will
-        // need to include the host in the id to disambiguate two GitLab
-        // accounts on different hosts, but with single-account-per-provider
-        // UI that collision can't happen yet.
         Provider::Gitlab | Provider::MpsdGitlab => "gitlab",
         Provider::Codeberg => "codeberg",
     }
 }
 
-/// Stable account identifier: `"<provider-slug>:<login-lowercase>"`. Used as
-/// both the in-memory primary key and the Keychain account name. Lowercasing
-/// guards against GitHub treating `Bjoernw` and `bjoernw` as the same login
-/// but serving different display casings on different endpoints.
-pub fn make_id(provider: Provider, login: &str) -> String {
-    format!("{}:{}", provider_slug(provider), login.to_lowercase())
+/// Canonical host for a given (provider, base_url) pair.
+///
+/// - GitHub always reports `github.com` (we don't speak GitHub Enterprise yet,
+///   but the id scheme can carry it without code changes when we do).
+/// - GitLab / Codeberg parse the host out of the base URL — `https://gitlab.gwdg.de/api/v4`
+///   collapses to `gitlab.gwdg.de`. Falls back to a `gitlab.com` /
+///   `codeberg.org` default for the (defensive) case where base_url is
+///   missing or unparseable, so we never end up writing a record with an
+///   empty host segment.
+pub fn account_host(provider: Provider, base_url: Option<&str>) -> String {
+    match provider {
+        Provider::Github => "github.com".to_string(),
+        Provider::Gitlab | Provider::MpsdGitlab => parse_host(base_url, "gitlab.com"),
+        Provider::Codeberg => parse_host(base_url, "codeberg.org"),
+    }
+}
+
+fn parse_host(base_url: Option<&str>, fallback: &str) -> String {
+    base_url
+        .and_then(url_host)
+        .unwrap_or_else(|| fallback.to_string())
+        .to_lowercase()
+}
+
+/// Minimal host extractor. Avoids pulling in the `url` crate just for this —
+/// base URLs are user-entered strings shaped like `https://gitlab.gwdg.de`
+/// or `https://gitlab.gwdg.de/api/v4/`, both trivial to dissect by hand.
+fn url_host(u: &str) -> Option<String> {
+    let after_scheme = u.split_once("://").map(|(_, rest)| rest).unwrap_or(u);
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()?
+        .split('@')
+        .next_back()?
+        .split(':')
+        .next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// Stable account identifier: `"<provider-slug>:<host>:<login-lowercase>"`.
+/// Used as both the in-memory primary key and the Keychain account name.
+/// Lowercasing the login guards against GitHub treating `Bjoernw` and
+/// `bjoernw` as the same identity but serving different display casings on
+/// different endpoints; lowercasing the host matches DNS semantics.
+pub fn make_id(provider: Provider, host: &str, login: &str) -> String {
+    format!(
+        "{}:{}:{}",
+        provider_slug(provider),
+        host.to_lowercase(),
+        login.to_lowercase()
+    )
 }
 
 /// Build an `Account` record from a freshly-validated provider connection.
-/// Used by both the existing PAT commands (after the next commit's refactor)
-/// and the OAuth Device Flow commands.
+/// `base_url` is the authoritative host source — even though GitHub doesn't
+/// surface it to the user today, passing `None` here still produces a
+/// `github.com` host because of [`account_host`].
 pub fn account_from(
     provider: Provider,
     viewer: &Viewer,
     auth: AuthMethod,
     base_url: Option<String>,
 ) -> Account {
+    let host = account_host(provider, base_url.as_deref());
     Account {
-        id: make_id(provider, &viewer.login),
+        id: make_id(provider, &host, &viewer.login),
         provider,
         login: viewer.login.clone(),
         viewer: viewer.clone(),
@@ -109,7 +164,6 @@ pub fn account_from(
 /// Upsert an account record into `accounts.json` by `id`. Used when adding
 /// new accounts and when re-validating existing ones (the viewer info or
 /// auth method may have changed — e.g. swapping a PAT for OAuth).
-#[allow(dead_code)] // wired up by the PAT/OAuth command refactor in the next commit
 pub fn upsert(app: &AppHandle, account: Account) -> Result<(), String> {
     let mut file = load(app)?;
     file.accounts.retain(|a| a.id != account.id);
@@ -120,9 +174,57 @@ pub fn upsert(app: &AppHandle, account: Account) -> Result<(), String> {
 /// Remove an account record by id. The Keychain entry under the same id is
 /// the caller's responsibility — keep the two in lockstep at the call site
 /// so we never leave dangling secrets.
-#[allow(dead_code)] // wired up by the disconnect-command refactor in the next commit
 pub fn remove(app: &AppHandle, id: &str) -> Result<(), String> {
     let mut file = load(app)?;
     file.accounts.retain(|a| a.id != id);
     save(app, &file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn make_id_includes_host_and_lowercases_segments() {
+        assert_eq!(
+            make_id(Provider::Github, "GitHub.com", "Bjoernw"),
+            "github:github.com:bjoernw"
+        );
+        assert_eq!(
+            make_id(Provider::Gitlab, "gitlab.gwdg.de", "user"),
+            "gitlab:gitlab.gwdg.de:user"
+        );
+    }
+
+    #[test]
+    fn account_host_falls_back_per_provider() {
+        assert_eq!(account_host(Provider::Github, None), "github.com");
+        assert_eq!(
+            account_host(Provider::Github, Some("ignored")),
+            "github.com"
+        );
+        assert_eq!(account_host(Provider::Gitlab, None), "gitlab.com");
+        assert_eq!(account_host(Provider::Codeberg, None), "codeberg.org");
+    }
+
+    #[test]
+    fn url_host_handles_common_shapes() {
+        assert_eq!(
+            url_host("https://gitlab.gwdg.de"),
+            Some("gitlab.gwdg.de".into())
+        );
+        assert_eq!(
+            url_host("https://gitlab.gwdg.de/api/v4/"),
+            Some("gitlab.gwdg.de".into())
+        );
+        assert_eq!(
+            url_host("https://gitlab.mpsd.mpg.de/"),
+            Some("gitlab.mpsd.mpg.de".into())
+        );
+        assert_eq!(
+            url_host("https://user:pw@example.com:8080/x"),
+            Some("example.com".into())
+        );
+        assert_eq!(url_host(""), None);
+    }
 }
