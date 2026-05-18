@@ -30,9 +30,14 @@ const EVT_PROVIDER_CHANGED: &str = "provider-changed";
 /// restart or the next 5-minute poll.
 const EVT_SETTINGS_CHANGED: &str = "settings-changed";
 
-const GH_KEYCHAIN_KEY: &str = "github";
-const GL_KEYCHAIN_KEY: &str = "gitlab";
-const CB_KEYCHAIN_KEY: &str = "codeberg";
+// Pre-M6.3 single-account Keychain keys. The migration in
+// `AppState::ensure_initialized` walks these once on first launch of the new
+// build, copies each token under its composite per-account key
+// (`<provider>:<login>`), records the account in `accounts.json`, and then
+// deletes the legacy entry.
+const GH_LEGACY_KEY: &str = "github";
+const GL_LEGACY_KEY: &str = "gitlab";
+const CB_LEGACY_KEY: &str = "codeberg";
 
 #[derive(Default)]
 pub struct AppState {
@@ -45,9 +50,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Restore any tokens saved to the Keychain on first command call. Each
-    /// provider is independent: GitHub may restore while GitLab doesn't,
-    /// or vice versa.
+    /// On the first command call after launch:
+    ///   1. Migrate any pre-M6.3 legacy single-account Keychain entries to
+    ///      per-account composite keys + record them in `accounts.json`.
+    ///   2. Restore providers from `accounts.json`. Each account is restored
+    ///      independently — a failure for one doesn't blank the rest.
     pub async fn ensure_initialized(&self, app: &AppHandle) {
         let mut attempted = self.init_attempted.lock().await;
         if *attempted {
@@ -55,44 +62,227 @@ impl AppState {
         }
         *attempted = true;
 
-        // GitHub — no per-account config beyond the token.
-        match keychain::load(GH_KEYCHAIN_KEY).await {
-            Ok(Some(token)) => match GitHubProvider::connect(token).await {
-                Ok(p) => *self.github.write().await = Some(Arc::new(p)),
-                Err(e) => eprintln!("gitbuddy: restoring github session failed: {e}"),
+        migrate_legacy_keychain(app).await;
+        restore_from_accounts(app, self).await;
+    }
+}
+
+/// Best-effort one-shot upgrade of the pre-M6.3 single-account Keychain
+/// layout. For each legacy provider key that still exists and isn't yet
+/// represented in `accounts.json`: connect with the legacy token, derive the
+/// composite key `<provider>:<login>`, save the token under the new key,
+/// upsert the account record, and delete the legacy key. If the legacy
+/// token is revoked or the network is down, the legacy entry is left alone
+/// so a later launch can retry — no destructive cleanup before the
+/// migration confirms success.
+async fn migrate_legacy_keychain(app: &AppHandle) {
+    let existing = accounts::load(app).unwrap_or_default();
+    let has = |slug: &str| existing.accounts.iter().any(|a| a.id.starts_with(slug));
+
+    // GitHub
+    if !has("github:") {
+        match keychain::load(GH_LEGACY_KEY).await {
+            Ok(Some(token)) => match GitHubProvider::connect(token.clone()).await {
+                Ok(p) => {
+                    let account =
+                        accounts::account_from(Provider::Github, &p.viewer, AuthMethod::Pat, None);
+                    finalise_migration(app, GH_LEGACY_KEY, account, &token).await;
+                }
+                Err(e) => eprintln!("gitbuddy: legacy github token invalid, leaving in place: {e}"),
             },
             Ok(None) => {}
-            Err(e) => eprintln!("gitbuddy: keychain load (github) failed: {e}"),
+            Err(e) => eprintln!("gitbuddy: keychain load (legacy github) failed: {e}"),
         }
+    }
 
-        // GitLab — needs the saved base URL too.
+    // GitLab — needs the saved base URL.
+    if !has("gitlab:") {
         let stored = settings::load(app).ok();
         let gl_base = stored.as_ref().and_then(|s| s.gitlab_base_url.clone());
         if let Some(base_url) = gl_base {
-            match keychain::load(GL_KEYCHAIN_KEY).await {
-                Ok(Some(token)) => match GitLabProvider::connect(token, base_url).await {
-                    Ok(p) => *self.gitlab.write().await = Some(Arc::new(p)),
-                    Err(e) => eprintln!("gitbuddy: restoring gitlab session failed: {e}"),
-                },
+            match keychain::load(GL_LEGACY_KEY).await {
+                Ok(Some(token)) => {
+                    match GitLabProvider::connect(token.clone(), base_url.clone()).await {
+                        Ok(p) => {
+                            let account = accounts::account_from(
+                                Provider::Gitlab,
+                                &p.viewer,
+                                AuthMethod::Pat,
+                                Some(p.base_url().to_string()),
+                            );
+                            finalise_migration(app, GL_LEGACY_KEY, account, &token).await;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "gitbuddy: legacy gitlab token invalid, leaving in place: {e}"
+                            )
+                        }
+                    }
+                }
                 Ok(None) => {}
-                Err(e) => eprintln!("gitbuddy: keychain load (gitlab) failed: {e}"),
+                Err(e) => eprintln!("gitbuddy: keychain load (legacy gitlab) failed: {e}"),
             }
         }
+    }
 
-        // Codeberg / Gitea / Forgejo — base URL stored alongside.
+    // Codeberg / Gitea / Forgejo — base URL stored alongside.
+    if !has("codeberg:") {
+        let stored = settings::load(app).ok();
         let cb_base = stored
             .as_ref()
             .and_then(|s| s.codeberg_base_url.clone())
             .unwrap_or_else(|| "https://codeberg.org".to_string());
-        match keychain::load(CB_KEYCHAIN_KEY).await {
-            Ok(Some(token)) => match CodebergProvider::connect(token, cb_base).await {
-                Ok(p) => *self.codeberg.write().await = Some(Arc::new(p)),
-                Err(e) => eprintln!("gitbuddy: restoring codeberg session failed: {e}"),
+        match keychain::load(CB_LEGACY_KEY).await {
+            Ok(Some(token)) => match CodebergProvider::connect(token.clone(), cb_base).await {
+                Ok(p) => {
+                    let account = accounts::account_from(
+                        Provider::Codeberg,
+                        &p.viewer,
+                        AuthMethod::Pat,
+                        Some(p.base_url().to_string()),
+                    );
+                    finalise_migration(app, CB_LEGACY_KEY, account, &token).await;
+                }
+                Err(e) => {
+                    eprintln!("gitbuddy: legacy codeberg token invalid, leaving in place: {e}")
+                }
             },
             Ok(None) => {}
-            Err(e) => eprintln!("gitbuddy: keychain load (codeberg) failed: {e}"),
+            Err(e) => eprintln!("gitbuddy: keychain load (legacy codeberg) failed: {e}"),
         }
     }
+}
+
+/// Persist the migrated account: write the token under the new composite
+/// key, upsert the registry row, then delete the legacy entry. The legacy
+/// delete is last so any failure earlier leaves the system in a state where
+/// the next launch can retry from scratch.
+async fn finalise_migration(
+    app: &AppHandle,
+    legacy_key: &str,
+    account: crate::types::Account,
+    token: &str,
+) {
+    if let Err(e) = keychain::save(&account.id, token).await {
+        eprintln!(
+            "gitbuddy: writing migrated token under {} failed: {e}",
+            account.id
+        );
+        return;
+    }
+    if let Err(e) = accounts::upsert(app, account.clone()) {
+        eprintln!(
+            "gitbuddy: writing migrated account record for {} failed: {e}",
+            account.id
+        );
+        return;
+    }
+    if let Err(e) = keychain::delete(legacy_key).await {
+        eprintln!("gitbuddy: deleting legacy keychain key {legacy_key} failed: {e}");
+    }
+}
+
+/// Restore providers from `accounts.json` into the in-memory `AppState`.
+/// Currently single-account-per-provider in the UI, so we just pick the
+/// first record per provider; multi-account UI later will iterate.
+async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
+    let file = match accounts::load(app) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("gitbuddy: reading accounts.json failed: {e}");
+            return;
+        }
+    };
+
+    for account in file.accounts {
+        let token = match keychain::load(&account.id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                eprintln!(
+                    "gitbuddy: keychain entry for {} missing — orphan account record",
+                    account.id
+                );
+                continue;
+            }
+            Err(e) => {
+                eprintln!("gitbuddy: keychain load ({}) failed: {e}", account.id);
+                continue;
+            }
+        };
+
+        match account.provider {
+            Provider::Github => match GitHubProvider::connect(token).await {
+                Ok(p) => *state.github.write().await = Some(Arc::new(p)),
+                Err(e) => eprintln!("gitbuddy: restoring github session failed: {e}"),
+            },
+            Provider::Gitlab | Provider::MpsdGitlab => {
+                let Some(base_url) = account.base_url.clone() else {
+                    eprintln!(
+                        "gitbuddy: gitlab account {} missing base_url, skipping",
+                        account.id
+                    );
+                    continue;
+                };
+                match GitLabProvider::connect(token, base_url).await {
+                    Ok(p) => *state.gitlab.write().await = Some(Arc::new(p)),
+                    Err(e) => eprintln!("gitbuddy: restoring gitlab session failed: {e}"),
+                }
+            }
+            Provider::Codeberg => {
+                let base_url = account
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://codeberg.org".to_string());
+                match CodebergProvider::connect(token, base_url).await {
+                    Ok(p) => *state.codeberg.write().await = Some(Arc::new(p)),
+                    Err(e) => eprintln!("gitbuddy: restoring codeberg session failed: {e}"),
+                }
+            }
+        }
+    }
+}
+
+/// Look up the composite-key id of the currently-connected account for a
+/// given provider. The in-memory provider state is the freshest source;
+/// `accounts.json` is the persistent fallback for disconnect calls that
+/// race against an in-memory clear. Returns `None` when the provider isn't
+/// connected at all (and the caller should fall through to legacy-key
+/// cleanup as a belt-and-braces).
+async fn current_account_id(
+    state: tauri::State<'_, Arc<AppState>>,
+    provider: Provider,
+    app: &AppHandle,
+) -> Option<String> {
+    let in_memory_login = match provider {
+        Provider::Github => state
+            .github
+            .read()
+            .await
+            .as_ref()
+            .map(|p| p.viewer.login.clone()),
+        Provider::Gitlab | Provider::MpsdGitlab => state
+            .gitlab
+            .read()
+            .await
+            .as_ref()
+            .map(|p| p.viewer.login.clone()),
+        Provider::Codeberg => state
+            .codeberg
+            .read()
+            .await
+            .as_ref()
+            .map(|p| p.viewer.login.clone()),
+    };
+    if let Some(login) = in_memory_login {
+        return Some(accounts::make_id(provider, &login));
+    }
+
+    accounts::load(app)
+        .ok()?
+        .accounts
+        .into_iter()
+        .find(|a| a.provider == provider)
+        .map(|a| a.id)
 }
 
 // ── Per-provider auth commands ─────────────────────────────────────────────
@@ -107,9 +297,11 @@ pub async fn gh_set_token(
         .await
         .map_err(|e| e.to_string())?;
     let viewer = provider.viewer.clone();
-    keychain::save(GH_KEYCHAIN_KEY, &token)
+    let account = accounts::account_from(Provider::Github, &viewer, AuthMethod::Pat, None);
+    keychain::save(&account.id, &token)
         .await
         .map_err(|e| format!("keychain: {e}"))?;
+    accounts::upsert(&app, account)?;
     *state.github.write().await = Some(Arc::new(provider));
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(viewer)
@@ -129,10 +321,17 @@ pub async fn gh_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    // Delete the keychain entry before clearing in-memory state so a crash
-    // mid-disconnect doesn't leave a stale token that would re-auth on
-    // next launch.
-    let _ = keychain::delete(GH_KEYCHAIN_KEY).await;
+    // Resolve the composite key from whatever source we have. Prefer the
+    // in-memory provider (always current); fall back to accounts.json in
+    // case the in-memory state was cleared but the registry record lingers;
+    // last-ditch the legacy key for any install that's somehow still in
+    // pre-migration shape.
+    if let Some(id) = current_account_id(state.clone(), Provider::Github, &app).await {
+        let _ = keychain::delete(&id).await;
+        let _ = accounts::remove(&app, &id);
+    } else {
+        let _ = keychain::delete(GH_LEGACY_KEY).await;
+    }
     *state.github.write().await = None;
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     Ok(())
@@ -149,12 +348,19 @@ pub async fn gl_set_token(
         .await
         .map_err(|e| e.to_string())?;
     let viewer = provider.viewer.clone();
-    // Persist both pieces: the token lives in the Keychain, the base URL in
-    // the JSON settings (it's not secret and we need it before the keychain
-    // load to know which host to talk to).
-    keychain::save(GL_KEYCHAIN_KEY, &token)
+    let account = accounts::account_from(
+        Provider::Gitlab,
+        &viewer,
+        AuthMethod::Pat,
+        Some(provider.base_url().to_string()),
+    );
+    keychain::save(&account.id, &token)
         .await
         .map_err(|e| format!("keychain: {e}"))?;
+    accounts::upsert(&app, account)?;
+    // Keep gitlab_base_url in settings up to date — `ensure_initialized` no
+    // longer reads it, but it's still consumed by the onboarding modal to
+    // pre-fill the host suggestion next time the user reconnects.
     let mut s = settings::load(&app).unwrap_or_default();
     s.gitlab_base_url = Some(provider.base_url().to_string());
     settings::save(&app, &s)?;
@@ -189,7 +395,12 @@ pub async fn gl_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let _ = keychain::delete(GL_KEYCHAIN_KEY).await;
+    if let Some(id) = current_account_id(state.clone(), Provider::Gitlab, &app).await {
+        let _ = keychain::delete(&id).await;
+        let _ = accounts::remove(&app, &id);
+    } else {
+        let _ = keychain::delete(GL_LEGACY_KEY).await;
+    }
     *state.gitlab.write().await = None;
     // Clear the base URL too so the next `+ Add` flow starts from
     // gitlab.com rather than re-suggesting the disconnected host.
@@ -211,9 +422,16 @@ pub async fn cb_set_token(
         .await
         .map_err(|e| e.to_string())?;
     let viewer = provider.viewer.clone();
-    keychain::save(CB_KEYCHAIN_KEY, &token)
+    let account = accounts::account_from(
+        Provider::Codeberg,
+        &viewer,
+        AuthMethod::Pat,
+        Some(provider.base_url().to_string()),
+    );
+    keychain::save(&account.id, &token)
         .await
         .map_err(|e| format!("keychain: {e}"))?;
+    accounts::upsert(&app, account)?;
     let mut s = settings::load(&app).unwrap_or_default();
     s.codeberg_base_url = Some(provider.base_url().to_string());
     settings::save(&app, &s)?;
@@ -251,7 +469,12 @@ pub async fn cb_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let _ = keychain::delete(CB_KEYCHAIN_KEY).await;
+    if let Some(id) = current_account_id(state.clone(), Provider::Codeberg, &app).await {
+        let _ = keychain::delete(&id).await;
+        let _ = accounts::remove(&app, &id);
+    } else {
+        let _ = keychain::delete(CB_LEGACY_KEY).await;
+    }
     *state.codeberg.write().await = None;
     let mut s = settings::load(&app).unwrap_or_default();
     s.codeberg_base_url = None;
