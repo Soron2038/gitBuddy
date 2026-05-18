@@ -313,6 +313,18 @@ export const saveSettings = (settings: Settings): Promise<void> =>
 export const runEditor = (path: string): Promise<void> =>
   invoke('run_editor', { path });
 
+/** Clone a remote repo to `<parentDir>/<folderName>`. When `accountId` is
+ *  given the backend uses that account's stored token for HTTPS auth —
+ *  required for private repos. Returns the absolute path of the new
+ *  working directory. */
+export const cloneRepo = (
+  url: string,
+  parentDir: string,
+  folderName: string,
+  accountId: string | null,
+): Promise<string> =>
+  invoke('clone_repo', { url, parentDir, folderName, accountId });
+
 /** Build a (host, owner, name) → LocalRepo[] map for fast remote→local joins. */
 export function indexLocalByRemote(locals: LocalRepo[]): Map<string, LocalRepo[]> {
   const map = new Map<string, LocalRepo[]>();

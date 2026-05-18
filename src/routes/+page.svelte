@@ -14,6 +14,7 @@
     cbSetToken,
     accountsList,
     accountsDisconnect,
+    cloneRepo,
     listWaiting,
     listRepos,
     listReleases,
@@ -119,6 +120,14 @@
 
   // ── Detail pane ──────────────────────────────────────────────────────
   let selectedRepo = $state<Repo | null>(null);
+
+  // ── Clone form (inline in the detail pane for remote-only repos) ────
+  type CloneStatus = 'idle' | 'cloning' | 'success' | 'error';
+  let cloneFormOpen = $state(false);
+  let cloneParentDir = $state('');
+  let cloneFolderName = $state('');
+  let cloneStatus: CloneStatus = $state('idle');
+  let cloneMessage = $state('');
 
   // ── Filters / Search ─────────────────────────────────────────────────
   let status = $state<Status>('all');
@@ -407,6 +416,94 @@
     void status;
     selectedRepo = null;
   });
+
+  // Switching the selected repo always closes the clone form — the form
+  // state belongs to the previous repo and would be misleading otherwise.
+  $effect(() => {
+    void selectedRepo?.id;
+    cloneFormOpen = false;
+    cloneStatus = 'idle';
+    cloneMessage = '';
+  });
+
+  /** Pick the most-recently-added account that surfaces this repo — that
+   *  account's token is what `clone_repo` uses for HTTPS auth. */
+  function pickCloneAccount(ids: string[]): string | null {
+    let bestId: string | null = null;
+    let bestAt = '';
+    for (const id of ids) {
+      const a = accountById.get(id);
+      if (!a) continue;
+      if (a.added_at > bestAt) {
+        bestAt = a.added_at;
+        bestId = a.id;
+      }
+    }
+    return bestId;
+  }
+
+  function openCloneForm(r: Repo) {
+    cloneFormOpen = true;
+    cloneStatus = 'idle';
+    cloneMessage = '';
+    cloneParentDir = settings.scan_roots[0] ?? '';
+    cloneFolderName = r.name;
+  }
+
+  function closeCloneForm() {
+    cloneFormOpen = false;
+    cloneStatus = 'idle';
+    cloneMessage = '';
+  }
+
+  async function browseCloneParentDir() {
+    try {
+      const picked = await openDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: cloneParentDir || undefined,
+        title: 'Choose where to clone',
+      });
+      if (typeof picked === 'string' && picked.length > 0) {
+        cloneParentDir = picked;
+      }
+    } catch (e) {
+      cloneStatus = 'error';
+      cloneMessage = `Folder picker failed: ${e}`;
+    }
+  }
+
+  async function doClone(r: Repo, candidateAccountIds: string[]) {
+    if (!r.clone_url) {
+      cloneStatus = 'error';
+      cloneMessage = 'This repo has no HTTPS clone URL.';
+      return;
+    }
+    if (!cloneParentDir.trim() || !cloneFolderName.trim()) return;
+    cloneStatus = 'cloning';
+    cloneMessage = '';
+    try {
+      const path = await cloneRepo(
+        r.clone_url,
+        cloneParentDir.trim(),
+        cloneFolderName.trim(),
+        pickCloneAccount(candidateAccountIds),
+      );
+      cloneStatus = 'success';
+      cloneMessage = path;
+      // Refresh the local scan so the new clone gets joined onto its
+      // remote repo across the UI.
+      await rescanLocals();
+      // Auto-close after a short beat so the user sees the success
+      // message but doesn't have to dismiss it.
+      setTimeout(() => {
+        if (cloneStatus === 'success') closeCloneForm();
+      }, 1800);
+    } catch (e) {
+      cloneStatus = 'error';
+      cloneMessage = String(e);
+    }
+  }
 
   function repoFullName(r: Repo): string {
     return `${r.owner}/${r.name}`;
@@ -1538,16 +1635,98 @@
           <section class="dp-sec">
             <h3 class="dp-sec-h">Clone</h3>
             {#if selectedLocalDiag.length === 0}
-              <p class="dp-empty">
-                Not cloned locally.
-                {#if settings.scan_roots.length === 0}
-                  Add a folder in <button
+              {@const candidateAccountIds = repos
+                .filter((rr) => rr.html_url === r.html_url && rr.account_id)
+                .map((rr) => rr.account_id as string)}
+              {@const canClone = !!r.clone_url}
+              {#if !cloneFormOpen}
+                <p class="dp-empty">
+                  Not cloned locally.
+                  {#if settings.scan_roots.length === 0}
+                    Add a folder in <button
+                      type="button"
+                      class="link-inline"
+                      onclick={() => (view = 'settings')}
+                    >Settings</button> for gitBuddy to find local copies.
+                  {/if}
+                </p>
+                {#if canClone}
+                  <button
                     type="button"
-                    class="link-inline"
-                    onclick={() => (view = 'settings')}
-                  >Settings</button> for gitBuddy to find local copies.
+                    class="dp-action dp-clone-start"
+                    onclick={() => openCloneForm(r)}
+                  >
+                    Clone repository…
+                  </button>
                 {/if}
-              </p>
+              {:else}
+                <div class="dp-clone-form">
+                  <label class="dp-clone-field">
+                    <span class="lbl">Parent directory</span>
+                    <div class="dp-clone-row-input">
+                      <input
+                        type="text"
+                        bind:value={cloneParentDir}
+                        placeholder="~/Developer"
+                        spellcheck="false"
+                        autocomplete="off"
+                        disabled={cloneStatus === 'cloning'}
+                      />
+                      <button
+                        type="button"
+                        class="dp-clone-browse"
+                        onclick={browseCloneParentDir}
+                        disabled={cloneStatus === 'cloning'}
+                      >
+                        Browse…
+                      </button>
+                    </div>
+                  </label>
+                  <label class="dp-clone-field">
+                    <span class="lbl">Folder name</span>
+                    <input
+                      type="text"
+                      bind:value={cloneFolderName}
+                      placeholder={r.name}
+                      spellcheck="false"
+                      autocomplete="off"
+                      disabled={cloneStatus === 'cloning'}
+                    />
+                  </label>
+                  <p class="dp-clone-target">
+                    Target:
+                    <code>{(cloneParentDir || '~').replace(/\/$/, '')}/{cloneFolderName || r.name}</code>
+                  </p>
+
+                  {#if cloneStatus === 'error'}
+                    <p class="dp-clone-err">{cloneMessage}</p>
+                  {:else if cloneStatus === 'success'}
+                    <p class="dp-clone-ok">Cloned to <code>{cloneMessage}</code></p>
+                  {/if}
+
+                  <div class="dp-clone-actions">
+                    <button
+                      type="button"
+                      class="dp-clone-cancel"
+                      onclick={closeCloneForm}
+                      disabled={cloneStatus === 'cloning'}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      class="dp-clone-go"
+                      onclick={() => doClone(r, candidateAccountIds)}
+                      disabled={cloneStatus === 'cloning'
+                        || !cloneParentDir.trim()
+                        || !cloneFolderName.trim()
+                        || cloneStatus === 'success'}
+                    >
+                      {cloneStatus === 'cloning' ? 'Cloning…' : 'Clone'}
+                    </button>
+                  </div>
+                </div>
+              {/if}
             {:else}
               {#each selectedLocalDiag as l (l.path)}
                 {@const dirty = l.dirty_staged + l.dirty_unstaged}
@@ -3558,6 +3737,128 @@
     font-size: 12.5px;
     font-style: italic;
   }
+
+  /* Clone-from-detail-pane form — shown when a remote-only repo is
+     selected. Lives in the same Clone section as the existing diagnostics
+     rows so the user's eye stays in one place. */
+  .dp-clone-start {
+    margin-top: 8px;
+  }
+  .dp-clone-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .dp-clone-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .dp-clone-field .lbl {
+    font-size: 11px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .dp-clone-field input {
+    height: 30px;
+    padding: 0 10px;
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-sm);
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--paper-2);
+    color: var(--ink);
+    outline: none;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .dp-clone-field input:focus {
+    border-color: var(--terracotta);
+    background: var(--paper);
+  }
+  .dp-clone-row-input {
+    display: flex;
+    gap: 6px;
+  }
+  .dp-clone-row-input input { flex: 1; }
+  .dp-clone-browse {
+    height: 30px;
+    padding: 0 12px;
+    background: transparent;
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-sm);
+    font-size: 12px;
+    color: var(--ink-2);
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .dp-clone-browse:hover {
+    border-color: var(--terracotta);
+    color: var(--terracotta);
+  }
+  .dp-clone-target {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+  .dp-clone-target code {
+    font-family: var(--font-mono);
+    color: var(--ink-2);
+    background: var(--cream-2);
+    padding: 1px 5px;
+    border-radius: 4px;
+    word-break: break-all;
+  }
+  .dp-clone-err {
+    margin: 0;
+    font-size: 12px;
+    color: var(--terracotta);
+  }
+  .dp-clone-ok {
+    margin: 0;
+    font-size: 12px;
+    color: var(--sage);
+  }
+  .dp-clone-ok code {
+    font-family: var(--font-mono);
+    color: var(--ink);
+    background: var(--sage-soft);
+    padding: 1px 5px;
+    border-radius: 4px;
+    word-break: break-all;
+  }
+  .dp-clone-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .dp-clone-cancel {
+    height: 30px;
+    padding: 0 12px;
+    background: transparent;
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-sm);
+    color: var(--ink-2);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .dp-clone-go {
+    height: 30px;
+    padding: 0 14px;
+    background: var(--terracotta);
+    color: var(--paper);
+    border: 0;
+    border-radius: var(--r-sm);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .dp-clone-go:hover:not(:disabled) { background: #B05738; }
+  .dp-clone-go:disabled { opacity: 0.5; cursor: default; }
 
   .dp-clone {
     display: flex;
