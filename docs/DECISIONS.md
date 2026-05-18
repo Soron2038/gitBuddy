@@ -34,6 +34,36 @@ not the only option.
   commands. The poll is one HTTP call per invocation; the frontend drives
   the cadence and respects the `slow_down` interval bumps.
 
+## 2026-05-18 — No OAuth for GitLab or Codeberg (for now)
+
+**Decision:** OAuth Device Flow stays GitHub-only. GitLab and
+Codeberg / Gitea / Forgejo keep their existing PAT-only path. This
+is removed from the "open candidates" list, not deferred.
+
+**Why:**
+
+- **gitlab.com**: would work cleanly (Device Flow GA in GitLab 17.9, same
+  one-app-for-everyone shape as GitHub) but isn't actually relevant for
+  the current user base — Björn and the colleagues he'd hand this to are
+  on self-hosted gitlab.gwdg.de, not gitlab.com.
+- **Self-hosted GitLab** (gitlab.gwdg.de etc.): each instance is its own
+  OAuth realm. We can't pre-register a client_id for every possible
+  instance, so the only paths are (a) hardcoded per-instance client_ids
+  that don't scale, or (b) a "paste your own client_id" UI that pushes
+  the OAuth-app registration onto every individual user. Both are worse
+  UX than just pasting a PAT.
+- **Codeberg / Gitea / Forgejo**: Device Flow isn't supported at all
+  (confirmed via [Gitea docs](https://docs.gitea.com/development/oauth2-provider)
+  — "only the Authorization Code Grant" — and an empirical 404 against
+  `https://codeberg.org/login/oauth/device/code`). The only OAuth path
+  available would be Authorization Code + PKCE, which means
+  `tauri-plugin-deep-link` + a registered `gitbuddy://` URL scheme — the
+  exact stack we rejected for GitHub in the previous decision. Doing it
+  for just one provider would be a lot of new infra for a small win.
+
+**Revisit when:** gitlab.com becomes a real use case for the user base,
+*or* Gitea/Forgejo ship Device Flow support upstream.
+
 ## 2026-05-18 — OAuth App registration & rotation
 
 The production OAuth App for gitBuddy (owner: Soron2038) is registered and
