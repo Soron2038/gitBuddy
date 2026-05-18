@@ -32,8 +32,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 thiserror = "2"
 
 # M3 — Local index: filesystem walking + libgit2 for per-repo diagnostics.
-# git2 vendors libgit2 from source; no system dependency needed at build time.
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+# `vendored-libgit2` ships libgit2 in-tree so we don't need a system package.
+# `vendored-openssl` adds an in-tree OpenSSL — without it libgit2 has no TLS
+# backend and HTTPS clones fail with "no TLS stream available" (the clone-from-
+# detail-pane path is the first network operation we do via git2). Adds a few
+# minutes to the first build; cached after that.
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
 walkdir = "2"
 dirs = "6"
 
