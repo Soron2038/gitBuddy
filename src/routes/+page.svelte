@@ -1202,25 +1202,23 @@
           {:else}
             {#each connectedProviders as p (p.accountId)}
               {@const on = accountFilter.has(p.accountId)}
+              {@const isSoloOn = on && accountFilter.size === 1}
               <div class="pill acct-pill" class:muted={!on}>
                 <button
                   type="button"
-                  class="acct-toggle"
-                  onclick={(e) => {
-                    // Plain click toggles inclusion; ⌥/Alt-click isolates to
-                    // just this account (and ⌥-clicking the only-on chip
-                    // re-selects all). Mirrors macOS list multi-select.
-                    if (e.altKey) {
-                      if (accountFilter.size === 1 && on) selectAllAccounts();
-                      else selectOnlyAccount(p.accountId);
-                    } else {
-                      toggleAccountFilter(p.accountId);
-                    }
+                  class="acct-body"
+                  onclick={() => {
+                    // Click on the body solos this account. Clicking the
+                    // account that's already alone-on toggles back to
+                    // "show everything" — the only escape route from a
+                    // solo selection without reaching for the switch on
+                    // each other chip.
+                    if (isSoloOn) selectAllAccounts();
+                    else selectOnlyAccount(p.accountId);
                   }}
-                  aria-pressed={on}
-                  data-tip={on
-                    ? 'Hide this account · ⌥-click to solo'
-                    : 'Show this account · ⌥-click to solo'}
+                  data-tip={isSoloOn
+                    ? 'Show all accounts'
+                    : `Show only ${p.viewer.login}@${p.host}`}
                 >
                   <span class="ava {avatarClass(p)}">{avatarText(p)}</span>
                   <span class="acct-name">
@@ -1228,6 +1226,20 @@
                     <span class="acct-host">{p.host}</span>
                   </span>
                   <span class="c">{repoCountForProvider(p)}</span>
+                </button>
+                <button
+                  type="button"
+                  class="acct-switch"
+                  class:on
+                  role="switch"
+                  aria-checked={on}
+                  aria-label={on
+                    ? `Hide ${p.viewer.login}@${p.host}`
+                    : `Show ${p.viewer.login}@${p.host}`}
+                  data-tip={on ? 'Hide this account' : 'Show this account'}
+                  onclick={() => toggleAccountFilter(p.accountId)}
+                >
+                  <span class="acct-switch-knob"></span>
                 </button>
                 <button
                   type="button"
@@ -2468,12 +2480,15 @@
   .sw.b { background: var(--butter); }
   .sw.p { background: var(--plum); }
 
-  /* Account pill = main toggle button + small "open in browser" button. */
+  /* Account pill: clickable body (solo this account) + macOS-style switch
+     (toggle inclusion) + small "open in browser" button. Body and switch
+     are distinct click targets so each gesture is explicit — no ⌥-click
+     muscle memory required. */
   .acct-pill {
     padding: 0;
     gap: 0;
   }
-  .acct-toggle {
+  .acct-body {
     flex: 1;
     min-width: 0;
     display: flex;
@@ -2489,7 +2504,46 @@
     text-align: left;
     transition: background 0.12s ease;
   }
-  .acct-toggle:hover { background: var(--cream-2); }
+  .acct-body:hover { background: var(--cream-2); }
+
+  /* macOS-style toggle switch — pill track with a sliding white knob.
+     Sage when on, neutral-grey when off. Width/height tuned to feel at
+     home next to the 22px avatar. */
+  .acct-switch {
+    position: relative;
+    width: 30px;
+    height: 18px;
+    margin-right: 4px;
+    padding: 0;
+    background: var(--line-2);
+    border: 0;
+    border-radius: 9px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.18s ease;
+  }
+  .acct-switch.on {
+    background: var(--sage);
+  }
+  .acct-switch-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    background: white;
+    border-radius: 50%;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+    transition: transform 0.18s ease;
+  }
+  .acct-switch.on .acct-switch-knob {
+    transform: translateX(12px);
+  }
+  .acct-switch:focus-visible {
+    outline: 2px solid var(--terracotta);
+    outline-offset: 2px;
+  }
+
   .acct-open {
     display: grid;
     place-items: center;
