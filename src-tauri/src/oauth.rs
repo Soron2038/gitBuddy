@@ -24,14 +24,12 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Public client ID of the registered GitHub OAuth App.
-///
-/// TODO(m6.3): Björn — replace with the real client ID after registering the
-/// "gitBuddy" OAuth App at https://github.com/settings/applications/new and
-/// enabling Device Flow in its settings. The placeholder string makes the
-/// commands return a clear error rather than silently 404'ing against
-/// GitHub's API.
-pub const GITHUB_CLIENT_ID: &str = "TODO_FROM_OAUTH_APP_REGISTRATION";
+/// Public client ID of the registered GitHub OAuth App ("gitBuddy", owned by
+/// Soron2038). Client IDs are not secrets — the Device Flow has no client
+/// secret to protect, and this value appears in every device-code request
+/// the binary makes. Rotate by registering a new app and replacing the
+/// constant; old IDs stop working immediately.
+pub const GITHUB_CLIENT_ID: &str = "Ov23liJmD8EPTQFQaiDc";
 
 /// Scopes requested by `begin_github`. Matches what the existing PAT flow
 /// needs:
@@ -51,8 +49,6 @@ const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
 #[derive(Debug, Error)]
 pub enum OAuthError {
-    #[error("OAuth App client ID not configured — see oauth::GITHUB_CLIENT_ID")]
-    ClientIdNotConfigured,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
     #[error("unexpected response from GitHub: {0}")]
@@ -109,10 +105,6 @@ pub enum PollOutcome {
 /// Kick off the flow. Returns the `user_code` for the human and the
 /// `device_code` plus poll interval for the caller.
 pub async fn begin_github(client: &reqwest::Client) -> Result<DeviceCodeResponse> {
-    if GITHUB_CLIENT_ID == "TODO_FROM_OAUTH_APP_REGISTRATION" {
-        return Err(OAuthError::ClientIdNotConfigured);
-    }
-
     let body = format!(
         "client_id={}&scope={}",
         urlencode(GITHUB_CLIENT_ID),
@@ -133,10 +125,6 @@ pub async fn begin_github(client: &reqwest::Client) -> Result<DeviceCodeResponse
 /// frontend already needs to render a countdown anyway, so it's the natural
 /// place to hold the timer state.
 pub async fn poll_github(client: &reqwest::Client, device_code: &str) -> Result<PollOutcome> {
-    if GITHUB_CLIENT_ID == "TODO_FROM_OAUTH_APP_REGISTRATION" {
-        return Err(OAuthError::ClientIdNotConfigured);
-    }
-
     let body = format!(
         "client_id={}&device_code={}&grant_type={}",
         urlencode(GITHUB_CLIENT_ID),

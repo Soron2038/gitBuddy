@@ -27,33 +27,32 @@ PAT auth remains supported in parallel — Device Flow is the new default but
 not the only option.
 
 **Implementation:**
+
 - `src-tauri/src/oauth.rs` — pure-Rust two-call client, no new dependency
   beyond `reqwest` (already in the tree). Parsing helpers are unit-tested.
 - `src-tauri/src/commands.rs::gh_oauth_begin` / `gh_oauth_poll` — Tauri
   commands. The poll is one HTTP call per invocation; the frontend drives
   the cadence and respects the `slow_down` interval bumps.
 
-## 2026-05-18 — Maintainer setup: register the OAuth App
+## 2026-05-18 — OAuth App registration & rotation
 
-The Device Flow needs a registered OAuth App on github.com to get a
-`client_id`. One-time setup per maintainer:
+The production OAuth App for gitBuddy (owner: Soron2038) is registered and
+its `client_id` lives in `src-tauri/src/oauth.rs`. Client IDs are not
+secrets — Device Flow has no client_secret to protect.
 
-1. Go to https://github.com/settings/applications/new.
+To **rotate** (suspected compromise, ownership change, fresh fork):
+
+1. Go to <https://github.com/settings/applications/new>.
 2. **Application name:** `gitBuddy`. **Homepage URL:** the repo URL.
    **Authorization callback URL:** anything — Device Flow ignores it
    (`https://github.com` is fine).
-3. Create the app, then in its settings tick **"Enable Device Flow"**.
-4. Copy the **Client ID** (looks like `Iv1.…` or `Ov23…`).
-5. Drop it into `src-tauri/src/oauth.rs` replacing the
-   `TODO_FROM_OAUTH_APP_REGISTRATION` placeholder in `GITHUB_CLIENT_ID`.
+3. Create the app, then on the edit page tick **"Enable Device Flow"** and
+   hit **Update application** — the checkbox is *separate* from the initial
+   registration and the most common gotcha.
+4. Copy the **Client ID** (current format `Ov23…`, older apps `Iv1.…`).
+5. Drop it into `oauth::GITHUB_CLIENT_ID`, ship.
 
-Until step 5 lands, the OAuth button surfaces a clear
-"OAuth App client ID not configured" error rather than 404'ing against
-GitHub's API. PAT auth is unaffected.
-
-If the client ID ever leaks publicly: rotate it on the same settings page,
-update `GITHUB_CLIENT_ID`, ship. The Device Flow has no client secret to
-worry about.
+Old IDs stop working immediately on rotation; PAT auth is unaffected.
 
 ## 2026-05-18 — Keychain layout: per-account composite keys
 
