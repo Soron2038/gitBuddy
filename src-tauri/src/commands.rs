@@ -760,27 +760,45 @@ pub async fn list_waiting(
     app: AppHandle,
 ) -> Result<Vec<WaitingItem>, String> {
     state.ensure_initialized(&app).await;
-    let gh: Vec<_> = state.github.read().await.values().cloned().collect();
-    let gl: Vec<_> = state.gitlab.read().await.values().cloned().collect();
-    let cb: Vec<_> = state.codeberg.read().await.values().cloned().collect();
+    let gh: Vec<(String, _)> = state
+        .github
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
+    let gl: Vec<(String, _)> = state
+        .gitlab
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
+    let cb: Vec<(String, _)> = state
+        .codeberg
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
 
     let mut out = Vec::new();
-    for p in gh {
+    for (id, p) in gh {
         match p.list_waiting().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => eprintln!("gitbuddy: github list_waiting failed: {e}"),
+            Ok(v) => tag_and_extend(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: github[{id}] list_waiting failed: {e}"),
         }
     }
-    for p in gl {
+    for (id, p) in gl {
         match p.list_waiting().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => eprintln!("gitbuddy: gitlab list_waiting failed: {e}"),
+            Ok(v) => tag_and_extend(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_waiting failed: {e}"),
         }
     }
-    for p in cb {
+    for (id, p) in cb {
         match p.list_waiting().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => eprintln!("gitbuddy: codeberg list_waiting failed: {e}"),
+            Ok(v) => tag_and_extend(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_waiting failed: {e}"),
         }
     }
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -793,27 +811,45 @@ pub async fn list_repos(
     app: AppHandle,
 ) -> Result<Vec<Repo>, String> {
     state.ensure_initialized(&app).await;
-    let gh: Vec<_> = state.github.read().await.values().cloned().collect();
-    let gl: Vec<_> = state.gitlab.read().await.values().cloned().collect();
-    let cb: Vec<_> = state.codeberg.read().await.values().cloned().collect();
+    let gh: Vec<(String, _)> = state
+        .github
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
+    let gl: Vec<(String, _)> = state
+        .gitlab
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
+    let cb: Vec<(String, _)> = state
+        .codeberg
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
 
     let mut out = Vec::new();
-    for p in gh {
+    for (id, p) in gh {
         match p.list_repos().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => eprintln!("gitbuddy: github list_repos failed: {e}"),
+            Ok(v) => tag_and_extend_repos(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: github[{id}] list_repos failed: {e}"),
         }
     }
-    for p in gl {
+    for (id, p) in gl {
         match p.list_repos().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => eprintln!("gitbuddy: gitlab list_repos failed: {e}"),
+            Ok(v) => tag_and_extend_repos(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_repos failed: {e}"),
         }
     }
-    for p in cb {
+    for (id, p) in cb {
         match p.list_repos().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => eprintln!("gitbuddy: codeberg list_repos failed: {e}"),
+            Ok(v) => tag_and_extend_repos(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_repos failed: {e}"),
         }
     }
     out.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
@@ -829,12 +865,18 @@ pub async fn list_releases(
     // GitLab release listing isn't implemented yet (needs per-project release
     // fetches, gated to "recently active" projects to stay within rate limits).
     // For now, only GitHub contributes releases.
-    let gh: Vec<_> = state.github.read().await.values().cloned().collect();
+    let gh: Vec<(String, _)> = state
+        .github
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
     let mut out = Vec::new();
-    for p in gh {
+    for (id, p) in gh {
         match p.list_releases().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => eprintln!("gitbuddy: github list_releases failed: {e}"),
+            Ok(v) => tag_and_extend_releases(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: github[{id}] list_releases failed: {e}"),
         }
     }
     Ok(out)
@@ -847,15 +889,50 @@ pub async fn list_ci(
 ) -> Result<Vec<CiRun>, String> {
     state.ensure_initialized(&app).await;
     // Same as releases: GitLab CI surface is a separate landing.
-    let gh: Vec<_> = state.github.read().await.values().cloned().collect();
+    let gh: Vec<(String, _)> = state
+        .github
+        .read()
+        .await
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
     let mut out = Vec::new();
-    for p in gh {
+    for (id, p) in gh {
         match p.list_ci().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => eprintln!("gitbuddy: github list_ci failed: {e}"),
+            Ok(v) => tag_and_extend_ci(&mut out, v, &id),
+            Err(e) => eprintln!("gitbuddy: github[{id}] list_ci failed: {e}"),
         }
     }
     Ok(out)
+}
+
+// Four near-identical helpers because the underlying Vec<T> types are
+// distinct — using a generic trait here would buy almost nothing and cost a
+// trait declaration. Each stamps `account_id = Some(id)` on every record
+// before appending so the frontend always knows which account surfaced it.
+fn tag_and_extend(out: &mut Vec<WaitingItem>, items: Vec<WaitingItem>, id: &str) {
+    out.extend(items.into_iter().map(|mut it| {
+        it.account_id = Some(id.to_string());
+        it
+    }));
+}
+fn tag_and_extend_repos(out: &mut Vec<Repo>, items: Vec<Repo>, id: &str) {
+    out.extend(items.into_iter().map(|mut it| {
+        it.account_id = Some(id.to_string());
+        it
+    }));
+}
+fn tag_and_extend_releases(out: &mut Vec<Release>, items: Vec<Release>, id: &str) {
+    out.extend(items.into_iter().map(|mut it| {
+        it.account_id = Some(id.to_string());
+        it
+    }));
+}
+fn tag_and_extend_ci(out: &mut Vec<CiRun>, items: Vec<CiRun>, id: &str) {
+    out.extend(items.into_iter().map(|mut it| {
+        it.account_id = Some(id.to_string());
+        it
+    }));
 }
 
 // ── Local index ─────────────────────────────────────────────────────────────

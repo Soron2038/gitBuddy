@@ -53,6 +53,13 @@ pub struct WaitingItem {
     /// Original RFC 3339 timestamp from the provider, kept for sorting and
     /// future re-derivation.
     pub updated_at: String,
+    /// `Account.id` of the account that surfaced this item — set by the
+    /// aggregator in `commands::list_waiting` after the provider returns,
+    /// so providers stay account-agnostic. `None` only during construction
+    /// inside a provider; the aggregator overwrites with `Some(...)` before
+    /// the frontend ever sees the value.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +132,10 @@ pub struct CiRun {
     pub html_url: Option<String>,
     pub branch: Option<String>,
     pub workflow_name: Option<String>,
+    /// `Account.id` of the providing account. Same aggregator-tagging
+    /// contract as [`WaitingItem::account_id`].
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +154,10 @@ pub struct Release {
     pub is_new: bool,
     /// Pre-rendered relative age, e.g. "2d", "3w".
     pub age_human: String,
+    /// `Account.id` of the providing account. Same aggregator-tagging
+    /// contract as [`WaitingItem::account_id`].
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,4 +182,10 @@ pub struct Repo {
     /// RFC 3339 timestamp of the most recent push to the default branch,
     /// used purely for sorting the repo list by recency.
     pub pushed_at: Option<String>,
+    /// `Account.id` of the providing account. Same aggregator-tagging
+    /// contract as [`WaitingItem::account_id`]. When a repo is visible
+    /// through multiple accounts (e.g. cross-org membership), the
+    /// per-account rows produced here are deduped at the next layer up.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }

@@ -292,6 +292,7 @@ async fn fetch_items(
             url: it.web_url,
             age_human: humanise_age(&it.updated_at, now),
             updated_at: it.updated_at,
+            account_id: None,
         })
         .collect())
 }
@@ -380,6 +381,7 @@ impl RawProject {
             is_fork: self.forked_from_project.is_some(),
             is_private: self.visibility != "public",
             pushed_at: self.last_activity_at,
+            account_id: None,
         }
     }
 }

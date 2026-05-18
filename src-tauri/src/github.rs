@@ -239,6 +239,7 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
                 html_url: None,
                 branch: Some(repo.default_branch.clone()),
                 workflow_name: None,
+                account_id: None,
             }));
         }
         StatusCode::UNAUTHORIZED => return Err(GitHubError::Unauthorized),
@@ -270,6 +271,7 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
             html_url: None,
             branch: Some(repo.default_branch.clone()),
             workflow_name: None,
+            account_id: None,
         }));
     };
 
@@ -280,6 +282,7 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
         html_url: Some(run.html_url),
         branch: run.head_branch,
         workflow_name: run.name,
+        account_id: None,
     }))
 }
 
@@ -354,6 +357,7 @@ async fn fetch_latest_release(
         is_prerelease: raw.prerelease,
         is_new: false, // filled in by list_releases against a consistent `now`
         age_human: String::new(),
+        account_id: None,
     }))
 }
 
@@ -402,6 +406,7 @@ impl From<RawRepo> for Repo {
             is_fork: r.fork,
             is_private: r.private,
             pushed_at: r.pushed_at,
+            account_id: None,
         }
     }
 }
@@ -488,6 +493,7 @@ async fn search_issues(
             url: it.html_url,
             age_human: humanise_age(&it.updated_at, now),
             updated_at: it.updated_at,
+            account_id: None,
         })
         .collect())
 }

@@ -18,6 +18,10 @@ export interface WaitingItem {
   url: string;
   age_human: string;
   updated_at: string;
+  /** `Account.id` of the account that surfaced this item. Always set on
+   *  results from `list_waiting`; only nullable because Rust's struct
+   *  literal needs a default during construction. */
+  account_id: string | null;
 }
 
 export interface Viewer {
@@ -51,6 +55,11 @@ export interface Repo {
   is_fork: boolean;
   is_private: boolean;
   pushed_at: string | null;
+  /** `Account.id` of the account that surfaced this repo. The aggregator
+   *  in `list_repos` returns one row per (account, repo) pair; the UI
+   *  dedups them so a single repo visible to multiple accounts collapses
+   *  to one row with badges for each account. */
+  account_id: string | null;
 }
 
 /** Short display label for the provider, derived from the canonical URL on
@@ -176,6 +185,7 @@ export interface Release {
   is_prerelease: boolean;
   is_new: boolean;
   age_human: string;
+  account_id: string | null;
 }
 
 export type CiStatus = 'ok' | 'fail' | 'run' | 'cancelled' | 'none';
@@ -187,6 +197,7 @@ export interface CiRun {
   html_url: string | null;
   branch: string | null;
   workflow_name: string | null;
+  account_id: string | null;
 }
 
 // ── Tauri commands ─────────────────────────────────────────────────────────
@@ -227,6 +238,33 @@ export const ghOAuthBegin = (): Promise<DeviceCodeResponse> =>
  *  `interval` field from ghOAuthBegin and bumps on `slow_down`. */
 export const ghOAuthPoll = (deviceCode: string): Promise<GhOAuthPollResult> =>
   invoke('gh_oauth_poll', { deviceCode });
+
+// ── Multi-account registry ────────────────────────────────────────────────
+
+export type AuthMethod = 'pat' | 'oauth_device';
+
+export interface Account {
+  /** Stable identifier `<provider>:<host>:<login>` — also the Keychain key. */
+  id: string;
+  provider: Provider;
+  login: string;
+  viewer: Viewer;
+  auth: AuthMethod;
+  /** `null` for GitHub.com, set for GitLab/Codeberg/Gitea instances. */
+  base_url: string | null;
+  /** RFC 3339 timestamp captured at first connect. */
+  added_at: string;
+}
+
+/** Every connected account, regardless of provider. Source of truth for the
+ *  Settings UI; supersedes the legacy single-account ghStatus / glStatus /
+ *  cbStatus trio. */
+export const accountsList = (): Promise<Account[]> => invoke('accounts_list');
+
+/** Disconnect a single account by id — removes it from the in-memory
+ *  HashMap, deletes its Keychain entry, and drops the accounts.json record. */
+export const accountsDisconnect = (accountId: string): Promise<void> =>
+  invoke('accounts_disconnect', { accountId });
 
 export const glStatus = (): Promise<GitLabStatus | null> => invoke('gl_status');
 export const glSetToken = (token: string, baseUrl: string): Promise<Viewer> =>

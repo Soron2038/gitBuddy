@@ -239,6 +239,7 @@ async fn search_issues(
                 url: it.html_url,
                 age_human: humanise_age(&it.updated_at, now),
                 updated_at: it.updated_at,
+                account_id: None,
             });
         }
     }
@@ -316,6 +317,7 @@ impl From<RawRepo> for Repo {
             is_fork: r.fork,
             is_private: r.private,
             pushed_at: r.updated_at,
+            account_id: None,
         }
     }
 }
