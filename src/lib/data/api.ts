@@ -199,6 +199,35 @@ export const ghSetToken = (token: string): Promise<Viewer> =>
 
 export const ghDisconnect = (): Promise<void> => invoke('gh_disconnect');
 
+// ── GitHub OAuth Device Flow (M6.3) ────────────────────────────────────────
+
+export interface DeviceCodeResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+}
+
+/** Tagged union mirroring src-tauri/src/commands.rs::GhOAuthPollResult.
+ *  The backend only emits one of these five variants per poll. */
+export type GhOAuthPollResult =
+  | { kind: 'success'; viewer: Viewer }
+  | { kind: 'pending' }
+  | { kind: 'slow_down'; interval: number }
+  | { kind: 'denied' }
+  | { kind: 'expired' };
+
+/** Start the GitHub OAuth Device Flow. Returns the user_code for the human
+ *  plus the device_code + interval the caller echoes back into ghOAuthPoll. */
+export const ghOAuthBegin = (): Promise<DeviceCodeResponse> =>
+  invoke('gh_oauth_begin');
+
+/** One Device Flow poll. The frontend drives the cadence — defaults to the
+ *  `interval` field from ghOAuthBegin and bumps on `slow_down`. */
+export const ghOAuthPoll = (deviceCode: string): Promise<GhOAuthPollResult> =>
+  invoke('gh_oauth_poll', { deviceCode });
+
 export const glStatus = (): Promise<GitLabStatus | null> => invoke('gl_status');
 export const glSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
   invoke('gl_set_token', { token, baseUrl });

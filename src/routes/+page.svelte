@@ -10,6 +10,8 @@
     ghStatus,
     ghSetToken,
     ghDisconnect,
+    ghOAuthBegin,
+    ghOAuthPoll,
     glStatus,
     glSetToken,
     glDisconnect,
@@ -88,6 +90,24 @@
   let gitlabBaseInput = $state('https://gitlab.com');
   let codebergBaseInput = $state('https://codeberg.org');
   let connecting = $state(false);
+
+  // ── GitHub OAuth Device Flow state ─────────────────────────────────────
+  // The frontend drives both the polling cadence and the countdown timer;
+  // the backend stays stateless beyond holding the eventual access token.
+  type GithubAuthMethod = 'oauth' | 'pat';
+  type OAuthState = 'idle' | 'awaiting' | 'error';
+  let githubAuthMethod: GithubAuthMethod = $state('oauth');
+  let oauthState: OAuthState = $state('idle');
+  let oauthUserCode = $state('');
+  let oauthDeviceCode = $state('');
+  let oauthVerificationUri = $state('');
+  let oauthExpiresIn = $state(0);
+  let oauthInterval = $state(5);
+  let oauthRemaining = $state(0);
+  let oauthErrorMsg = $state('');
+  let oauthCopied = $state(false);
+  let oauthPollHandle: ReturnType<typeof setTimeout> | null = null;
+  let oauthCountdownHandle: ReturnType<typeof setInterval> | null = null;
 
   // Context menu (right-click on repo cards).
   let menuOpen = $state(false);
@@ -664,6 +684,8 @@
     addingProvider = true;
     tokenInput = '';
     error = null;
+    githubAuthMethod = 'oauth';
+    resetOAuthState();
     if (availableProviderTabs.length === 1) {
       chosenProvider = availableProviderTabs[0];
     } else if (!availableProviderTabs.includes(chosenProvider)) {
@@ -675,6 +697,133 @@
     addingProvider = false;
     tokenInput = '';
     error = null;
+    resetOAuthState();
+  }
+
+  // ── GitHub OAuth Device Flow ─────────────────────────────────────────
+
+  function resetOAuthState() {
+    if (oauthPollHandle) {
+      clearTimeout(oauthPollHandle);
+      oauthPollHandle = null;
+    }
+    if (oauthCountdownHandle) {
+      clearInterval(oauthCountdownHandle);
+      oauthCountdownHandle = null;
+    }
+    oauthState = 'idle';
+    oauthUserCode = '';
+    oauthDeviceCode = '';
+    oauthVerificationUri = '';
+    oauthExpiresIn = 0;
+    oauthInterval = 5;
+    oauthRemaining = 0;
+    oauthErrorMsg = '';
+    oauthCopied = false;
+  }
+
+  async function startGithubOAuth() {
+    resetOAuthState();
+    connecting = true;
+    error = null;
+    try {
+      const res = await ghOAuthBegin();
+      oauthUserCode = res.user_code;
+      oauthDeviceCode = res.device_code;
+      oauthVerificationUri = res.verification_uri;
+      oauthExpiresIn = res.expires_in;
+      oauthRemaining = res.expires_in;
+      oauthInterval = Math.max(res.interval, 1);
+      oauthState = 'awaiting';
+
+      // Auto-open the verification URL — same UX as the existing
+      // "Create a token →" links.
+      openExternal(oauthVerificationUri).catch(() => {
+        // If the browser refuses to open, the secondary link in the UI
+        // still works as a fallback; don't surface as an error.
+      });
+
+      startOAuthCountdown();
+      scheduleOAuthPoll(oauthInterval);
+    } catch (e) {
+      oauthErrorMsg = String(e);
+      oauthState = 'error';
+    } finally {
+      connecting = false;
+    }
+  }
+
+  function startOAuthCountdown() {
+    if (oauthCountdownHandle) clearInterval(oauthCountdownHandle);
+    oauthCountdownHandle = setInterval(() => {
+      oauthRemaining = Math.max(0, oauthRemaining - 1);
+      if (oauthRemaining === 0 && oauthCountdownHandle) {
+        clearInterval(oauthCountdownHandle);
+        oauthCountdownHandle = null;
+      }
+    }, 1000);
+  }
+
+  function scheduleOAuthPoll(seconds: number) {
+    if (oauthPollHandle) clearTimeout(oauthPollHandle);
+    oauthPollHandle = setTimeout(() => {
+      void runOAuthPoll();
+    }, seconds * 1000);
+  }
+
+  async function runOAuthPoll() {
+    if (oauthState !== 'awaiting' || !oauthDeviceCode) return;
+    try {
+      const r = await ghOAuthPoll(oauthDeviceCode);
+      switch (r.kind) {
+        case 'pending':
+          scheduleOAuthPoll(oauthInterval);
+          break;
+        case 'slow_down':
+          oauthInterval = Math.max(r.interval, oauthInterval + 1);
+          scheduleOAuthPoll(oauthInterval);
+          break;
+        case 'denied':
+          oauthErrorMsg = 'GitHub sign-in was denied. Try again to grant access.';
+          oauthState = 'error';
+          if (oauthCountdownHandle) {
+            clearInterval(oauthCountdownHandle);
+            oauthCountdownHandle = null;
+          }
+          break;
+        case 'expired':
+          oauthErrorMsg = 'The code expired before approval. Start over to get a fresh one.';
+          oauthState = 'error';
+          if (oauthCountdownHandle) {
+            clearInterval(oauthCountdownHandle);
+            oauthCountdownHandle = null;
+          }
+          break;
+        case 'success':
+          viewer = r.viewer;
+          resetOAuthState();
+          addingProvider = false;
+          await loadAllData();
+          break;
+      }
+    } catch (e) {
+      // Network/parse failure: keep the flow alive — the next scheduled
+      // poll might succeed. Show a soft inline error so the user knows
+      // why progress stalled.
+      oauthErrorMsg = String(e);
+      oauthState = 'error';
+    }
+  }
+
+  async function copyUserCode() {
+    if (!oauthUserCode) return;
+    try {
+      await writeText(oauthUserCode);
+      oauthCopied = true;
+      setTimeout(() => (oauthCopied = false), 1600);
+    } catch {
+      // Ignore — the code is still visible in the UI.
+    }
   }
 
   async function connectProvider() {
@@ -1478,28 +1627,121 @@
               {/if}
 
               {#if chosenProvider === 'github' && canAddGithub}
-                <button
-                  type="button"
-                  class="token-link"
-                  onclick={() =>
-                    openExternal(
-                      'https://github.com/settings/tokens/new?description=gitBuddy&scopes=repo,read:org',
-                    )}
-                >
-                  Create a token on GitHub →
-                </button>
-                <label class="token-input">
-                  <span class="lbl">Personal access token</span>
-                  <input
-                    type="password"
-                    placeholder="ghp_… or github_pat_…"
-                    bind:value={tokenInput}
-                    onkeydown={(e) => e.key === 'Enter' && connectProvider()}
-                    disabled={connecting}
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
-                </label>
+                <div class="auth-method">
+                  <button
+                    type="button"
+                    class:on={githubAuthMethod === 'oauth'}
+                    onclick={() => {
+                      githubAuthMethod = 'oauth';
+                      resetOAuthState();
+                    }}
+                    disabled={connecting || oauthState === 'awaiting'}
+                  >
+                    Sign in with browser
+                  </button>
+                  <button
+                    type="button"
+                    class:on={githubAuthMethod === 'pat'}
+                    onclick={() => {
+                      githubAuthMethod = 'pat';
+                      resetOAuthState();
+                    }}
+                    disabled={connecting || oauthState === 'awaiting'}
+                  >
+                    Personal access token
+                  </button>
+                </div>
+
+                {#if githubAuthMethod === 'oauth'}
+                  {#if oauthState === 'idle'}
+                    <p class="oauth-blurb">
+                      Open <em>GitHub</em> in your browser, paste a short code,
+                      done. No token-management page to navigate.
+                    </p>
+                    <button
+                      type="button"
+                      class="primary oauth-start"
+                      onclick={startGithubOAuth}
+                      disabled={connecting}
+                    >
+                      {connecting ? 'Contacting GitHub…' : 'Sign in with browser'}
+                    </button>
+                  {:else if oauthState === 'awaiting'}
+                    <div class="oauth-flight">
+                      <p class="oauth-step">
+                        Enter this code at <em>github.com/login/device</em>:
+                      </p>
+                      <div class="oauth-code-row">
+                        <span class="oauth-code">{oauthUserCode}</span>
+                        <button
+                          type="button"
+                          class="oauth-copy"
+                          onclick={copyUserCode}
+                          data-tip="Copy code"
+                          aria-label="Copy code"
+                        >
+                          {oauthCopied ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+
+                      <div class="oauth-progress" aria-hidden="true">
+                        <div
+                          class="oauth-progress-bar"
+                          style="width: {oauthExpiresIn > 0
+                            ? Math.max(0, (oauthRemaining / oauthExpiresIn) * 100)
+                            : 0}%"
+                        ></div>
+                      </div>
+                      <p class="oauth-meta">
+                        <span class="oauth-spinner" aria-hidden="true"></span>
+                        Waiting for approval —
+                        {Math.floor(oauthRemaining / 60)}m {oauthRemaining % 60}s left
+                      </p>
+
+                      <button
+                        type="button"
+                        class="oauth-fallback-link"
+                        onclick={() => openExternal(oauthVerificationUri)}
+                      >
+                        Open github.com/login/device again →
+                      </button>
+                    </div>
+                  {:else if oauthState === 'error'}
+                    <div class="oauth-error">
+                      <p class="err">{oauthErrorMsg}</p>
+                      <button
+                        type="button"
+                        class="primary"
+                        onclick={startGithubOAuth}
+                      >
+                        Try again
+                      </button>
+                    </div>
+                  {/if}
+                {:else}
+                  <button
+                    type="button"
+                    class="token-link"
+                    onclick={() =>
+                      openExternal(
+                        'https://github.com/settings/tokens/new?description=gitBuddy&scopes=repo,read:org',
+                      )}
+                  >
+                    Create a token on GitHub →
+                  </button>
+                  <label class="token-input">
+                    <span class="lbl">Personal access token</span>
+                    <input
+                      type="password"
+                      placeholder="ghp_… or github_pat_…"
+                      bind:value={tokenInput}
+                      onkeydown={(e) => e.key === 'Enter' && connectProvider()}
+                      disabled={connecting}
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                  </label>
+                {/if}
               {:else if chosenProvider === 'gitlab' && canAddGitlab}
                 <label class="token-input">
                   <span class="lbl">Instance URL</span>
@@ -1615,14 +1857,16 @@
                 >
                   Cancel
                 </button>
-                <button
-                  type="button"
-                  class="primary"
-                  onclick={connectProvider}
-                  disabled={connecting || !tokenInput.trim() || (chosenProvider === 'gitlab' && !gitlabBaseInput.trim()) || (chosenProvider === 'codeberg' && !codebergBaseInput.trim())}
-                >
-                  {connecting ? 'Verifying…' : 'Connect'}
-                </button>
+                {#if !(chosenProvider === 'github' && githubAuthMethod === 'oauth')}
+                  <button
+                    type="button"
+                    class="primary"
+                    onclick={connectProvider}
+                    disabled={connecting || !tokenInput.trim() || (chosenProvider === 'gitlab' && !gitlabBaseInput.trim()) || (chosenProvider === 'codeberg' && !codebergBaseInput.trim())}
+                  >
+                    {connecting ? 'Verifying…' : 'Connect'}
+                  </button>
+                {/if}
               </div>
             </div>
           {/if}
@@ -2771,6 +3015,153 @@
     border-color: var(--terracotta);
     background: var(--paper);
   }
+
+  /* ── GitHub OAuth Device Flow ────────────────────────────────────── */
+  .auth-method {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    background: var(--cream-2);
+    border-radius: var(--r-sm);
+    font-size: 12.5px;
+  }
+  .auth-method button {
+    flex: 1;
+    padding: 6px 10px;
+    color: var(--ink-2);
+    border-radius: 6px;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+  }
+  .auth-method button.on {
+    background: var(--paper);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: var(--shadow-1);
+  }
+  .auth-method button:disabled { cursor: default; opacity: 0.6; }
+
+  .oauth-blurb {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .oauth-blurb em {
+    font-family: var(--font-display);
+    font-style: italic;
+    color: var(--terracotta);
+  }
+  .oauth-start { align-self: flex-start; }
+
+  .oauth-flight {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .oauth-step {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 13px;
+  }
+  .oauth-step em {
+    font-family: var(--font-mono);
+    font-style: normal;
+    color: var(--ink);
+    font-size: 12.5px;
+    background: var(--cream-2);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .oauth-code-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .oauth-code {
+    flex: 1;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 28px;
+    letter-spacing: 0.18em;
+    color: var(--terracotta);
+    background: var(--cream-2);
+    padding: 16px 20px;
+    border-radius: 12px;
+    user-select: all;
+  }
+  .oauth-copy {
+    height: 36px;
+    padding: 0 14px;
+    background: transparent;
+    border: 1px solid var(--line-2);
+    color: var(--ink-2);
+    border-radius: var(--r-sm);
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+  }
+  .oauth-copy:hover {
+    border-color: var(--terracotta);
+    color: var(--terracotta);
+  }
+
+  .oauth-progress {
+    height: 4px;
+    background: var(--cream-2);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .oauth-progress-bar {
+    height: 100%;
+    background: var(--sage);
+    transition: width 1s linear;
+  }
+  .oauth-meta {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ink-3);
+    font-size: 12px;
+    font-family: var(--font-mono);
+  }
+  .oauth-spinner {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1.5px solid var(--cream-2);
+    border-top-color: var(--terracotta);
+    animation: oauth-spin 0.9s linear infinite;
+  }
+  @keyframes oauth-spin {
+    to { transform: rotate(360deg); }
+  }
+  .oauth-fallback-link {
+    align-self: flex-start;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--ink-3);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .oauth-fallback-link:hover { color: var(--terracotta); }
+
+  .oauth-error {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .oauth-error .err {
+    margin: 0;
+    color: var(--terracotta);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .oauth-error .primary { align-self: flex-start; }
+
   .host-hints {
     display: flex;
     flex-direction: column;
