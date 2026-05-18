@@ -261,18 +261,6 @@
   function avatarText(p: ProvBadge): string {
     return p.viewer.login.charAt(0).toUpperCase();
   }
-  function repoCountForProvider(p: ProvBadge): number {
-    // Count of distinct repos this specific account surfaces. Two accounts
-    // on the same host (and the same repo seen via both) each get their own
-    // count, which matches the per-account chip's mental model.
-    const seen = new Set<string>();
-    for (const r of repos) {
-      if (r.account_id !== p.accountId) continue;
-      seen.add(r.html_url);
-    }
-    return seen.size;
-  }
-
   // ── Filter helpers ───────────────────────────────────────────────────
 
   /** True iff the item's source account is selected in the filter. Records
@@ -1225,7 +1213,6 @@
                     {p.viewer.login}
                     <span class="acct-host">{p.host}</span>
                   </span>
-                  <span class="c">{repoCountForProvider(p)}</span>
                 </button>
                 <button
                   type="button"
