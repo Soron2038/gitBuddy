@@ -127,11 +127,16 @@
     new Set<ItemReason>(['assigned', 'review', 'authored', 'mentioned']),
   );
   /** Account ids the user wants to see. The set starts containing every
-   *  connected account; toggling a chip removes/adds. An effect reconciles
-   *  the set whenever the accounts list changes: newly added accounts
-   *  auto-appear in views (added to the set), disconnected ones drop out
-   *  (removed from the set). Same Set-membership shape as `reasonFilter`. */
+   *  connected account; toggling a chip removes/adds. Reconciliation runs
+   *  inside `refreshAuth` (not via $effect) so a user-driven toggle isn't
+   *  immediately overwritten by an effect re-firing on its own read.
+   *  Same Set-membership shape as `reasonFilter`. */
   let accountFilter = $state<Set<string>>(new Set());
+  /** IDs we've already seen at least once. Used by `syncAccountFilter` to
+   *  distinguish a *genuinely new* account (auto-added to the filter so it
+   *  appears immediately) from one the user just deselected (we leave it
+   *  alone). In-memory only — restart resets the filter to "show all".  */
+  let knownAccountIds = new Set<string>();
   let searchInputEl = $state<HTMLInputElement | null>(null);
 
   // ── Derived ───────────────────────────────────────────────────────────
@@ -272,18 +277,23 @@
     return accountFilter.has(item.account_id);
   }
 
-  // Keep accountFilter in lockstep with the accounts list: newly connected
-  // accounts auto-appear in views; disconnected ones drop out.
-  $effect(() => {
+  /** Reconcile the account filter with the current accounts list. Called
+   *  from refreshAuth, never from an $effect — an effect that reads
+   *  `accountFilter` would re-fire on every toggle and clobber the user's
+   *  selection in the same microtask. */
+  function syncAccountFilter() {
     const liveIds = new Set(accounts.map((a) => a.id));
     let changed = false;
     const next = new Set(accountFilter);
+    // Auto-include accounts we've never seen before — so a freshly added
+    // account immediately shows up in views.
     for (const id of liveIds) {
-      if (!next.has(id)) {
+      if (!knownAccountIds.has(id) && !next.has(id)) {
         next.add(id);
         changed = true;
       }
     }
+    // Drop disconnected accounts.
     for (const id of accountFilter) {
       if (!liveIds.has(id)) {
         next.delete(id);
@@ -291,7 +301,8 @@
       }
     }
     if (changed) accountFilter = next;
-  });
+    knownAccountIds = liveIds;
+  }
 
   function toggleAccountFilter(id: string) {
     const next = new Set(accountFilter);
@@ -472,6 +483,7 @@
     cb = cbAcct && cbAcct.base_url
       ? { viewer: cbAcct.viewer, base_url: cbAcct.base_url }
       : null;
+    syncAccountFilter();
   }
 
   onMount(() => {
