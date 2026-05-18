@@ -5,8 +5,9 @@
 //! scanner. Notification preferences, polling cadence, theme overrides etc.
 //! join later milestones.
 
+use crate::util::atomic_write;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,13 +96,4 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let json =
         serde_json::to_string_pretty(settings).map_err(|e| format!("serialising settings: {e}"))?;
     atomic_write(&path, json.as_bytes())
-}
-
-/// Write `bytes` to `path` via a temp file + rename, so a crash mid-write
-/// can't truncate the existing settings file.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("writing {tmp:?}: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("renaming {tmp:?} → {path:?}: {e}"))?;
-    Ok(())
 }

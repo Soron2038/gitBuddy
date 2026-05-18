@@ -8,6 +8,7 @@
 //! providers happen to be connected.
 
 use crate::{
+    accounts,
     codeberg::CodebergProvider,
     github::GitHubProvider,
     gitlab::GitLabProvider,
@@ -286,6 +287,54 @@ pub fn open_main_settings(app: AppHandle) -> Result<(), String> {
     open_main(app.clone())?;
     let _ = app.emit("main-window-navigate", "settings");
     Ok(())
+}
+
+/// List all connected accounts.
+///
+/// Reads `accounts.json` first; if it's empty (pre-M6.3 installs that
+/// haven't been migrated yet, or fresh installs that just connected via the
+/// legacy single-account commands), synthesises records from whichever
+/// providers are currently restored in memory. Once the migration in the
+/// next commit runs on first launch, the synthesised path becomes a no-op
+/// and `accounts.json` is the sole source of truth.
+#[tauri::command]
+pub async fn accounts_list(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<Vec<Account>, String> {
+    state.ensure_initialized(&app).await;
+
+    let stored = accounts::load(&app)?;
+    if !stored.accounts.is_empty() {
+        return Ok(stored.accounts);
+    }
+
+    let mut out = Vec::new();
+    if let Some(p) = state.github.read().await.as_ref() {
+        out.push(accounts::account_from(
+            Provider::Github,
+            &p.viewer,
+            AuthMethod::Pat,
+            None,
+        ));
+    }
+    if let Some(p) = state.gitlab.read().await.as_ref() {
+        out.push(accounts::account_from(
+            Provider::Gitlab,
+            &p.viewer,
+            AuthMethod::Pat,
+            Some(p.base_url().to_string()),
+        ));
+    }
+    if let Some(p) = state.codeberg.read().await.as_ref() {
+        out.push(accounts::account_from(
+            Provider::Codeberg,
+            &p.viewer,
+            AuthMethod::Pat,
+            Some(p.base_url().to_string()),
+        ));
+    }
+    Ok(out)
 }
 
 // ── Aggregated data commands ───────────────────────────────────────────────

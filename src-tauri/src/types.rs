@@ -62,6 +62,41 @@ pub struct Viewer {
     pub name: Option<String>,
 }
 
+/// How a given account authenticates against its provider. New OAuth-Device-
+/// Flow accounts get `OauthDevice`; everything connected via the existing
+/// "paste a token" flow is `Pat`. The frontend renders a small badge per
+/// account row so the user can see which method is in use.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    Pat,
+    OauthDevice,
+}
+
+/// One connected account. The on-disk `accounts.json` holds a `Vec<Account>`;
+/// the actual secret material (PAT string or OAuth tokens blob) lives in the
+/// Keychain under the composite key `Account.id`.
+///
+/// `id` is built from `<provider-slug>:<login-lowercased>` so it round-trips
+/// stably and serves as both the in-memory primary key and the Keychain
+/// account name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Account {
+    pub id: String,
+    pub provider: Provider,
+    pub login: String,
+    pub viewer: Viewer,
+    pub auth: AuthMethod,
+    /// Base URL for self-hostable providers (GitLab/Codeberg). `None` for
+    /// GitHub.com.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// RFC 3339 timestamp captured when the account was first added — used
+    /// for stable display ordering ("most recently added") in later
+    /// multi-account UI work.
+    pub added_at: String,
+}
+
 /// Coarse CI state collapsed from the provider's richer status/conclusion
 /// matrix into the four buckets the UI cares about: green / red / spinning /
 /// nothing.

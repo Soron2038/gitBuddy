@@ -5,6 +5,7 @@
 // Local repo index, polling, notifications, multi-account, GitLab/Codeberg
 // come in later milestones — see PRD.md.
 
+mod accounts;
 mod codeberg;
 mod commands;
 mod github;
@@ -13,6 +14,7 @@ mod keychain;
 mod local_index;
 mod settings;
 mod types;
+mod util;
 
 use std::sync::Arc;
 
@@ -52,6 +54,7 @@ pub fn run() {
             commands::cb_set_token,
             commands::cb_status,
             commands::cb_disconnect,
+            commands::accounts_list,
             commands::open_main,
             commands::open_main_settings,
             commands::list_waiting,
