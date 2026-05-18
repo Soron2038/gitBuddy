@@ -58,6 +58,11 @@ impl GitLabProvider {
         &self.base_url
     }
 
+    /// See [`crate::github::GitHubProvider::token`].
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     /// Items where the user is assigned, review-requested, or authored —
     /// across issues and merge requests. GitLab's REST API doesn't expose a
     /// "mentioned" scope, so that filter from GitHub doesn't carry over here.

@@ -66,6 +66,7 @@ pub fn run() {
             commands::list_releases,
             commands::list_ci,
             commands::list_local_repos,
+            commands::clone_repo,
             commands::get_settings,
             commands::save_settings,
             commands::run_editor,

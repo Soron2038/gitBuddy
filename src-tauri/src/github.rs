@@ -50,6 +50,13 @@ impl GitHubProvider {
         })
     }
 
+    /// Bearer token kept for outbound HTTPS git operations (clone, fetch).
+    /// Already in the binary's process memory — exposing it through a method
+    /// just lets sibling modules grab it without hitting the Keychain again.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     /// Items where the user is assigned, review-requested, authored, or
     /// mentioned. Queries run concurrently; results are deduplicated, since
     /// the same PR can match multiple reasons.

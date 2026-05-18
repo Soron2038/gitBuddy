@@ -985,6 +985,93 @@ fn tag_and_extend_ci(out: &mut Vec<CiRun>, items: Vec<CiRun>, id: &str) {
 
 // ── Local index ─────────────────────────────────────────────────────────────
 
+/// Clone a remote repo to `parent_dir/folder_name` and return the absolute
+/// path of the new working directory.
+///
+/// Auth: when `account_id` is supplied (the frontend picks the most-recently-
+/// added account that has access), the in-memory provider's token is fed to
+/// libgit2 via a credentials callback. This avoids a fresh Keychain prompt —
+/// the token is already in RAM from the initial restore. For public repos
+/// the caller can pass `None` and the callback is skipped.
+///
+/// The actual clone runs on a blocking thread because libgit2 is synchronous
+/// and a 200 MB checkout would otherwise stall the Tauri runtime.
+#[tauri::command]
+pub async fn clone_repo(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+    url: String,
+    parent_dir: String,
+    folder_name: String,
+    account_id: Option<String>,
+) -> Result<String, String> {
+    state.ensure_initialized(&app).await;
+
+    let folder_name = folder_name.trim();
+    if folder_name.is_empty() {
+        return Err("Folder name must not be empty.".into());
+    }
+    if folder_name.contains('/') || folder_name.contains('\\') {
+        return Err("Folder name must not contain path separators.".into());
+    }
+    let parent = std::path::PathBuf::from(parent_dir.trim());
+    if !parent.is_dir() {
+        return Err(format!("Parent directory doesn't exist: {parent:?}"));
+    }
+    let target = parent.join(folder_name);
+    if target.exists() {
+        return Err(format!("Target already exists: {}", target.display()));
+    }
+
+    // Resolve the token (if any) from the in-memory provider whose
+    // account_id matches. None for public clones; Some for authenticated.
+    // If the account vanished between the frontend showing the button and
+    // the click landing, fall through to anonymous and let libgit2 surface
+    // a clear auth error.
+    let token: Option<String> = if let Some(id) = account_id.as_deref() {
+        if let Some(p) = state.github.read().await.get(id) {
+            Some(p.token().to_string())
+        } else if let Some(p) = state.gitlab.read().await.get(id) {
+            Some(p.token().to_string())
+        } else {
+            state
+                .codeberg
+                .read()
+                .await
+                .get(id)
+                .map(|p| p.token().to_string())
+        }
+    } else {
+        None
+    };
+
+    tokio::task::spawn_blocking(move || {
+        use git2::{Cred, FetchOptions, RemoteCallbacks};
+
+        let mut callbacks = RemoteCallbacks::new();
+        if let Some(tok) = token.clone() {
+            callbacks.credentials(move |_url, _username, _allowed| {
+                // "oauth2" works as the username for personal access tokens
+                // on both GitLab and Gitea/Codeberg HTTPS endpoints, and is
+                // accepted by GitHub too — saving us a per-provider switch.
+                Cred::userpass_plaintext("oauth2", &tok)
+            });
+        }
+        let mut fo = FetchOptions::new();
+        fo.remote_callbacks(callbacks);
+
+        let mut builder = git2::build::RepoBuilder::new();
+        builder.fetch_options(fo);
+
+        builder
+            .clone(&url, &target)
+            .map(|_| target.to_string_lossy().into_owned())
+            .map_err(|e| format!("clone failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("clone task panicked: {e}"))?
+}
+
 #[tauri::command]
 pub async fn list_local_repos(app: AppHandle) -> Result<Vec<LocalRepo>, String> {
     let settings = settings::load(&app)?;

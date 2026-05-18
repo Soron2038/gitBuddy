@@ -54,6 +54,11 @@ impl CodebergProvider {
         &self.base_url
     }
 
+    /// See [`crate::github::GitHubProvider::token`].
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     /// Items where the user is assigned / created / review-requested /
     /// mentioned. The four scopes run as parallel calls to
     /// `/repos/issues/search`, then we dedup the way the GitHub provider does.
