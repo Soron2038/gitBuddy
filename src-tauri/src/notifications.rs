@@ -147,12 +147,9 @@ pub enum Kind {
         repo: String,
         tag_name: String,
     },
-    /// Wired today; populated by the aggregator once `author_login`
-    /// plumbing lands in Phase 3. The `allow(dead_code)` keeps clippy
-    /// quiet until that diff arrives — until then the variant exists so
-    /// the on-disk seen-store schema and the settings toggle have a
-    /// matching production code path waiting for them.
-    #[allow(dead_code)]
+    /// Fired by the aggregator when a CI run transitions into `Fail`
+    /// status, the run's `author_login` matches the connected account's
+    /// viewer, and the seen-key for that run isn't already recorded.
     CiFailure {
         repo: String,
         branch: String,

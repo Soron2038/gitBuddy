@@ -502,6 +502,45 @@ async fn fetch_latest_release(
     }))
 }
 
+/// Gitea wraps the runs in a `workflow_runs` envelope, mirroring GitHub.
+/// Hoisted to module level so the deserializer can be unit-tested against
+/// recorded fixtures from Gitea 1.21+, older Gitea, and Forgejo (each of
+/// which surfaces the actor under a different key).
+#[derive(Deserialize)]
+struct WorkflowRunsResp {
+    workflow_runs: Vec<RawRun>,
+}
+
+#[derive(Deserialize)]
+struct RawRun {
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+    html_url: String,
+    #[serde(default)]
+    head_branch: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    /// User who triggered the run. Different Gitea/Forgejo versions
+    /// surface this under different keys (`actor`, `triggered_by`,
+    /// `actor_user`) and on some self-hosted Forgejo instances the
+    /// field is absent entirely. Accept the common variants; treat any
+    /// None as "we don't know who triggered this" → CI-failure
+    /// notifications are silently skipped for that repo
+    /// (DECISIONS.md 2026-05-26).
+    #[serde(default, alias = "triggered_by", alias = "actor_user")]
+    actor: Option<RunActor>,
+}
+
+#[derive(Deserialize)]
+struct RunActor {
+    /// Gitea/Forgejo expose the actor under varying key names too
+    /// (`login` on Gitea ≥1.21, `username` on older builds / Forgejo).
+    /// Accept both.
+    #[serde(alias = "username")]
+    login: String,
+}
+
 async fn fetch_latest_ci_run(
     client: &Client,
     token: &str,
@@ -533,6 +572,7 @@ async fn fetch_latest_ci_run(
                 html_url: None,
                 branch: Some(repo.default_branch.clone()),
                 workflow_name: None,
+                author_login: None,
                 account_id: None,
             }));
         }
@@ -546,23 +586,6 @@ async fn fetch_latest_ci_run(
         }
     }
 
-    // Gitea wraps the runs in a `workflow_runs` envelope, mirroring GitHub.
-    #[derive(Deserialize)]
-    struct WorkflowRunsResp {
-        workflow_runs: Vec<RawRun>,
-    }
-    #[derive(Deserialize)]
-    struct RawRun {
-        status: String,
-        #[serde(default)]
-        conclusion: Option<String>,
-        html_url: String,
-        #[serde(default)]
-        head_branch: Option<String>,
-        #[serde(default)]
-        name: Option<String>,
-    }
-
     let body: WorkflowRunsResp = resp.json().await?;
     let Some(run) = body.workflow_runs.into_iter().next() else {
         return Ok(Some(CiRun {
@@ -572,6 +595,7 @@ async fn fetch_latest_ci_run(
             html_url: None,
             branch: Some(repo.default_branch.clone()),
             workflow_name: None,
+            author_login: None,
             account_id: None,
         }));
     };
@@ -583,6 +607,7 @@ async fn fetch_latest_ci_run(
         html_url: Some(run.html_url),
         branch: run.head_branch,
         workflow_name: run.name,
+        author_login: run.actor.map(|a| a.login),
         account_id: None,
     }))
 }
@@ -632,5 +657,56 @@ mod tests {
     #[test]
     fn rejects_missing_scheme() {
         assert!(normalise_base_url("codeberg.example.com").is_err());
+    }
+
+    fn fixture(actor_block: &str) -> String {
+        format!(
+            r#"{{"workflow_runs":[{{
+                "status":"completed",
+                "conclusion":"failure",
+                "html_url":"https://codeberg.org/o/r/actions/runs/1",
+                "head_branch":"main",
+                "name":"CI"{actor_block}
+            }}]}}"#
+        )
+    }
+
+    #[test]
+    fn run_actor_login_modern_gitea() {
+        // Gitea ≥1.21 exposes `actor` with `login`, matching GitHub.
+        let raw = fixture(r#","actor":{"login":"bjoernw"}"#);
+        let resp: WorkflowRunsResp = serde_json::from_str(&raw).expect("parse");
+        let run = resp.workflow_runs.into_iter().next().unwrap();
+        assert_eq!(run.actor.map(|a| a.login).as_deref(), Some("bjoernw"));
+    }
+
+    #[test]
+    fn run_actor_login_via_triggered_by_alias() {
+        // Older Gitea builds and some Forgejo versions ship the actor as
+        // `triggered_by`. The serde alias on `RawRun.actor` accepts it.
+        let raw = fixture(r#","triggered_by":{"username":"bjoernw"}"#);
+        let resp: WorkflowRunsResp = serde_json::from_str(&raw).expect("parse");
+        let run = resp.workflow_runs.into_iter().next().unwrap();
+        assert_eq!(run.actor.map(|a| a.login).as_deref(), Some("bjoernw"));
+    }
+
+    #[test]
+    fn run_actor_login_via_actor_user_alias() {
+        // Some Forgejo builds expose the actor as `actor_user`.
+        let raw = fixture(r#","actor_user":{"username":"bjoernw"}"#);
+        let resp: WorkflowRunsResp = serde_json::from_str(&raw).expect("parse");
+        let run = resp.workflow_runs.into_iter().next().unwrap();
+        assert_eq!(run.actor.map(|a| a.login).as_deref(), Some("bjoernw"));
+    }
+
+    #[test]
+    fn run_actor_login_absent_graceful() {
+        // A self-hosted Forgejo that doesn't surface an actor at all
+        // must not break deserialisation — the CI-failure path silently
+        // skips runs with `author_login: None`.
+        let raw = fixture("");
+        let resp: WorkflowRunsResp = serde_json::from_str(&raw).expect("parse");
+        let run = resp.workflow_runs.into_iter().next().unwrap();
+        assert!(run.actor.is_none());
     }
 }

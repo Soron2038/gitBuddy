@@ -224,6 +224,36 @@ impl GitHubProvider {
     }
 }
 
+/// Top-level wrapper of the `/repos/{owner}/{name}/actions/runs` response.
+/// Hoisted to module level so the deserializer can be exercised by unit
+/// tests against recorded fixtures without spinning up a real HTTP client.
+#[derive(Deserialize)]
+struct WorkflowRunsResp {
+    workflow_runs: Vec<WorkflowRun>,
+}
+
+#[derive(Deserialize)]
+struct WorkflowRun {
+    status: String,
+    conclusion: Option<String>,
+    html_url: String,
+    head_branch: Option<String>,
+    name: Option<String>,
+    /// User who triggered the run (push committer, PR author, or whoever
+    /// clicked "Re-run"). The notifications pipeline only fires
+    /// CI-failure events when this matches the connected account's
+    /// viewer login — see `aggregator::diff_and_notify`. On a re-run the
+    /// actor is the person who clicked the button, not the original
+    /// author; accepted edge case (DECISIONS.md 2026-05-26).
+    #[serde(default)]
+    actor: Option<Actor>,
+}
+
+#[derive(Deserialize)]
+struct Actor {
+    login: String,
+}
+
 async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Result<Option<CiRun>> {
     let url = format!("{API_BASE}/repos/{}/{}/actions/runs", repo.owner, repo.name);
     let resp = client
@@ -246,6 +276,7 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
                 html_url: None,
                 branch: Some(repo.default_branch.clone()),
                 workflow_name: None,
+                author_login: None,
                 account_id: None,
             }));
         }
@@ -254,19 +285,6 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
         // forks; treat it the same as "no CI" to keep the batch flowing.
         StatusCode::FORBIDDEN => return Ok(None),
         s => return Err(GitHubError::HttpStatus(s)),
-    }
-
-    #[derive(Deserialize)]
-    struct WorkflowRunsResp {
-        workflow_runs: Vec<WorkflowRun>,
-    }
-    #[derive(Deserialize)]
-    struct WorkflowRun {
-        status: String,
-        conclusion: Option<String>,
-        html_url: String,
-        head_branch: Option<String>,
-        name: Option<String>,
     }
 
     let body: WorkflowRunsResp = resp.json().await?;
@@ -278,6 +296,7 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
             html_url: None,
             branch: Some(repo.default_branch.clone()),
             workflow_name: None,
+            author_login: None,
             account_id: None,
         }));
     };
@@ -289,6 +308,7 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
         html_url: Some(run.html_url),
         branch: run.head_branch,
         workflow_name: run.name,
+        author_login: run.actor.map(|a| a.login),
         account_id: None,
     }))
 }
@@ -565,5 +585,44 @@ mod tests {
         assert_eq!(humanise_age("2026-05-12T11:30:00Z", now), "30m");
         assert_eq!(humanise_age("2026-05-12T08:00:00Z", now), "4h");
         assert_eq!(humanise_age("2026-05-09T12:00:00Z", now), "3d");
+    }
+
+    #[test]
+    fn workflow_run_extracts_actor_login() {
+        // Trimmed fixture from a real `/actions/runs` response — keeps
+        // only the fields the deserializer cares about.
+        let raw = r#"{
+            "workflow_runs": [{
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": "https://github.com/o/r/actions/runs/42",
+                "head_branch": "main",
+                "name": "CI",
+                "actor": {"login": "Soron2038", "id": 99}
+            }]
+        }"#;
+        let resp: WorkflowRunsResp = serde_json::from_str(raw).expect("parse");
+        let run = resp.workflow_runs.into_iter().next().unwrap();
+        assert_eq!(run.actor.map(|a| a.login).as_deref(), Some("Soron2038"));
+    }
+
+    #[test]
+    fn workflow_run_actor_optional() {
+        // GitHub's documented schema lists `actor` as always-present, but
+        // we keep `Option<Actor>` so a future shape change doesn't make
+        // the entire deserialisation fail — the CI-failure path simply
+        // skips runs with no actor.
+        let raw = r#"{
+            "workflow_runs": [{
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": "https://github.com/o/r/actions/runs/43",
+                "head_branch": "main",
+                "name": "CI"
+            }]
+        }"#;
+        let resp: WorkflowRunsResp = serde_json::from_str(raw).expect("parse");
+        let run = resp.workflow_runs.into_iter().next().unwrap();
+        assert!(run.actor.is_none());
     }
 }

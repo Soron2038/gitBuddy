@@ -229,6 +229,10 @@ export interface CiRun {
   html_url: string | null;
   branch: string | null;
   workflow_name: string | null;
+  /** Login of the user that triggered this run. Used backend-side to gate
+   *  CI-failure notifications to the viewer-as-author. `null` for self-
+   *  hosted Forgejo instances that don't expose an actor. */
+  author_login: string | null;
   account_id: string | null;
 }
 

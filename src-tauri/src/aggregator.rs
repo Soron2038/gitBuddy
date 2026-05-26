@@ -25,6 +25,7 @@
 //! so the popover never sees half a list when one provider rate-limits.
 
 use crate::{
+    accounts,
     codeberg::CodebergProvider,
     commands::AppState,
     github::GitHubProvider,
@@ -32,10 +33,10 @@ use crate::{
     local_index::{self, LocalRepo},
     notifications::{self, Kind, SeenStore},
     settings::{self, NotificationSettings, Settings, POLL_INTERVAL_DEFAULT},
-    types::{CiRun, ItemReason, Release, Repo, WaitingItem},
+    types::{CiRun, CiStatus, ItemReason, Release, Repo, WaitingItem},
 };
 use chrono::Utc;
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tauri::{AppHandle, Emitter};
 
 /// Snapshot of every aggregated list as of the most recent successful tick.
@@ -114,7 +115,29 @@ pub async fn tick(app: &AppHandle, state: &AppState) {
     let mut store = notifications::load(app);
     notifications::prune(&mut store);
 
-    diff_and_notify(app, &settings.notifications, &snapshot, &mut store, &now_ts);
+    // Map account-id → viewer-login (lowercased). The CI-failure diff
+    // needs this to decide whether the user *triggered* a failing run
+    // worth notifying about; pulling once per tick keeps the per-CiRun
+    // lookup constant-time. A load failure → empty map, which silently
+    // disables CI-failure notifications for this tick rather than
+    // panicking.
+    let viewer_logins = accounts::load(app)
+        .map(|f| {
+            f.accounts
+                .into_iter()
+                .map(|a| (a.id, a.viewer.login.to_lowercase()))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
+
+    diff_and_notify(
+        app,
+        &settings.notifications,
+        &snapshot,
+        &viewer_logins,
+        &mut store,
+        &now_ts,
+    );
 
     if let Err(e) = notifications::save(app, &store) {
         eprintln!("gitbuddy: persisting notifications.json failed: {e}");
@@ -150,6 +173,7 @@ fn diff_and_notify(
     app: &AppHandle,
     settings: &NotificationSettings,
     snapshot: &FetchSnapshot,
+    viewer_logins: &HashMap<String, String>,
     store: &mut SeenStore,
     now_ts: &str,
 ) {
@@ -204,8 +228,53 @@ fn diff_and_notify(
         );
     }
 
-    // CI-failure diff lands in Phase 3 (needs per-provider `author_login`).
-    // The CI side of the store is touched only by `prune` until then.
+    // CI-failure diff. Three gates compose:
+    //   1. Status must be `Fail` (Cancelled / Run / None / Ok all skip).
+    //   2. The run's `author_login` must match the connected account's
+    //      viewer login — we only notify the *triggerer* of a failed run,
+    //      not the whole org. Providers that don't surface an actor
+    //      (some self-hosted Forgejo) produce `None` here, which never
+    //      matches → silent skip (DECISIONS.md 2026-05-26).
+    //   3. The seen-key must not already be in `store.ci_failures`. The
+    //      key is composed from the run's `html_url` when available, so
+    //      a re-run (which gets a fresh URL) counts as a new event;
+    //      a tick that sees the *same* still-failing run reuses the
+    //      already-stored key and no second notification fires.
+    for run in &snapshot.ci {
+        if run.status != CiStatus::Fail {
+            continue;
+        }
+        let Some(account_id) = run.account_id.as_deref() else {
+            continue;
+        };
+        let Some(author) = run.author_login.as_deref() else {
+            continue;
+        };
+        let Some(viewer) = viewer_logins.get(account_id) else {
+            continue;
+        };
+        if author.to_lowercase() != *viewer {
+            continue;
+        }
+
+        let key = ci_failure_key(run);
+        if cold_start || store.ci_failures.contains_key(&key) {
+            store
+                .ci_failures
+                .entry(key)
+                .or_insert_with(|| now_ts.to_string());
+            continue;
+        }
+        store.ci_failures.insert(key, now_ts.to_string());
+        notifications::fire(
+            app,
+            settings,
+            Kind::CiFailure {
+                repo: run.repo_full_name.clone(),
+                branch: run.branch.clone().unwrap_or_else(|| "main".to_string()),
+            },
+        );
+    }
 
     if cold_start {
         store.initialised = true;
@@ -223,6 +292,25 @@ fn waiting_key(item: &WaitingItem) -> String {
 fn release_key(r: &Release) -> String {
     let account = r.account_id.as_deref().unwrap_or("unknown");
     format!("{account}:{}:{}", r.repo_full_name, r.tag)
+}
+
+/// Per-failed-run key. The `html_url` is the strongest provider-stable
+/// identifier we get — every re-run produces a new URL on GitHub /
+/// GitLab / Gitea, so it naturally distinguishes "still the same fail"
+/// from "another fail happened". When the URL is missing we fall back
+/// to `repo_full_name + branch`, which collapses any still-failing run
+/// on that branch into a single key — acceptable since the alternative
+/// is no notification at all.
+fn ci_failure_key(run: &CiRun) -> String {
+    let account = run.account_id.as_deref().unwrap_or("unknown");
+    let suffix = run.html_url.clone().unwrap_or_else(|| {
+        format!(
+            "{}:{}",
+            run.repo_full_name,
+            run.branch.as_deref().unwrap_or("?")
+        )
+    });
+    format!("{account}:{suffix}")
 }
 
 fn waiting_reason_label(reason: ItemReason) -> &'static str {

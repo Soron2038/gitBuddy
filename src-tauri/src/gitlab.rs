@@ -607,6 +607,30 @@ async fn fetch_latest_release(
     }))
 }
 
+/// Shape returned by `/projects/{id}/pipelines?per_page=1`. Hoisted to
+/// module level so unit tests can exercise the deserializer against
+/// recorded fixtures.
+#[derive(Deserialize)]
+struct RawPipeline {
+    status: String,
+    web_url: String,
+    #[serde(rename = "ref")]
+    ref_: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    /// User who triggered the pipeline (push committer, MR author, or
+    /// whoever ran the manual job). The notifications pipeline only
+    /// fires CI-failure events when `username` matches the connected
+    /// account's viewer login.
+    #[serde(default)]
+    user: Option<PipelineUser>,
+}
+
+#[derive(Deserialize)]
+struct PipelineUser {
+    username: String,
+}
+
 async fn fetch_latest_pipeline(
     client: &Client,
     token: &str,
@@ -636,6 +660,7 @@ async fn fetch_latest_pipeline(
                 html_url: None,
                 branch: Some(repo.default_branch.clone()),
                 workflow_name: None,
+                author_login: None,
                 account_id: None,
             }));
         }
@@ -649,16 +674,6 @@ async fn fetch_latest_pipeline(
         }
     }
 
-    #[derive(Deserialize)]
-    struct RawPipeline {
-        status: String,
-        web_url: String,
-        #[serde(rename = "ref")]
-        ref_: Option<String>,
-        #[serde(default)]
-        name: Option<String>,
-    }
-
     let raw: Vec<RawPipeline> = resp.json().await?;
     let Some(p) = raw.into_iter().next() else {
         return Ok(Some(CiRun {
@@ -668,6 +683,7 @@ async fn fetch_latest_pipeline(
             html_url: None,
             branch: Some(repo.default_branch.clone()),
             workflow_name: None,
+            author_login: None,
             account_id: None,
         }));
     };
@@ -679,6 +695,7 @@ async fn fetch_latest_pipeline(
         html_url: Some(p.web_url),
         branch: p.ref_,
         workflow_name: p.name,
+        author_login: p.user.map(|u| u.username),
         account_id: None,
     }))
 }
@@ -736,5 +753,36 @@ mod tests {
             extract_path_from_url("https://gitlab.gwdg.de/group/sub/repo/-/issues/42"),
             "group/sub/repo"
         );
+    }
+
+    #[test]
+    fn pipeline_extracts_user_username() {
+        // Trimmed fixture from `/projects/:id/pipelines?per_page=1` — kept
+        // only the fields the deserializer touches.
+        let raw = r#"[{
+            "status": "failed",
+            "web_url": "https://gitlab.com/group/repo/-/pipelines/99",
+            "ref": "main",
+            "name": "build",
+            "user": {"id": 7, "username": "bwitt"}
+        }]"#;
+        let parsed: Vec<RawPipeline> = serde_json::from_str(raw).expect("parse");
+        let p = parsed.into_iter().next().unwrap();
+        assert_eq!(p.user.map(|u| u.username).as_deref(), Some("bwitt"));
+    }
+
+    #[test]
+    fn pipeline_user_optional() {
+        // Older self-hosted GitLab instances sometimes omit `user` for
+        // scheduled / API-triggered pipelines. The deserializer must
+        // tolerate this so the rest of the snapshot still lands.
+        let raw = r#"[{
+            "status": "failed",
+            "web_url": "https://gitlab.com/group/repo/-/pipelines/100",
+            "ref": "main"
+        }]"#;
+        let parsed: Vec<RawPipeline> = serde_json::from_str(raw).expect("parse");
+        let p = parsed.into_iter().next().unwrap();
+        assert!(p.user.is_none());
     }
 }

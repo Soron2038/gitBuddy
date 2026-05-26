@@ -132,6 +132,14 @@ pub struct CiRun {
     pub html_url: Option<String>,
     pub branch: Option<String>,
     pub workflow_name: Option<String>,
+    /// Login of the user that *triggered* the latest run on this repo.
+    /// Aggregator compares it (lowercased) against the connected account's
+    /// viewer login to decide whether to fire a "your CI failed"
+    /// notification. `None` when the provider doesn't surface an actor
+    /// (some self-hosted Forgejo instances) — in that case the CI-failure
+    /// notification path is silently skipped for that repo.
+    #[serde(default)]
+    pub author_login: Option<String>,
     /// `Account.id` of the providing account. Same aggregator-tagging
     /// contract as [`WaitingItem::account_id`].
     #[serde(default)]

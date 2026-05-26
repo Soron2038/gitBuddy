@@ -2356,14 +2356,14 @@
             />
             <span>New releases</span>
           </label>
-          <label class="set-toggle set-toggle-muted">
+          <label class="set-toggle" class:set-toggle-muted={!settings.notifications.enabled}>
             <input
               type="checkbox"
               checked={settings.notifications.events.ci_failure}
-              disabled
+              disabled={!settings.notifications.enabled}
               onchange={(e) => toggleEventCategory('ci_failure', (e.target as HTMLInputElement).checked)}
             />
-            <span>CI failures I triggered <span class="set-toggle-hint">(landing next iteration)</span></span>
+            <span>CI failures I triggered <span class="set-toggle-hint">(workflow runs you pushed or re-ran)</span></span>
           </label>
         </section>
 
