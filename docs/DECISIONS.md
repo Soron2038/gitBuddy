@@ -150,3 +150,88 @@ expiration", the access token starts returning 401 and the UI surfaces the
 same reconnect path it already shows for revoked PATs. We'll model refresh
 the day this materially bites — adding it now would be carrying complexity
 for a case that may never happen.
+
+## 2026-05-26 — Backend polling loop + native notifications
+
+**Decision:** The data-refresh loop moved from a `setInterval` in the
+popover webview into a single tokio task on the Rust side
+(`aggregator.rs`). The aggregator owns the cadence, owns the in-memory
+cache, and owns the diff-vs-previous-snapshot work that drives native
+notifications. The frontends became viewers: they subscribe to a
+`data-updated` Tauri event and re-pull from cache; the previous
+per-window `setInterval` blocks were removed.
+
+**Why:** Polling-in-the-frontend worked while gitBuddy had one window,
+but two windows polling the same APIs is wasted budget and the lack of a
+single coherent "previous tick" snapshot blocked the notifications work
+that closes PRD §4.8. Centralising lets one tick produce one snapshot,
+one diff against persisted seen-state, and fan-out to both webviews.
+The previous JS-side seen-state (`localStorage.gitbuddy:seen-waiting-ids`)
+was dropped — backend now owns it.
+
+**Implementation:**
+
+- `src-tauri/src/aggregator.rs` — `run_loop` body. Two `tokio::sync::Notify`s
+  let auth changes (`refresh_trigger`) and settings changes
+  (`settings_reload`) cancel the current sleep, so a freshly-connected
+  account or a slider-drag on the poll interval takes effect on the
+  *current* sleep cycle rather than after.
+- `src-tauri/src/notifications.rs` — `SeenStore` persisted to
+  `notifications.json` next to `settings.json`. Kept as a separate file
+  rather than folded into settings: settings is user-edited and
+  read-mostly; the seen-store is opaque churn that mutates every tick,
+  and bundling them risks corrupting user preferences if a write at tick
+  time races with a Settings save.
+- `src-tauri/src/settings.rs` — schema v1 → v2 migration. v1's flat
+  `notifications_enabled` bool became `notifications.enabled` inside a
+  struct that also carries Do-Not-Disturb + per-event toggles, plus a
+  new `poll_interval_minutes` (clamped 1..=60). Migration is silent and
+  one-shot: `load()` rewrites the file in v2 form before returning, so
+  the on-disk shape is canonical from the next read onward.
+
+**Cold-start guard:** the very first tick after install seeds every
+currently-visible item as already-seen and flips the `initialised` flag,
+firing nothing. Without this an upgrade or fresh install would blast the
+notification centre with the user's entire backlog of assignments and
+release tags. The guard cost is a single boolean on disk; the alternative
+("notify everything on first launch, sorry") would have been a regression.
+
+**Per-provider CI actor:** the fourth PRD event ("CI failure where the
+viewer authored the latest commit/PR") needs each provider to surface a
+login for the run's triggerer. GitHub exposes `actor.login` on workflow
+runs, GitLab exposes `user.username` on pipelines, Gitea ≥1.21 exposes
+`actor.login` matching GitHub, older Gitea uses `triggered_by.username`,
+and Forgejo variants ship `actor_user.username`. `codeberg.rs::RawRun`
+uses `serde(alias = "triggered_by", alias = "actor_user")` plus
+`RunActor`'s `serde(alias = "username")` to accept all four shapes; a
+self-hosted Forgejo that doesn't expose the actor at all parses as
+`None` and the CI-failure notification path silently skips. Live-
+verified against codeberg.org but not every self-hosted variant — if a
+Forgejo user reports missing CI notifications, separate fix.
+
+**Re-run attribution edge case:** on GitHub, when someone other than
+the original author clicks "Re-run failed jobs", the workflow run's
+`actor` becomes the re-runner. The notification will go to the re-runner
+rather than the original author. Accepted: PRD-conformant, easy to
+explain, and any "stable across re-runs" attribution would need pulling
+the head commit's author separately on every CI fetch — too much for
+the value.
+
+**`Authored` waiting-reason notifies:** kept the existing JS behaviour
+where the `authored` reason (commits / replies on your own PR) fires
+notifications. PRD §4.8 lists assigned/review/mention but not authored;
+the prior behaviour was already shipping and silencing it would be a
+visible regression. Per-event toggle is the user-facing escape hatch.
+
+**Polling cadence default:** 5 minutes, matching the legacy
+`POLL_INTERVAL_MS = 5 * 60 * 1000` constant. Clamp band 1..=60 so a
+hand-edited config file can't take the loop to 0-second hammering or
+hour-plus idle. The `Notify`-based wake makes a slider drag in the UI
+take effect immediately.
+
+**Click-to-open from notifications:** out of scope for this iteration.
+`tauri-plugin-notification` provides a click event but the payload
+roundtrip is limited on macOS 14+, and building a sidecar
+`pending_clicks: HashMap<id, url>` plus a `NSDelegate` would have
+doubled the scope. Notifications are informative; the user clicks the
+popover for action. Revisit if it becomes a real ask.
