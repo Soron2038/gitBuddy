@@ -11,12 +11,26 @@
   image's alpha channel as the shape mask and tints it for the menu bar
   appearance (light / dark / translucent), so any colour information here
   would be discarded.
+
+  Design: a friendly robot whose antenna is a git branch (two nodes on a
+  forked stem). The face is punched out of the rectangular head via an
+  SVG mask so the silhouette reads as "robot with personality" even at
+  22×22 menu-bar size. Matches assets/robot_git_menubar.svg.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44" width="44" height="44">
-  <!-- body -->
-  <circle cx="22" cy="27" r="12" fill="#000"/>
-  <!-- left leaf -->
-  <polygon points="22,16 17,11 10,7 5,5 8,12 14,17" fill="#000"/>
-  <!-- right leaf -->
-  <polygon points="22,16 27,11 34,7 39,5 36,12 30,17" fill="#000"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" width="22" height="22">
+  <defs>
+    <mask id="face-mask">
+      <rect x="0" y="0" width="22" height="22" fill="#ffffff"/>
+      <ellipse cx="8.5" cy="13.8" rx="0.9" ry="1.4" fill="#000000"/>
+      <ellipse cx="13.5" cy="13.8" rx="0.9" ry="1.4" fill="#000000"/>
+      <path d="M 9.7,16.2 Q 11,17.2 12.3,16.2" fill="none" stroke="#000000" stroke-width="0.8" stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <g fill="#000">
+    <path d="M 11,10 L 11,7.8 Q 11,6.5 9.4,6.0" fill="none" stroke="#000" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 11,7.8 Q 12.3,7.8 13.0,6.6" fill="none" stroke="#000" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="9.2" cy="5.0" r="1.1"/>
+    <circle cx="13.2" cy="5.4" r="1.1"/>
+    <rect x="5" y="10" width="12" height="9" rx="2.5" ry="2.5" mask="url(#face-mask)"/>
+  </g>
 </svg>
