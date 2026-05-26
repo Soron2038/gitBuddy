@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#efa57e" />
+      <stop offset="100%" stop-color="#d46134" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background Squircle -->
+  <rect x="24" y="24" width="464" height="464" rx="135" ry="135" fill="url(#bg-grad)" />
+
+  <!-- Antenna (Git Branch Symbol) -->
+  <!-- Main Stem & Left Node Connection -->
+  <path d="M 256,155 L 256,120 Q 256,102 224,96" fill="none" stroke="#ffffff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" />
+  <!-- Right Branch Connection -->
+  <path d="M 256,120 Q 278,120 292,103" fill="none" stroke="#ffffff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" />
+  
+  <!-- Antenna Nodes (Circles) -->
+  <circle cx="220" cy="82" r="20" fill="#ffffff" />
+  <circle cx="296" cy="88" r="20" fill="#ffffff" />
+
+  <!-- Robot Head (Rounded Rectangle) -->
+  <rect x="116" y="150" width="280" height="236" rx="68" ry="68" fill="#ffffff" />
+
+  <!-- Face Elements -->
+  <!-- Eyes (Vertical Ellipses in Background Saturated Orange) -->
+  <ellipse cx="196" cy="262" rx="20" ry="30" fill="#d46134" />
+  <ellipse cx="316" cy="262" rx="20" ry="30" fill="#d46134" />
+
+  <!-- Cheek Blush (Soft Pink/Peach Circles) -->
+  <circle cx="156" cy="308" r="14" fill="#f2bea8" />
+  <circle cx="356" cy="308" r="14" fill="#f2bea8" />
+
+  <!-- Smile (Curved Path in Background Saturated Orange) -->
+  <path d="M 234,306 Q 256,323 278,306" fill="none" stroke="#d46134" stroke-width="12" stroke-linecap="round" />
+</svg>
