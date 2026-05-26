@@ -8,11 +8,12 @@
 //! providers happen to be connected.
 
 use crate::{
-    accounts,
+    accounts, aggregator,
+    aggregator::AggregatorCache,
     codeberg::CodebergProvider,
     github::GitHubProvider,
     gitlab::GitLabProvider,
-    keychain, local_index,
+    keychain,
     local_index::LocalRepo,
     oauth::{self, DeviceCodeResponse, PollOutcome},
     settings::{self, Settings},
@@ -21,7 +22,7 @@ use crate::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 
 /// Event name fired whenever a provider connects or disconnects. Both the
 /// popover and the main window subscribe and re-fetch on receipt, so the
@@ -46,14 +47,43 @@ const CB_LEGACY_KEY: &str = "codeberg";
 /// can hold multiple accounts per provider — e.g. two GitLab instances or a
 /// personal + work GitHub — and each is restored / refreshed / removed
 /// independently.
-#[derive(Default)]
+///
+/// The `cache` + two `Notify`s drive the backend aggregator loop. Provider
+/// commands here `refresh_trigger.notify_one()` after a connect/disconnect
+/// so the cache repopulates immediately; `save_settings` notifies
+/// `settings_reload` so the loop picks up a changed poll interval without
+/// waiting out the current sleep.
 pub struct AppState {
     pub github: RwLock<HashMap<String, Arc<GitHubProvider>>>,
     pub gitlab: RwLock<HashMap<String, Arc<GitLabProvider>>>,
     pub codeberg: RwLock<HashMap<String, Arc<CodebergProvider>>>,
+    /// Snapshot of every aggregated list as of the last successful tick.
+    /// `list_*` commands read from here instead of fanning out per call.
+    pub cache: RwLock<AggregatorCache>,
+    /// Notified by `aggregator_refresh_now` and every auth command. The
+    /// aggregator loop waits on this alongside its periodic sleep so a
+    /// trigger interrupts the sleep and runs an immediate tick.
+    pub refresh_trigger: Arc<Notify>,
+    /// Notified by `save_settings`. Same race as `refresh_trigger`: lets the
+    /// loop re-read the poll interval mid-sleep.
+    pub settings_reload: Arc<Notify>,
     /// Gates the one-time keychain restore so commands can wait for the
     /// initial auth attempt before reporting "no providers connected".
     init_attempted: tokio::sync::Mutex<bool>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            github: RwLock::new(HashMap::new()),
+            gitlab: RwLock::new(HashMap::new()),
+            codeberg: RwLock::new(HashMap::new()),
+            cache: RwLock::new(AggregatorCache::default()),
+            refresh_trigger: Arc::new(Notify::new()),
+            settings_reload: Arc::new(Notify::new()),
+            init_attempted: tokio::sync::Mutex::new(false),
+        }
+    }
 }
 
 impl AppState {
@@ -383,6 +413,7 @@ pub async fn gh_set_token(
     accounts::upsert(&app, account)?;
     state.github.write().await.insert(id, Arc::new(provider));
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+    aggregator::refresh_now(&state);
     Ok(viewer)
 }
 
@@ -473,6 +504,7 @@ pub async fn gh_oauth_poll(
             accounts::upsert(&app, account)?;
             state.github.write().await.insert(id, Arc::new(provider));
             let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+            aggregator::refresh_now(&state);
             Ok(GhOAuthPollResult::Success { viewer })
         }
     }
@@ -498,6 +530,7 @@ pub async fn gh_disconnect(
     let sweep = disconnect_all_for_provider(&state, &app, Provider::Github).await;
     let _ = keychain::delete(GH_LEGACY_KEY).await;
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+    aggregator::refresh_now(&state);
     sweep
 }
 
@@ -532,6 +565,7 @@ pub async fn gl_set_token(
 
     state.gitlab.write().await.insert(id, Arc::new(provider));
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+    aggregator::refresh_now(&state);
     Ok(viewer)
 }
 
@@ -574,6 +608,7 @@ pub async fn gl_disconnect(
     s.gitlab_base_url = None;
     settings::save(&app, &s)?;
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+    aggregator::refresh_now(&state);
     sweep
 }
 
@@ -605,6 +640,7 @@ pub async fn cb_set_token(
 
     state.codeberg.write().await.insert(id, Arc::new(provider));
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+    aggregator::refresh_now(&state);
     Ok(viewer)
 }
 
@@ -643,6 +679,7 @@ pub async fn cb_disconnect(
     s.codeberg_base_url = None;
     settings::save(&app, &s)?;
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+    aggregator::refresh_now(&state);
     sweep
 }
 
@@ -674,6 +711,7 @@ pub async fn accounts_disconnect(
     state.gitlab.write().await.remove(&account_id);
     state.codeberg.write().await.remove(&account_id);
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
+    aggregator::refresh_now(&state);
     Ok(())
 }
 
@@ -792,9 +830,16 @@ pub async fn accounts_list(
 
 // ── Aggregated data commands ───────────────────────────────────────────────
 //
-// These fan out across every connected provider. A failure in one provider
-// doesn't blank the whole result — its error is logged and the other
-// providers' data is still returned. The popover never sees half a list.
+// These read from `AppState.cache`, populated by the backend aggregator loop
+// (`aggregator::run_loop`). Pre-M6.5 every command did its own provider
+// fan-out per call; centralising that into one timer means the popover and
+// main window stay in sync without each pulling the same APIs separately,
+// and it gives Phase 2's diff/notify code a single coherent snapshot to
+// compare against.
+//
+// On a cold cache (first launch, before the first tick completes) these
+// return empty Vecs. The frontend is fine with that — `data-updated` will
+// fire as soon as the tick finishes and the windows re-read.
 
 #[tauri::command]
 pub async fn list_waiting(
@@ -802,49 +847,7 @@ pub async fn list_waiting(
     app: AppHandle,
 ) -> Result<Vec<WaitingItem>, String> {
     state.ensure_initialized(&app).await;
-    let gh: Vec<(String, _)> = state
-        .github
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let gl: Vec<(String, _)> = state
-        .gitlab
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let cb: Vec<(String, _)> = state
-        .codeberg
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-
-    let mut out = Vec::new();
-    for (id, p) in gh {
-        match p.list_waiting().await {
-            Ok(v) => tag_and_extend(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: github[{id}] list_waiting failed: {e}"),
-        }
-    }
-    for (id, p) in gl {
-        match p.list_waiting().await {
-            Ok(v) => tag_and_extend(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_waiting failed: {e}"),
-        }
-    }
-    for (id, p) in cb {
-        match p.list_waiting().await {
-            Ok(v) => tag_and_extend(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_waiting failed: {e}"),
-        }
-    }
-    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(out)
+    Ok(state.cache.read().await.waiting.clone())
 }
 
 #[tauri::command]
@@ -853,49 +856,7 @@ pub async fn list_repos(
     app: AppHandle,
 ) -> Result<Vec<Repo>, String> {
     state.ensure_initialized(&app).await;
-    let gh: Vec<(String, _)> = state
-        .github
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let gl: Vec<(String, _)> = state
-        .gitlab
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let cb: Vec<(String, _)> = state
-        .codeberg
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-
-    let mut out = Vec::new();
-    for (id, p) in gh {
-        match p.list_repos().await {
-            Ok(v) => tag_and_extend_repos(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: github[{id}] list_repos failed: {e}"),
-        }
-    }
-    for (id, p) in gl {
-        match p.list_repos().await {
-            Ok(v) => tag_and_extend_repos(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_repos failed: {e}"),
-        }
-    }
-    for (id, p) in cb {
-        match p.list_repos().await {
-            Ok(v) => tag_and_extend_repos(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_repos failed: {e}"),
-        }
-    }
-    out.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
-    Ok(out)
+    Ok(state.cache.read().await.repos.clone())
 }
 
 #[tauri::command]
@@ -904,47 +865,7 @@ pub async fn list_releases(
     app: AppHandle,
 ) -> Result<Vec<Release>, String> {
     state.ensure_initialized(&app).await;
-    let gh: Vec<(String, _)> = state
-        .github
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let gl: Vec<(String, _)> = state
-        .gitlab
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let cb: Vec<(String, _)> = state
-        .codeberg
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let mut out = Vec::new();
-    for (id, p) in gh {
-        match p.list_releases().await {
-            Ok(v) => tag_and_extend_releases(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: github[{id}] list_releases failed: {e}"),
-        }
-    }
-    for (id, p) in gl {
-        match p.list_releases().await {
-            Ok(v) => tag_and_extend_releases(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_releases failed: {e}"),
-        }
-    }
-    for (id, p) in cb {
-        match p.list_releases().await {
-            Ok(v) => tag_and_extend_releases(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_releases failed: {e}"),
-        }
-    }
-    Ok(out)
+    Ok(state.cache.read().await.releases.clone())
 }
 
 #[tauri::command]
@@ -953,76 +874,40 @@ pub async fn list_ci(
     app: AppHandle,
 ) -> Result<Vec<CiRun>, String> {
     state.ensure_initialized(&app).await;
-    let gh: Vec<(String, _)> = state
-        .github
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let gl: Vec<(String, _)> = state
-        .gitlab
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let cb: Vec<(String, _)> = state
-        .codeberg
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let mut out = Vec::new();
-    for (id, p) in gh {
-        match p.list_ci().await {
-            Ok(v) => tag_and_extend_ci(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: github[{id}] list_ci failed: {e}"),
-        }
-    }
-    for (id, p) in gl {
-        match p.list_ci().await {
-            Ok(v) => tag_and_extend_ci(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_ci failed: {e}"),
-        }
-    }
-    for (id, p) in cb {
-        match p.list_ci().await {
-            Ok(v) => tag_and_extend_ci(&mut out, v, &id),
-            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_ci failed: {e}"),
-        }
-    }
-    Ok(out)
+    Ok(state.cache.read().await.ci.clone())
 }
 
-// Four near-identical helpers because the underlying Vec<T> types are
-// distinct — using a generic trait here would buy almost nothing and cost a
-// trait declaration. Each stamps `account_id = Some(id)` on every record
-// before appending so the frontend always knows which account surfaced it.
-fn tag_and_extend(out: &mut Vec<WaitingItem>, items: Vec<WaitingItem>, id: &str) {
-    out.extend(items.into_iter().map(|mut it| {
-        it.account_id = Some(id.to_string());
-        it
-    }));
+/// Request an immediate aggregator tick. Returns as soon as the trigger is
+/// queued; the actual fetch happens in the polling task and surfaces via
+/// the `data-updated` event. Frontend's refresh button wires here.
+#[tauri::command]
+pub async fn aggregator_refresh_now(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    state.ensure_initialized(&app).await;
+    aggregator::refresh_now(&state);
+    Ok(())
 }
-fn tag_and_extend_repos(out: &mut Vec<Repo>, items: Vec<Repo>, id: &str) {
-    out.extend(items.into_iter().map(|mut it| {
-        it.account_id = Some(id.to_string());
-        it
-    }));
+
+/// Snapshot of the aggregator's last-sync metadata so a freshly-opened
+/// window can hydrate its "Synced X ago" footer immediately, without having
+/// to wait for the next tick.
+#[derive(serde::Serialize)]
+pub struct LastSyncInfo {
+    pub synced_at: Option<String>,
+    pub last_error: Option<String>,
 }
-fn tag_and_extend_releases(out: &mut Vec<Release>, items: Vec<Release>, id: &str) {
-    out.extend(items.into_iter().map(|mut it| {
-        it.account_id = Some(id.to_string());
-        it
-    }));
-}
-fn tag_and_extend_ci(out: &mut Vec<CiRun>, items: Vec<CiRun>, id: &str) {
-    out.extend(items.into_iter().map(|mut it| {
-        it.account_id = Some(id.to_string());
-        it
-    }));
+
+#[tauri::command]
+pub async fn last_sync_info(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<LastSyncInfo, String> {
+    let cache = state.cache.read().await;
+    Ok(LastSyncInfo {
+        synced_at: cache.last_synced_at.clone(),
+        last_error: cache.last_error.clone(),
+    })
 }
 
 // ── Local index ─────────────────────────────────────────────────────────────
@@ -1127,11 +1012,12 @@ pub async fn clone_repo(
 }
 
 #[tauri::command]
-pub async fn list_local_repos(app: AppHandle) -> Result<Vec<LocalRepo>, String> {
-    let settings = settings::load(&app)?;
-    tokio::task::spawn_blocking(move || local_index::scan(&settings))
-        .await
-        .map_err(|e| format!("scan task panicked: {e}"))
+pub async fn list_local_repos(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<Vec<LocalRepo>, String> {
+    state.ensure_initialized(&app).await;
+    Ok(state.cache.read().await.locals.clone())
 }
 
 #[tauri::command]
@@ -1140,9 +1026,17 @@ pub fn get_settings(app: AppHandle) -> Result<Settings, String> {
 }
 
 #[tauri::command]
-pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+pub fn save_settings(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+    settings: Settings,
+) -> Result<(), String> {
     settings::save(&app, &settings)?;
     let _ = app.emit(EVT_SETTINGS_CHANGED, ());
+    // The aggregator loop reads poll-interval (and, in Phase 2, notification
+    // toggles) from settings — wake it so the new values take effect on the
+    // current sleep cycle, not after the next tick.
+    state.settings_reload.notify_one();
     Ok(())
 }
 

@@ -308,6 +308,34 @@ export const getSettings = (): Promise<Settings> => invoke('get_settings');
 export const saveSettings = (settings: Settings): Promise<void> =>
   invoke('save_settings', { settings });
 
+/** Aggregator metadata exposed by `last_sync_info` so a freshly-opened
+ *  window can hydrate its "Synced X ago" footer without waiting for the
+ *  next backend tick. */
+export interface LastSyncInfo {
+  /** RFC 3339 timestamp of the most recent successful aggregator tick, or
+   *  `null` before the first tick completes. */
+  synced_at: string | null;
+  /** Non-fatal error surfaced by the last tick (e.g. local-scan failure).
+   *  Per-provider failures are logged backend-side and not propagated here. */
+  last_error: string | null;
+}
+
+/** Read the aggregator's last-sync metadata. The cache itself is read via
+ *  the existing `listWaiting` / `listRepos` / etc. commands. */
+export const lastSyncInfo = (): Promise<LastSyncInfo> => invoke('last_sync_info');
+
+/** Request an immediate aggregator tick. Returns as soon as the trigger is
+ *  queued — the actual fetch happens in the backend polling task and
+ *  surfaces via the `data-updated` event. Wired to the popover and main
+ *  window refresh buttons. */
+export const aggregatorRefreshNow = (): Promise<void> =>
+  invoke('aggregator_refresh_now');
+
+/** Payload emitted by the backend aggregator after each successful tick. */
+export interface DataUpdatedPayload {
+  synced_at: string;
+}
+
 /** Spawn the configured editor command with `path` appended. Fails if no
  *  editor_command is set in Settings. */
 export const runEditor = (path: string): Promise<void> =>

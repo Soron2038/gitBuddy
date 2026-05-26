@@ -20,6 +20,8 @@
     listReleases,
     listCi,
     listLocalRepos,
+    aggregatorRefreshNow,
+    lastSyncInfo,
     getSettings,
     saveSettings,
     runEditor,
@@ -41,6 +43,7 @@
     type CiRun,
     type CiStatus,
     type Settings,
+    type DataUpdatedPayload,
   } from '$lib/data/api';
 
   type View = 'overview' | 'settings';
@@ -548,7 +551,15 @@
     ciRuns = fetchedCi;
     locals = fetchedLocals;
     settings = fetchedSettings;
-    lastSyncedAt = new Date();
+    // The backend aggregator owns the "when did we last sync" truth — the
+    // cache reads above just return whatever the last tick wrote. Falling
+    // back to `null` covers the cold-start window before the first tick.
+    try {
+      const info = await lastSyncInfo();
+      lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
+    } catch {
+      lastSyncedAt = null;
+    }
   }
 
   async function refreshAuth() {
@@ -596,13 +607,30 @@
       }
     })();
 
-    // Provider connect/disconnect from anywhere → refresh auth + data.
+    // Backend aggregator finished a tick → re-pull every list from the
+    // cache. Drives both the periodic poll (~5min) and any manual
+    // `aggregator_refresh_now` trigger from this or the other window.
+    const unlistenDataPromise = listen<DataUpdatedPayload>('data-updated', async () => {
+      if (cancelled) return;
+      try {
+        await reloadFromCache();
+      } finally {
+        refreshing = false;
+        if (refreshSafetyHandle) {
+          clearTimeout(refreshSafetyHandle);
+          refreshSafetyHandle = null;
+        }
+      }
+    });
+
+    // Provider connect/disconnect from anywhere → refresh auth headers.
+    // The auth command also kicks the backend aggregator, so a follow-up
+    // `data-updated` will repopulate the lists shortly — no need to call
+    // `loadAllData` from here.
     const unlistenProviderPromise = listen('provider-changed', async () => {
       try {
         await refreshAuth();
-        if (connected) {
-          await loadAllData();
-        } else {
+        if (!connected) {
           items = [];
           repos = [];
           releases = [];
@@ -635,23 +663,44 @@
 
     return () => {
       cancelled = true;
+      void unlistenDataPromise.then((u) => u());
       void unlistenProviderPromise.then((u) => u());
       void unlistenSettingsPromise.then((u) => u());
       void unlistenNavPromise.then((u) => u());
     };
   });
 
+  /** Re-read every visible list from the backend cache. The aggregator
+   *  loop fills the cache; this just pulls the snapshot. Both the
+   *  data-updated subscription below and the manual refresh button route
+   *  through here. */
+  async function reloadFromCache() {
+    if (!connected) return;
+    try {
+      await loadAllData();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  let refreshSafetyHandle: ReturnType<typeof setTimeout> | null = null;
+
   async function refresh() {
     if (!connected || refreshing) return;
     refreshing = true;
     error = null;
     try {
-      await loadAllData();
+      await aggregatorRefreshNow();
     } catch (e) {
       error = String(e);
-    } finally {
       refreshing = false;
+      return;
     }
+    // The next `data-updated` event flips `refreshing` back to false and
+    // re-pulls the cache. Safety timeout in case the backend tick is
+    // unusually slow or the event was missed.
+    if (refreshSafetyHandle) clearTimeout(refreshSafetyHandle);
+    refreshSafetyHandle = setTimeout(() => (refreshing = false), 10_000);
   }
 
   // ── Live sync timer ──────────────────────────────────────────────────
@@ -671,13 +720,10 @@
   }
   let syncText = $derived(humaniseSync(lastSyncedAt, nowTick));
 
-  // ── Polling ──────────────────────────────────────────────────────────
-  const POLL_INTERVAL_MS = 5 * 60 * 1000;
-  $effect(() => {
-    if (!connected) return;
-    const handle = setInterval(() => void refresh(), POLL_INTERVAL_MS);
-    return () => clearInterval(handle);
-  });
+  // Polling lives in the backend aggregator now — it fires `data-updated`
+  // after every tick (see the `onMount` listener block above). The
+  // `nowTick` effect above only drives the "Synced X ago" text counter;
+  // it does not refetch data.
 
   // ── Window-local keyboard shortcuts ─────────────────────────────────
   $effect(() => {

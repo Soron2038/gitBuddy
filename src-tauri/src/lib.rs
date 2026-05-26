@@ -6,6 +6,7 @@
 // come in later milestones — see PRD.md.
 
 mod accounts;
+mod aggregator;
 mod codeberg;
 mod commands;
 mod github;
@@ -66,6 +67,8 @@ pub fn run() {
             commands::list_releases,
             commands::list_ci,
             commands::list_local_repos,
+            commands::aggregator_refresh_now,
+            commands::last_sync_info,
             commands::clone_repo,
             commands::get_settings,
             commands::save_settings,
@@ -80,10 +83,14 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
-            // Keychain restore happens lazily on the first `gh_status` call
-            // (see `AppState::ensure_initialized`) — a previous eager-spawn
-            // version could race against the popover webview, which loads
-            // immediately and calls `gh_status` from its `onMount`.
+            // Spawn the aggregator polling task. The first thing it does is
+            // call `ensure_initialized` (keychain restore + account
+            // migrations), so all subsequent ticks see fully-hydrated
+            // provider HashMaps. Both windows subscribe to the `data-updated`
+            // event the loop emits and re-read their views via the
+            // `list_*` commands, which are cache reads.
+            let state = app.state::<Arc<AppState>>().inner().clone();
+            aggregator::spawn_loop(app.handle().clone(), state);
 
             // ── Tray menu (right-click) ─────────────────────────────────
             let open_main =

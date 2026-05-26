@@ -24,6 +24,8 @@
     listReleases,
     listCi,
     listLocalRepos,
+    aggregatorRefreshNow,
+    lastSyncInfo,
     getSettings,
     runEditor,
     indexLocalByRemote,
@@ -41,6 +43,7 @@
     type CiRun,
     type CiStatus,
     type Settings,
+    type DataUpdatedPayload,
   } from '$lib/data/api';
 
   type Tab = 'waiting' | 'repos' | 'releases';
@@ -420,10 +423,12 @@
     menuOpen = true;
   }
 
-  async function refresh() {
+  /** Re-read every visible list from the backend cache. The aggregator
+   *  loop fills the cache; this just pulls the snapshot and runs the
+   *  Phase 1 notification diff. The data-updated subscription below
+   *  drives this on every tick; `refresh()` triggers a tick first. */
+  async function reloadFromCache() {
     if (!connected) return;
-    refreshing = true;
-    error = null;
     try {
       const promises: Array<Promise<unknown>> = [
         listWaiting().then((v) => (items = v)),
@@ -437,13 +442,32 @@
         promises.push(listReleases().then((v) => (releases = v)));
       }
       await Promise.all(promises);
-      lastSyncedAt = new Date();
+      const info = await lastSyncInfo();
+      lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
       await notifyNewWaiting(items);
     } catch (e) {
       error = String(e);
-    } finally {
-      refreshing = false;
     }
+  }
+
+  let refreshSafetyHandle: ReturnType<typeof setTimeout> | null = null;
+
+  async function refresh() {
+    if (!connected || refreshing) return;
+    refreshing = true;
+    error = null;
+    try {
+      await aggregatorRefreshNow();
+    } catch (e) {
+      error = String(e);
+      refreshing = false;
+      return;
+    }
+    // The next `data-updated` event will flip `refreshing` back to false
+    // and re-pull the cache. Keep a safety timeout in case the backend
+    // tick is unusually slow or the event was missed.
+    if (refreshSafetyHandle) clearTimeout(refreshSafetyHandle);
+    refreshSafetyHandle = setTimeout(() => (refreshing = false), 10_000);
   }
 
   // Lazy-load repos + CI status the first time the user switches to the
@@ -538,23 +562,31 @@
   });
   let syncText = $derived(humaniseSync(lastSyncedAt, now));
 
-  // Auto-refresh every 5 minutes while any provider is connected.
-  const POLL_INTERVAL_MS = 5 * 60 * 1000;
-  $effect(() => {
-    if (!connected) return;
-    const handle = setInterval(() => {
-      void refresh();
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(handle);
-  });
-
-  // Cross-window sync. The main window owns settings + the disconnect /
-  // add-provider UI, so we listen for its events and re-fetch on demand:
-  //   * `provider-changed` — token added or removed somewhere; refresh auth
+  // Cross-window sync. The backend aggregator owns the polling cadence
+  // (~5 min default) and fires `data-updated` after each tick; both windows
+  // re-read the cache then. Auth and settings changes piggy-back on the
+  // same machinery so the windows stay consistent:
+  //   * `data-updated`     — fresh aggregator tick landed; re-pull lists.
+  //   * `provider-changed` — token added or removed; auth heads change.
+  //                          The auth command also triggers an immediate
+  //                          aggregator tick, so the data-updated handler
+  //                          will re-pull the new account's items shortly.
   //   * `settings-changed` — notifications toggle, editor command, etc.
   $effect(() => {
+    let unlistenData: (() => void) | null = null;
     let unlistenProvider: (() => void) | null = null;
     let unlistenSettings: (() => void) | null = null;
+
+    void listen<DataUpdatedPayload>('data-updated', async () => {
+      await reloadFromCache();
+      refreshing = false;
+      if (refreshSafetyHandle) {
+        clearTimeout(refreshSafetyHandle);
+        refreshSafetyHandle = null;
+      }
+    }).then((u) => {
+      unlistenData = u;
+    });
 
     void listen<unknown>('provider-changed', async () => {
       try {
@@ -566,12 +598,11 @@
         viewer = ghViewer;
         gl = glRes;
         cb = cbRes;
-        if (viewer || gl || cb) {
-          items = await listWaiting();
-          lastSyncedAt = new Date();
-        } else {
+        if (!(viewer || gl || cb)) {
           items = [];
         }
+        // The auth command already kicked the aggregator; data-updated will
+        // refresh the rest of the lists shortly.
       } catch (e) {
         error = String(e);
       }
@@ -590,6 +621,7 @@
     });
 
     return () => {
+      unlistenData?.();
       unlistenProvider?.();
       unlistenSettings?.();
     };
