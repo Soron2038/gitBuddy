@@ -161,7 +161,30 @@ export interface LocalRepo {
   detached: boolean;
 }
 
+/** Notification settings. Three independently-toggleable gates, in
+ *  decreasing scope: master switch (`enabled`) → Do-Not-Disturb (a quick
+ *  silence that preserves per-event preferences) → per-event toggles. */
+export interface NotificationSettings {
+  enabled: boolean;
+  do_not_disturb: boolean;
+  events: NotificationEventToggles;
+}
+
+export interface NotificationEventToggles {
+  /** Issue/PR/MR assigned, review-requested, mentioned, or authored. */
+  waiting: boolean;
+  /** New release published in a repo the account has access to. */
+  releases: boolean;
+  /** CI run failed and was triggered by the viewer (Phase 3 — the
+   *  toggle persists today but the diff that drives it lands later). */
+  ci_failure: boolean;
+}
+
+/** Persistent user settings. Schema v2 (M6.5+). The on-disk file is
+ *  silently migrated from v1 by the Rust loader on first launch after an
+ *  upgrade, so the frontend doesn't need to know about the older shape. */
 export interface Settings {
+  version: number;
   scan_roots: string[];
   scan_ignore: string[];
   gitlab_base_url: string | null;
@@ -169,10 +192,19 @@ export interface Settings {
   /** Shell command spawned by "Open in editor" — repo path is appended.
    *  Empty/null disables that quick-action menu entry. */
   editor_command: string | null;
-  /** When true, the popover fires a native notification whenever a poll
-   *  surfaces a waiting item that wasn't there on the previous refresh. */
-  notifications_enabled: boolean;
+  notifications: NotificationSettings;
+  /** Aggregator polling cadence in minutes. Clamped backend-side to
+   *  `[1, 60]`; the UI should also enforce that band so a user can't
+   *  drag the slider to a silently-corrected value. */
+  poll_interval_minutes: number;
 }
+
+/** Minimum / maximum / default for `poll_interval_minutes`, mirrored
+ *  from the Rust `settings` module so the slider stays in sync without
+ *  another round-trip. */
+export const POLL_INTERVAL_MIN = 1;
+export const POLL_INTERVAL_MAX = 60;
+export const POLL_INTERVAL_DEFAULT = 5;
 
 export interface Release {
   repo_id: string;

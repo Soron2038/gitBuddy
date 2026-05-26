@@ -30,18 +30,13 @@ use crate::{
     github::GitHubProvider,
     gitlab::GitLabProvider,
     local_index::{self, LocalRepo},
-    settings,
-    types::{CiRun, Release, Repo, WaitingItem},
+    notifications::{self, Kind, SeenStore},
+    settings::{self, NotificationSettings, Settings, POLL_INTERVAL_DEFAULT},
+    types::{CiRun, ItemReason, Release, Repo, WaitingItem},
 };
 use chrono::Utc;
 use std::{sync::Arc, time::Duration};
 use tauri::{AppHandle, Emitter};
-
-/// Default poll cadence when settings don't override it. Matches the
-/// pre-aggregator frontend `POLL_INTERVAL_MS` so existing users see no
-/// behaviour change on upgrade. Phase 2 makes this user-configurable via
-/// `settings.poll_interval_minutes` and clamps to 1..=60.
-const DEFAULT_POLL_INTERVAL_MINUTES: u64 = 5;
 
 /// Snapshot of every aggregated list as of the most recent successful tick.
 /// `last_synced_at` is `None` until the first tick completes, so the UI can
@@ -77,6 +72,9 @@ async fn run_loop(app: &AppHandle, state: &AppState) {
     loop {
         tick(app, state).await;
 
+        // Re-read the interval *after* each tick so a save_settings during
+        // a tick is picked up next sleep — combined with the `Notify`
+        // wakeup below, this gives near-instant feedback on a slider drag.
         let sleep_for = current_poll_interval(app);
         tokio::select! {
             _ = tokio::time::sleep(sleep_for) => {}
@@ -84,8 +82,9 @@ async fn run_loop(app: &AppHandle, state: &AppState) {
                 // Manual refresh or auth change — tick immediately.
             }
             _ = state.settings_reload.notified() => {
-                // Settings changed; new poll interval takes effect after
-                // the next tick reads it.
+                // Settings changed; the new poll interval takes effect on
+                // the very next iteration because `current_poll_interval`
+                // is called above.
             }
         }
     }
@@ -98,12 +97,28 @@ pub fn refresh_now(state: &AppState) {
     state.refresh_trigger.notify_one();
 }
 
-/// Run a single fetch + cache write + event emit. Public so `commands.rs`
-/// can invoke it synchronously during tests; the production path runs it
-/// only via `run_loop`.
+/// Run a single fetch + cache write + diff + notify + event emit.
+/// Public so `commands.rs` can invoke it during tests; production drives
+/// it from `run_loop`.
 pub async fn tick(app: &AppHandle, state: &AppState) {
     let snapshot = fetch_all(app, state).await;
     let synced_at = Utc::now().to_rfc3339();
+    let now_ts = synced_at.clone();
+
+    // Load settings + seen-store outside the cache write lock so the
+    // notification step (which doesn't touch the cache) can't be blocked
+    // by a reader. Failures load defaults instead of aborting — the worst
+    // case is a one-tick over-notify, which is preferable to skipping
+    // notifications altogether on a transient disk hiccup.
+    let settings = settings::load(app).unwrap_or_default();
+    let mut store = notifications::load(app);
+    notifications::prune(&mut store);
+
+    diff_and_notify(app, &settings.notifications, &snapshot, &mut store, &now_ts);
+
+    if let Err(e) = notifications::save(app, &store) {
+        eprintln!("gitbuddy: persisting notifications.json failed: {e}");
+    }
 
     {
         let mut cache = state.cache.write().await;
@@ -118,6 +133,104 @@ pub async fn tick(app: &AppHandle, state: &AppState) {
 
     if let Err(e) = app.emit("data-updated", DataUpdatedPayload { synced_at }) {
         eprintln!("gitbuddy: emitting data-updated failed: {e}");
+    }
+}
+
+/// Compare the current snapshot against the persisted seen-store. On a
+/// cold start (`initialised == false`) we *only* seed — every visible
+/// item is recorded as already-seen and the flag flips. From the next
+/// tick on, anything not in the store is genuinely new and produces a
+/// `notifications::fire` call.
+///
+/// Mutates the store in place; the caller is responsible for persisting
+/// afterwards. Kept in this module (not `notifications`) because the diff
+/// shape is aggregator-internal — `notifications` deliberately doesn't
+/// know what a `WaitingItem` looks like.
+fn diff_and_notify(
+    app: &AppHandle,
+    settings: &NotificationSettings,
+    snapshot: &FetchSnapshot,
+    store: &mut SeenStore,
+    now_ts: &str,
+) {
+    let cold_start = !store.initialised;
+
+    for item in &snapshot.waiting {
+        let key = waiting_key(item);
+        if cold_start || store.waiting.contains_key(&key) {
+            store
+                .waiting
+                .entry(key)
+                .or_insert_with(|| now_ts.to_string());
+            continue;
+        }
+        store.waiting.insert(key, now_ts.to_string());
+        notifications::fire(
+            app,
+            settings,
+            Kind::Waiting {
+                reason_label: waiting_reason_label(item.reason).to_string(),
+                repo: item.repo.clone(),
+                title: item.title.clone(),
+            },
+        );
+    }
+
+    for release in &snapshot.releases {
+        let key = release_key(release);
+        if cold_start || store.releases.contains_key(&key) {
+            store
+                .releases
+                .entry(key)
+                .or_insert_with(|| now_ts.to_string());
+            continue;
+        }
+        // The provider already marks "published within last 7 days" via
+        // `is_new`. Treat older releases as backfill (the user just
+        // connected an account that's been around for a while) so we
+        // don't spam on first sight of an old changelog.
+        if !release.is_new {
+            store.releases.insert(key, now_ts.to_string());
+            continue;
+        }
+        store.releases.insert(key, now_ts.to_string());
+        notifications::fire(
+            app,
+            settings,
+            Kind::Release {
+                repo: release.repo_full_name.clone(),
+                tag_name: release.tag.clone(),
+            },
+        );
+    }
+
+    // CI-failure diff lands in Phase 3 (needs per-provider `author_login`).
+    // The CI side of the store is touched only by `prune` until then.
+
+    if cold_start {
+        store.initialised = true;
+    }
+}
+
+fn waiting_key(item: &WaitingItem) -> String {
+    // Composite of account + provider-stable id so the same issue id
+    // observed via two different accounts produces two store rows
+    // (otherwise one account's view could mask another's notification).
+    let account = item.account_id.as_deref().unwrap_or("unknown");
+    format!("{account}:{}", item.id)
+}
+
+fn release_key(r: &Release) -> String {
+    let account = r.account_id.as_deref().unwrap_or("unknown");
+    format!("{account}:{}:{}", r.repo_full_name, r.tag)
+}
+
+fn waiting_reason_label(reason: ItemReason) -> &'static str {
+    match reason {
+        ItemReason::Assigned => "Assigned to you",
+        ItemReason::Review => "Review requested",
+        ItemReason::Authored => "Update on your PR",
+        ItemReason::Mentioned => "Mentioned",
     }
 }
 
@@ -295,10 +408,16 @@ fn tag_extend_ci(out: &mut Vec<CiRun>, items: Vec<CiRun>, id: &str) {
     }));
 }
 
-/// Read the user's configured poll interval, clamped to a sane band. Phase 2
-/// wires a real `Settings.poll_interval_minutes` field through here; until
-/// then we hardcode the legacy 5-minute default so the loop behaves exactly
-/// like the JS `setInterval` it replaces.
-fn current_poll_interval(_app: &AppHandle) -> Duration {
-    Duration::from_secs(DEFAULT_POLL_INTERVAL_MINUTES * 60)
+/// Read the user's configured poll interval from Settings. `Settings::load`
+/// already clamps `poll_interval_minutes` to `[1, 60]`, so this never
+/// produces a sleep less than a minute or more than an hour. A load
+/// failure (corrupt file, missing dir) falls back to the default rather
+/// than letting the loop panic — better to keep polling at 5 min than to
+/// silently stop.
+fn current_poll_interval(app: &AppHandle) -> Duration {
+    let minutes: u64 = settings::load(app)
+        .as_ref()
+        .map(|s: &Settings| s.poll_interval_minutes)
+        .unwrap_or(POLL_INTERVAL_DEFAULT) as u64;
+    Duration::from_secs(minutes * 60)
 }

@@ -3,10 +3,15 @@
   import { listen } from '@tauri-apps/api/event';
   import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+  // The popover still calls `requestPermission` on first mount so macOS
+  // surfaces its one-shot permission prompt with a real WebView gesture
+  // context — issuing it from the backend instead reportedly suppresses
+  // the dialog. The actual notification fan-out lives in the Rust
+  // aggregator now (see `src-tauri/src/notifications.rs`); `sendNotification`
+  // is no longer called from the frontend.
   import {
     isPermissionGranted,
     requestPermission,
-    sendNotification,
   } from '@tauri-apps/plugin-notification';
   import Buddy from '$lib/Buddy.svelte';
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
@@ -75,16 +80,22 @@
   let codebergBaseInput = $state('https://codeberg.org');
   let connecting = $state(false);
 
-  // Settings is read-only here — toggling lives in the main window. We
-  // still load it on mount so `notifications_enabled` gates the popover's
-  // notification firing without an extra round-trip per check.
+  // Settings is read-only here — toggling lives in the main window.
+  // Loaded on mount so e.g. `editor_command` is available for the row
+  // context menu without an extra round-trip per render.
   let settings: Settings = $state({
+    version: 2,
     scan_roots: [],
     scan_ignore: [],
     gitlab_base_url: null,
     codeberg_base_url: null,
     editor_command: null,
-    notifications_enabled: true,
+    notifications: {
+      enabled: true,
+      do_not_disturb: false,
+      events: { waiting: true, releases: true, ci_failure: true },
+    },
+    poll_interval_minutes: 5,
   });
 
   // Context menu state — shared instance, opened on right-click of any
@@ -151,83 +162,12 @@
   let lastSyncedAt: Date | null = $state(null);
 
   // ── Notifications ─────────────────────────────────────────────────────
-  // Persist the set of IDs we've already surfaced so a freshly-launched app
-  // doesn't fire 12 notifications for items the user already saw last time.
-  // localStorage works fine in the popover webview (it stays loaded across
-  // popover show/hide) and survives app restarts.
-  const SEEN_KEY = 'gitbuddy:seen-waiting-ids';
-  const SEEN_INITIALISED_KEY = 'gitbuddy:seen-initialised';
-  let seenWaitingIds: Set<string> = new Set();
+  // Diffing + firing now lives in the Rust aggregator (`notifications.rs`),
+  // persistent state in `notifications.json`. The webview only owns the
+  // OS permission prompt — macOS surfaces it once per install and needs
+  // a real WebView gesture context, so issuing it from the backend
+  // suppresses the dialog. After that, the popover is purely a viewer.
   let notificationPermission: 'granted' | 'denied' | 'unrequested' = $state('unrequested');
-
-  function loadSeen() {
-    try {
-      const raw = localStorage.getItem(SEEN_KEY);
-      if (raw) seenWaitingIds = new Set(JSON.parse(raw) as string[]);
-    } catch {
-      // Corrupt or missing — start fresh.
-      seenWaitingIds = new Set();
-    }
-  }
-
-  function persistSeen() {
-    try {
-      localStorage.setItem(SEEN_KEY, JSON.stringify([...seenWaitingIds]));
-    } catch {
-      // Quota or private mode — non-fatal.
-    }
-  }
-
-  /** Diff `items` against the persisted "seen" set; fire a native
-   *  notification for each genuinely-new entry, then mark them seen. On
-   *  the very first refresh of a fresh install we suppress notifications
-   *  to avoid spamming the user with the entire backlog at once. */
-  async function notifyNewWaiting(currentItems: WaitingItem[]) {
-    if (!settings.notifications_enabled) return;
-    if (notificationPermission !== 'granted') return;
-
-    const firstRun = !localStorage.getItem(SEEN_INITIALISED_KEY);
-    if (firstRun) {
-      seenWaitingIds = new Set(currentItems.map((i) => i.id));
-      localStorage.setItem(SEEN_INITIALISED_KEY, '1');
-      persistSeen();
-      return;
-    }
-
-    const newOnes = currentItems.filter((i) => !seenWaitingIds.has(i.id));
-    if (newOnes.length > 0) {
-      // Batch large bursts into a single summary so we don't blast the
-      // notification centre on a fresh login or after a long offline period.
-      if (newOnes.length >= 4) {
-        sendNotification({
-          title: 'gitBuddy',
-          body: `${newOnes.length} new things need a look.`,
-        });
-      } else {
-        for (const item of newOnes) {
-          sendNotification({
-            title: notificationTitleFor(item),
-            body: `${item.title}\n${item.repo}`,
-          });
-        }
-      }
-    }
-
-    seenWaitingIds = new Set(currentItems.map((i) => i.id));
-    persistSeen();
-  }
-
-  function notificationTitleFor(item: WaitingItem): string {
-    const reason =
-      item.reason === 'assigned'
-        ? 'Assigned to you'
-        : item.reason === 'review'
-          ? 'Review requested'
-          : item.reason === 'authored'
-            ? 'Update on your PR'
-            : 'Mentioned';
-    return `gitBuddy — ${reason}`;
-  }
 
   /** Fetch waiting items (aggregated across providers) and the local clone
    *  index in parallel. Shared between the on-mount and post-connect paths. */
@@ -241,14 +181,16 @@
     ]);
     items = fetchedItems;
     locals = fetchedLocals;
-    lastSyncedAt = new Date();
-    await notifyNewWaiting(fetchedItems);
+    try {
+      const info = await lastSyncInfo();
+      lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
+    } catch {
+      lastSyncedAt = null;
+    }
   }
 
   onMount(async () => {
     try {
-      loadSeen();
-
       // Request notification permission early — macOS only prompts once per
       // app install, after which subsequent calls return the cached result.
       try {
@@ -291,8 +233,12 @@
 
       if (viewer || gl || cb) {
         items = await listWaiting();
-        lastSyncedAt = new Date();
-        await notifyNewWaiting(items);
+        try {
+          const info = await lastSyncInfo();
+          lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
+        } catch {
+          lastSyncedAt = null;
+        }
       }
       locals = await localPromise;
     } catch (e) {
@@ -444,7 +390,6 @@
       await Promise.all(promises);
       const info = await lastSyncInfo();
       lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
-      await notifyNewWaiting(items);
     } catch (e) {
       error = String(e);
     }

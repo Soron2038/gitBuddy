@@ -67,12 +67,18 @@
   let releases: Release[] = $state([]);
   let ciRuns: CiRun[] = $state([]);
   let settings: Settings = $state({
+    version: 2,
     scan_roots: [],
     scan_ignore: [],
     gitlab_base_url: null,
     codeberg_base_url: null,
     editor_command: null,
-    notifications_enabled: true,
+    notifications: {
+      enabled: true,
+      do_not_disturb: false,
+      events: { waiting: true, releases: true, ci_failure: true },
+    },
+    poll_interval_minutes: 5,
   });
 
   // ── UI state ──────────────────────────────────────────────────────────
@@ -865,9 +871,46 @@
     await persistSettings();
   }
 
-  async function toggleNotifications(value: boolean) {
-    if (value === settings.notifications_enabled) return;
-    settings = { ...settings, notifications_enabled: value };
+  async function toggleNotificationsEnabled(value: boolean) {
+    if (value === settings.notifications.enabled) return;
+    settings = {
+      ...settings,
+      notifications: { ...settings.notifications, enabled: value },
+    };
+    await persistSettings();
+  }
+
+  async function toggleDoNotDisturb(value: boolean) {
+    if (value === settings.notifications.do_not_disturb) return;
+    settings = {
+      ...settings,
+      notifications: { ...settings.notifications, do_not_disturb: value },
+    };
+    await persistSettings();
+  }
+
+  async function toggleEventCategory(
+    category: 'waiting' | 'releases' | 'ci_failure',
+    value: boolean,
+  ) {
+    if (value === settings.notifications.events[category]) return;
+    settings = {
+      ...settings,
+      notifications: {
+        ...settings.notifications,
+        events: { ...settings.notifications.events, [category]: value },
+      },
+    };
+    await persistSettings();
+  }
+
+  async function setPollInterval(value: number) {
+    // Clamp UI-side to match the backend band — the slider should never
+    // be able to ship an out-of-range save that the loader silently
+    // corrects (which would look like a UI bug).
+    const clamped = Math.min(60, Math.max(1, Math.round(value)));
+    if (clamped === settings.poll_interval_minutes) return;
+    settings = { ...settings, poll_interval_minutes: clamped };
     await persistSettings();
   }
 
@@ -2269,20 +2312,85 @@
         <section class="set-sec">
           <h3><em>Notifications</em></h3>
           <p class="set-help">
-            Fire a macOS notification when a poll surfaces a new issue, PR
-            or MR that's waiting on you. Releases and CI events join in a
-            later iteration. The actual permission is controlled by macOS —
-            check <em>System Settings → Notifications → gitBuddy</em> if
-            nothing shows up despite this being on.
+            Fire a macOS notification when a poll surfaces something new.
+            The actual permission is controlled by macOS — check
+            <em>System Settings → Notifications → gitBuddy</em> if nothing
+            shows up despite the master switch being on.
           </p>
           <label class="set-toggle">
             <input
               type="checkbox"
-              checked={settings.notifications_enabled}
-              onchange={(e) => toggleNotifications((e.target as HTMLInputElement).checked)}
+              checked={settings.notifications.enabled}
+              onchange={(e) => toggleNotificationsEnabled((e.target as HTMLInputElement).checked)}
             />
             <span>Enable notifications</span>
           </label>
+          <label class="set-toggle" class:set-toggle-muted={!settings.notifications.enabled}>
+            <input
+              type="checkbox"
+              checked={settings.notifications.do_not_disturb}
+              disabled={!settings.notifications.enabled}
+              onchange={(e) => toggleDoNotDisturb((e.target as HTMLInputElement).checked)}
+            />
+            <span>Do not disturb (temporary silence)</span>
+          </label>
+
+          <div class="set-subhead" class:set-subhead-muted={!settings.notifications.enabled}>
+            Notify me about
+          </div>
+          <label class="set-toggle" class:set-toggle-muted={!settings.notifications.enabled}>
+            <input
+              type="checkbox"
+              checked={settings.notifications.events.waiting}
+              disabled={!settings.notifications.enabled}
+              onchange={(e) => toggleEventCategory('waiting', (e.target as HTMLInputElement).checked)}
+            />
+            <span>Issues & PRs waiting on me <span class="set-toggle-hint">(assigned, review, mention, authored)</span></span>
+          </label>
+          <label class="set-toggle" class:set-toggle-muted={!settings.notifications.enabled}>
+            <input
+              type="checkbox"
+              checked={settings.notifications.events.releases}
+              disabled={!settings.notifications.enabled}
+              onchange={(e) => toggleEventCategory('releases', (e.target as HTMLInputElement).checked)}
+            />
+            <span>New releases</span>
+          </label>
+          <label class="set-toggle set-toggle-muted">
+            <input
+              type="checkbox"
+              checked={settings.notifications.events.ci_failure}
+              disabled
+              onchange={(e) => toggleEventCategory('ci_failure', (e.target as HTMLInputElement).checked)}
+            />
+            <span>CI failures I triggered <span class="set-toggle-hint">(landing next iteration)</span></span>
+          </label>
+        </section>
+
+        <!-- Polling cadence -->
+        <section class="set-sec">
+          <h3>Sync <em>frequency</em></h3>
+          <p class="set-help">
+            How often gitBuddy polls every connected forge for new items.
+            Lower values feel snappier but burn rate-limit budget; the
+            default 5&nbsp;min is what most users want. Changes take
+            effect immediately — no restart needed.
+          </p>
+          <div class="set-slider-row">
+            <input
+              type="range"
+              min="1"
+              max="60"
+              step="1"
+              value={settings.poll_interval_minutes}
+              oninput={(e) => setPollInterval(Number((e.target as HTMLInputElement).value))}
+              class="set-slider"
+              aria-label="Sync interval in minutes"
+            />
+            <span class="set-slider-value">
+              every {settings.poll_interval_minutes}&nbsp;min
+            </span>
+          </div>
         </section>
 
         {#if error && !addingProvider}
@@ -3233,6 +3341,67 @@
   }
   .set-toggle input[type='checkbox']:checked::after {
     transform: translateX(14px);
+  }
+  .set-toggle {
+    display: flex;
+    margin-top: 6px;
+  }
+  .set-toggle-muted {
+    color: var(--ink-2);
+    cursor: default;
+  }
+  .set-toggle-muted input[type='checkbox'] {
+    opacity: 0.55;
+    cursor: default;
+  }
+  .set-toggle-hint {
+    color: var(--ink-2);
+    font-size: 12px;
+    margin-left: 4px;
+  }
+  .set-subhead {
+    margin-top: 14px;
+    margin-bottom: 2px;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+  .set-subhead-muted {
+    opacity: 0.6;
+  }
+  .set-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 4px;
+  }
+  .set-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--cream-3);
+    outline: none;
+  }
+  .set-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--terracotta);
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  }
+  .set-slider-value {
+    font-size: 13px;
+    color: var(--ink);
+    min-width: 92px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 
   .prov-list {

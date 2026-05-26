@@ -13,6 +13,7 @@ mod github;
 mod gitlab;
 mod keychain;
 mod local_index;
+mod notifications;
 mod oauth;
 mod settings;
 mod types;
