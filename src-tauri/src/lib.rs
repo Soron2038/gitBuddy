@@ -15,6 +15,7 @@ mod keychain;
 mod local_index;
 mod notifications;
 mod oauth;
+mod provider_util;
 mod settings;
 mod types;
 mod util;
@@ -48,17 +49,11 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(AppState::default()))
         .invoke_handler(tauri::generate_handler![
-            commands::gh_set_token,
-            commands::gh_status,
-            commands::gh_disconnect,
+            commands::provider_set_token,
+            commands::provider_status,
+            commands::provider_disconnect,
             commands::gh_oauth_begin,
             commands::gh_oauth_poll,
-            commands::gl_set_token,
-            commands::gl_status,
-            commands::gl_disconnect,
-            commands::cb_set_token,
-            commands::cb_status,
-            commands::cb_disconnect,
             commands::accounts_list,
             commands::accounts_disconnect,
             commands::open_main,

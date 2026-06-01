@@ -19,7 +19,7 @@ pub async fn save(account: &str, token: &str) -> keyring::Result<()> {
         entry.set_password(&token)
     })
     .await
-    .expect("keychain save task should not panic")
+    .map_err(join_failure)?
 }
 
 /// Load a previously stored token. Returns `Ok(None)` if no entry exists,
@@ -34,10 +34,9 @@ pub async fn load(account: &str) -> keyring::Result<Option<String>> {
         },
     )
     .await
-    .expect("keychain load task should not panic")
+    .map_err(join_failure)?
 }
 
-#[allow(dead_code)] // wired up by the frontend's account-removal UI in a later milestone
 pub async fn delete(account: &str) -> keyring::Result<()> {
     let account = account.to_owned();
     tokio::task::spawn_blocking(
@@ -47,5 +46,14 @@ pub async fn delete(account: &str) -> keyring::Result<()> {
         },
     )
     .await
-    .expect("keychain delete task should not panic")
+    .map_err(join_failure)?
+}
+
+/// A panic or cancellation inside the `spawn_blocking` Keychain task surfaces
+/// here as a `JoinError`. Rather than `.expect()` (which would unwind into
+/// Tauri's runtime and take the whole app down on a Security-framework
+/// hiccup), wrap it as a normal `keyring::Error` so the caller handles it
+/// like any other Keychain failure.
+fn join_failure(e: tokio::task::JoinError) -> keyring::Error {
+    keyring::Error::PlatformFailure(Box::new(e))
 }

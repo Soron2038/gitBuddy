@@ -6,29 +6,24 @@
 //! single-digit account counts and avoids hand-rolling a GraphQL client for
 //! milestone one of the providers.
 
+use crate::provider_util::{
+    collapse_ci_status, humanise_age, reason_priority, within_days, ProviderBackend, ProviderError,
+};
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use thiserror::Error;
 
 const API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = concat!("gitBuddy/", env!("CARGO_PKG_VERSION"));
 const ACCEPT: &str = "application/vnd.github+json";
 
-#[derive(Debug, Error)]
-pub enum GitHubError {
-    #[error("network error: {0}")]
-    Network(#[from] reqwest::Error),
-    #[error("authentication failed — check that the token is valid and has `repo` scope")]
-    Unauthorized,
-    #[error("GitHub API returned HTTP {0}")]
-    HttpStatus(StatusCode),
-}
+/// Hint surfaced when GitHub rejects the token — names the scope to check.
+const AUTH_HINT: &str = "check that the token is valid and has `repo` scope";
 
-pub type Result<T> = std::result::Result<T, GitHubError>;
+pub type Result<T> = std::result::Result<T, ProviderError>;
 
 pub struct GitHubProvider {
     client: Client,
@@ -48,13 +43,6 @@ impl GitHubProvider {
             token,
             viewer,
         })
-    }
-
-    /// Bearer token kept for outbound HTTPS git operations (clone, fetch).
-    /// Already in the binary's process memory — exposing it through a method
-    /// just lets sibling modules grab it without hitting the Keychain again.
-    pub fn token(&self) -> &str {
-        &self.token
     }
 
     /// Items where the user is assigned, review-requested, authored, or
@@ -94,10 +82,11 @@ impl GitHubProvider {
         for h in handles {
             match h.await {
                 Ok(Ok(mut v)) => items.append(&mut v),
-                Ok(Err(e)) => return Err(e),
-                // A panic inside a spawned task — surface as a generic error
-                // so the UI doesn't silently lose results without explanation.
-                Err(_) => return Err(GitHubError::HttpStatus(StatusCode::INTERNAL_SERVER_ERROR)),
+                // Hard auth failures propagate; every other per-scope error
+                // (rate limit, transient 5xx, or a panicked task) is tolerated
+                // so one failing filter doesn't blank the whole "waiting" list.
+                Ok(Err(e @ ProviderError::Unauthorized(_))) => return Err(e),
+                Ok(Err(_)) | Err(_) => {}
             }
         }
 
@@ -145,8 +134,14 @@ impl GitHubProvider {
 
             match resp.status() {
                 s if s.is_success() => {}
-                StatusCode::UNAUTHORIZED => return Err(GitHubError::Unauthorized),
-                s => return Err(GitHubError::HttpStatus(s)),
+                StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
+                s => {
+                    return Err(ProviderError::HttpStatus {
+                        provider: "GitHub",
+                        base_url: None,
+                        status: s,
+                    })
+                }
             }
 
             let raw: Vec<RawRepo> = resp.json().await?;
@@ -224,6 +219,31 @@ impl GitHubProvider {
     }
 }
 
+#[async_trait::async_trait]
+impl ProviderBackend for GitHubProvider {
+    fn viewer(&self) -> &Viewer {
+        &self.viewer
+    }
+    fn token(&self) -> &str {
+        &self.token
+    }
+    fn base_url(&self) -> Option<&str> {
+        None
+    }
+    async fn list_waiting(&self) -> Result<Vec<WaitingItem>> {
+        self.list_waiting().await
+    }
+    async fn list_repos(&self) -> Result<Vec<Repo>> {
+        self.list_repos().await
+    }
+    async fn list_releases(&self) -> Result<Vec<Release>> {
+        self.list_releases().await
+    }
+    async fn list_ci(&self) -> Result<Vec<CiRun>> {
+        self.list_ci().await
+    }
+}
+
 /// Top-level wrapper of the `/repos/{owner}/{name}/actions/runs` response.
 /// Hoisted to module level so the deserializer can be exercised by unit
 /// tests against recorded fixtures without spinning up a real HTTP client.
@@ -280,11 +300,17 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
                 account_id: None,
             }));
         }
-        StatusCode::UNAUTHORIZED => return Err(GitHubError::Unauthorized),
+        StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         // 403 can happen when the repo's owner has disabled actions for
         // forks; treat it the same as "no CI" to keep the batch flowing.
         StatusCode::FORBIDDEN => return Ok(None),
-        s => return Err(GitHubError::HttpStatus(s)),
+        s => {
+            return Err(ProviderError::HttpStatus {
+                provider: "GitHub",
+                base_url: None,
+                status: s,
+            })
+        }
     }
 
     let body: WorkflowRunsResp = resp.json().await?;
@@ -313,23 +339,6 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
     }))
 }
 
-/// Collapse GitHub's status × conclusion matrix into our four-state enum.
-/// `status` is one of queued / in_progress / completed; `conclusion` is only
-/// meaningful when status is completed.
-fn collapse_ci_status(status: &str, conclusion: Option<&str>) -> CiStatus {
-    if status != "completed" {
-        return CiStatus::Run;
-    }
-    match conclusion {
-        Some("success") => CiStatus::Ok,
-        Some("failure" | "timed_out" | "action_required" | "startup_failure") => CiStatus::Fail,
-        Some("cancelled" | "skipped") => CiStatus::Cancelled,
-        Some("neutral") => CiStatus::Ok,
-        // stale, or some future conclusion value we don't recognise yet
-        _ => CiStatus::None,
-    }
-}
-
 async fn fetch_latest_release(
     client: &Client,
     token: &str,
@@ -350,8 +359,14 @@ async fn fetch_latest_release(
         s if s.is_success() => {}
         // 404 just means "no releases yet" — not an error.
         StatusCode::NOT_FOUND => return Ok(None),
-        StatusCode::UNAUTHORIZED => return Err(GitHubError::Unauthorized),
-        s => return Err(GitHubError::HttpStatus(s)),
+        StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
+        s => {
+            return Err(ProviderError::HttpStatus {
+                provider: "GitHub",
+                base_url: None,
+                status: s,
+            })
+        }
     }
 
     #[derive(Deserialize)]
@@ -386,12 +401,6 @@ async fn fetch_latest_release(
         age_human: String::new(),
         account_id: None,
     }))
-}
-
-fn within_days(timestamp: &str, now: &DateTime<Utc>, days: i64) -> bool {
-    DateTime::parse_from_rfc3339(timestamp)
-        .map(|t| (*now - t.with_timezone(&Utc)).num_days() <= days)
-        .unwrap_or(false)
 }
 
 #[derive(Deserialize)]
@@ -461,8 +470,12 @@ async fn fetch_viewer(client: &Client, token: &str) -> Result<Viewer> {
                 name: r.name,
             })
         }
-        StatusCode::UNAUTHORIZED => Err(GitHubError::Unauthorized),
-        s => Err(GitHubError::HttpStatus(s)),
+        StatusCode::UNAUTHORIZED => Err(ProviderError::Unauthorized(AUTH_HINT)),
+        s => Err(ProviderError::HttpStatus {
+            provider: "GitHub",
+            base_url: None,
+            status: s,
+        }),
     }
 }
 
@@ -482,8 +495,14 @@ async fn search_issues(
 
     match resp.status() {
         s if s.is_success() => {}
-        StatusCode::UNAUTHORIZED => return Err(GitHubError::Unauthorized),
-        s => return Err(GitHubError::HttpStatus(s)),
+        StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
+        s => {
+            return Err(ProviderError::HttpStatus {
+                provider: "GitHub",
+                base_url: None,
+                status: s,
+            })
+        }
     }
 
     #[derive(Deserialize)]
@@ -535,36 +554,6 @@ fn parse_repo(api_url: &str) -> String {
         .unwrap_or_else(|| api_url.to_string())
 }
 
-fn humanise_age(ts: &str, now: DateTime<Utc>) -> String {
-    let Ok(t) = DateTime::parse_from_rfc3339(ts) else {
-        return "?".into();
-    };
-    let delta = now - t.with_timezone(&Utc);
-    let mins = delta.num_minutes();
-    if mins < 1 {
-        "now".into()
-    } else if mins < 60 {
-        format!("{mins}m")
-    } else if mins < 60 * 24 {
-        format!("{}h", mins / 60)
-    } else if mins < 60 * 24 * 30 {
-        format!("{}d", mins / (60 * 24))
-    } else if mins < 60 * 24 * 365 {
-        format!("{}mo", mins / (60 * 24 * 30))
-    } else {
-        format!("{}y", mins / (60 * 24 * 365))
-    }
-}
-
-fn reason_priority(r: ItemReason) -> u8 {
-    match r {
-        ItemReason::Assigned => 0,
-        ItemReason::Review => 1,
-        ItemReason::Authored => 2,
-        ItemReason::Mentioned => 3,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,16 +564,6 @@ mod tests {
             parse_repo("https://api.github.com/repos/anthropics/claude-code"),
             "anthropics/claude-code"
         );
-    }
-
-    #[test]
-    fn humanises_age_buckets() {
-        let now = DateTime::parse_from_rfc3339("2026-05-12T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        assert_eq!(humanise_age("2026-05-12T11:30:00Z", now), "30m");
-        assert_eq!(humanise_age("2026-05-12T08:00:00Z", now), "4h");
-        assert_eq!(humanise_age("2026-05-09T12:00:00Z", now), "3d");
     }
 
     #[test]

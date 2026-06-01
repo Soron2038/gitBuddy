@@ -206,6 +206,26 @@ export const POLL_INTERVAL_MIN = 1;
 export const POLL_INTERVAL_MAX = 60;
 export const POLL_INTERVAL_DEFAULT = 5;
 
+/** A fresh v2 Settings object with backend defaults. Both windows seed their
+ *  `settings` state with this before the first `getSettings()` resolves, so
+ *  the shape lives here instead of being copy-pasted into each route. */
+export function defaultSettings(): Settings {
+  return {
+    version: 2,
+    scan_roots: [],
+    scan_ignore: [],
+    gitlab_base_url: null,
+    codeberg_base_url: null,
+    editor_command: null,
+    notifications: {
+      enabled: true,
+      do_not_disturb: false,
+      events: { waiting: true, releases: true, ci_failure: true },
+    },
+    poll_interval_minutes: POLL_INTERVAL_DEFAULT,
+  };
+}
+
 export interface Release {
   repo_id: string;
   repo_full_name: string;
@@ -240,11 +260,23 @@ export interface CiRun {
 
 // ── Per-provider auth ──────────────────────────────────────────────────────
 
-export const ghStatus = (): Promise<Viewer | null> => invoke('gh_status');
-export const ghSetToken = (token: string): Promise<Viewer> =>
-  invoke('gh_set_token', { token });
+/** Backend `commands::ProviderStatus`. One unified `provider_status` command
+ *  replaced the gh_/gl_/cb_status trio; `base_url` is null for GitHub. */
+export interface ProviderStatus {
+  viewer: Viewer;
+  base_url: string | null;
+}
 
-export const ghDisconnect = (): Promise<void> => invoke('gh_disconnect');
+const providerStatus = (provider: Provider): Promise<ProviderStatus | null> =>
+  invoke('provider_status', { provider });
+
+export const ghStatus = (): Promise<Viewer | null> =>
+  providerStatus('github').then((s) => s?.viewer ?? null);
+export const ghSetToken = (token: string): Promise<Viewer> =>
+  invoke('provider_set_token', { provider: 'github', token, baseUrl: null });
+
+export const ghDisconnect = (): Promise<void> =>
+  invoke('provider_disconnect', { provider: 'github' });
 
 // ── GitHub OAuth Device Flow (M6.3) ────────────────────────────────────────
 
@@ -302,15 +334,23 @@ export const accountsList = (): Promise<Account[]> => invoke('accounts_list');
 export const accountsDisconnect = (accountId: string): Promise<void> =>
   invoke('accounts_disconnect', { accountId });
 
-export const glStatus = (): Promise<GitLabStatus | null> => invoke('gl_status');
+export const glStatus = (): Promise<GitLabStatus | null> =>
+  providerStatus('gitlab').then((s) =>
+    s ? { viewer: s.viewer, base_url: s.base_url ?? '' } : null,
+  );
 export const glSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
-  invoke('gl_set_token', { token, baseUrl });
-export const glDisconnect = (): Promise<void> => invoke('gl_disconnect');
+  invoke('provider_set_token', { provider: 'gitlab', token, baseUrl });
+export const glDisconnect = (): Promise<void> =>
+  invoke('provider_disconnect', { provider: 'gitlab' });
 
-export const cbStatus = (): Promise<CodebergStatus | null> => invoke('cb_status');
+export const cbStatus = (): Promise<CodebergStatus | null> =>
+  providerStatus('codeberg').then((s) =>
+    s ? { viewer: s.viewer, base_url: s.base_url ?? '' } : null,
+  );
 export const cbSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
-  invoke('cb_set_token', { token, baseUrl });
-export const cbDisconnect = (): Promise<void> => invoke('cb_disconnect');
+  invoke('provider_set_token', { provider: 'codeberg', token, baseUrl });
+export const cbDisconnect = (): Promise<void> =>
+  invoke('provider_disconnect', { provider: 'codeberg' });
 
 /** Reveal the main window. */
 export const openMainWindow = (): Promise<void> => invoke('open_main');

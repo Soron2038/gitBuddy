@@ -2,33 +2,23 @@
 //! Forgejo/Gitea instance. Both expose a deliberately GitHub-compatible
 //! REST API at `/api/v1/`, so this module mirrors github.rs closely.
 
+use crate::provider_util::{
+    collapse_ci_status, humanise_age, reason_priority, within_days, ProviderBackend, ProviderError,
+};
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use thiserror::Error;
 
 const USER_AGENT: &str = concat!("gitBuddy/", env!("CARGO_PKG_VERSION"));
 const ACCEPT: &str = "application/json";
 
-#[derive(Debug, Error)]
-pub enum CodebergError {
-    #[error("network error: {0}")]
-    Network(#[from] reqwest::Error),
-    #[error("authentication failed — check the token has at least the `read:repository` and `read:user` scopes")]
-    Unauthorized,
-    #[error("Gitea API at {base_url} returned HTTP {status}")]
-    HttpStatus {
-        base_url: String,
-        status: StatusCode,
-    },
-    #[error("invalid base URL: {0}")]
-    InvalidBaseUrl(String),
-}
+/// Hint surfaced when the Gitea/Forgejo API rejects the token.
+const AUTH_HINT: &str = "check the token has at least the `read:repository` and `read:user` scopes";
 
-pub type Result<T> = std::result::Result<T, CodebergError>;
+pub type Result<T> = std::result::Result<T, ProviderError>;
 
 pub struct CodebergProvider {
     client: Client,
@@ -52,11 +42,6 @@ impl CodebergProvider {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
-    }
-
-    /// See [`crate::github::GitHubProvider::token`].
-    pub fn token(&self) -> &str {
-        &self.token
     }
 
     /// Items where the user is assigned / created / review-requested /
@@ -84,10 +69,10 @@ impl CodebergProvider {
         for h in handles {
             match h.await {
                 Ok(Ok(mut v)) => items.append(&mut v),
-                // Per-scope errors are tolerated — one filter failing shouldn't
-                // wipe out the others. Hard auth errors propagate via the
-                // first failing branch below.
-                Ok(Err(CodebergError::Unauthorized)) => return Err(CodebergError::Unauthorized),
+                // Hard auth failures propagate; every other per-scope error
+                // (rate limit, transient 5xx, or a panicked task) is tolerated
+                // so one failing filter doesn't blank the whole "waiting" list.
+                Ok(Err(e @ ProviderError::Unauthorized(_))) => return Err(e),
                 Ok(Err(_)) | Err(_) => {}
             }
         }
@@ -120,10 +105,11 @@ impl CodebergProvider {
 
             match resp.status() {
                 s if s.is_success() => {}
-                StatusCode::UNAUTHORIZED => return Err(CodebergError::Unauthorized),
+                StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
                 s => {
-                    return Err(CodebergError::HttpStatus {
-                        base_url: self.base_url.clone(),
+                    return Err(ProviderError::HttpStatus {
+                        provider: "Gitea",
+                        base_url: Some(self.base_url.clone()),
                         status: s,
                     });
                 }
@@ -202,10 +188,35 @@ impl CodebergProvider {
     }
 }
 
+#[async_trait::async_trait]
+impl ProviderBackend for CodebergProvider {
+    fn viewer(&self) -> &Viewer {
+        &self.viewer
+    }
+    fn token(&self) -> &str {
+        &self.token
+    }
+    fn base_url(&self) -> Option<&str> {
+        Some(&self.base_url)
+    }
+    async fn list_waiting(&self) -> Result<Vec<WaitingItem>> {
+        self.list_waiting().await
+    }
+    async fn list_repos(&self) -> Result<Vec<Repo>> {
+        self.list_repos().await
+    }
+    async fn list_releases(&self) -> Result<Vec<Release>> {
+        self.list_releases().await
+    }
+    async fn list_ci(&self) -> Result<Vec<CiRun>> {
+        self.list_ci().await
+    }
+}
+
 fn normalise_base_url(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/').to_string();
     if trimmed.is_empty() {
-        return Err(CodebergError::InvalidBaseUrl(
+        return Err(ProviderError::InvalidBaseUrl(
             "base URL must not be empty".into(),
         ));
     }
@@ -214,7 +225,7 @@ fn normalise_base_url(raw: &str) -> Result<String> {
     // token in clear. If a localhost dev-instance ever needs `http://`, gate
     // it explicitly on `localhost` / `127.0.0.1` / `::1` then.
     if !trimmed.starts_with("https://") {
-        return Err(CodebergError::InvalidBaseUrl(format!(
+        return Err(ProviderError::InvalidBaseUrl(format!(
             "base URL must start with https://: {trimmed}"
         )));
     }
@@ -244,9 +255,10 @@ async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Vi
                 name: r.full_name.filter(|s| !s.is_empty()),
             })
         }
-        StatusCode::UNAUTHORIZED => Err(CodebergError::Unauthorized),
-        s => Err(CodebergError::HttpStatus {
-            base_url: base_url.to_string(),
+        StatusCode::UNAUTHORIZED => Err(ProviderError::Unauthorized(AUTH_HINT)),
+        s => Err(ProviderError::HttpStatus {
+            provider: "Gitea",
+            base_url: Some(base_url.to_string()),
             status: s,
         }),
     }
@@ -279,10 +291,11 @@ async fn search_issues(
 
         match resp.status() {
             s if s.is_success() => {}
-            StatusCode::UNAUTHORIZED => return Err(CodebergError::Unauthorized),
+            StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
             s => {
-                return Err(CodebergError::HttpStatus {
-                    base_url: base_url.to_string(),
+                return Err(ProviderError::HttpStatus {
+                    provider: "Gitea",
+                    base_url: Some(base_url.to_string()),
                     status: s,
                 });
             }
@@ -394,41 +407,6 @@ impl From<RawRepo> for Repo {
     }
 }
 
-fn humanise_age(ts: &str, now: DateTime<Utc>) -> String {
-    let Ok(t) = DateTime::parse_from_rfc3339(ts) else {
-        return "?".into();
-    };
-    let mins = (now - t.with_timezone(&Utc)).num_minutes();
-    if mins < 1 {
-        "now".into()
-    } else if mins < 60 {
-        format!("{mins}m")
-    } else if mins < 60 * 24 {
-        format!("{}h", mins / 60)
-    } else if mins < 60 * 24 * 30 {
-        format!("{}d", mins / (60 * 24))
-    } else if mins < 60 * 24 * 365 {
-        format!("{}mo", mins / (60 * 24 * 30))
-    } else {
-        format!("{}y", mins / (60 * 24 * 365))
-    }
-}
-
-fn reason_priority(r: ItemReason) -> u8 {
-    match r {
-        ItemReason::Assigned => 0,
-        ItemReason::Review => 1,
-        ItemReason::Authored => 2,
-        ItemReason::Mentioned => 3,
-    }
-}
-
-fn within_days(timestamp: &str, now: &DateTime<Utc>, days: i64) -> bool {
-    DateTime::parse_from_rfc3339(timestamp)
-        .map(|t| (*now - t.with_timezone(&Utc)).num_days() <= days)
-        .unwrap_or(false)
-}
-
 async fn fetch_latest_release(
     client: &Client,
     token: &str,
@@ -451,11 +429,12 @@ async fn fetch_latest_release(
         s if s.is_success() => {}
         // 404 = no releases yet, not an error.
         StatusCode::NOT_FOUND => return Ok(None),
-        StatusCode::UNAUTHORIZED => return Err(CodebergError::Unauthorized),
+        StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         StatusCode::FORBIDDEN => return Ok(None),
         s => {
-            return Err(CodebergError::HttpStatus {
-                base_url: base_url.to_string(),
+            return Err(ProviderError::HttpStatus {
+                provider: "Gitea",
+                base_url: Some(base_url.to_string()),
                 status: s,
             });
         }
@@ -576,11 +555,12 @@ async fn fetch_latest_ci_run(
                 account_id: None,
             }));
         }
-        StatusCode::UNAUTHORIZED => return Err(CodebergError::Unauthorized),
+        StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         StatusCode::FORBIDDEN => return Ok(None),
         s => {
-            return Err(CodebergError::HttpStatus {
-                base_url: base_url.to_string(),
+            return Err(ProviderError::HttpStatus {
+                provider: "Gitea",
+                base_url: Some(base_url.to_string()),
                 status: s,
             });
         }
@@ -610,23 +590,6 @@ async fn fetch_latest_ci_run(
         author_login: run.actor.map(|a| a.login),
         account_id: None,
     }))
-}
-
-/// Gitea Actions reuse GitHub's status/conclusion vocabulary, so the same
-/// matrix applies. Kept as a separate function (rather than importing
-/// github::collapse_ci_status) to keep provider modules independent — if
-/// Gitea ever diverges, the change lands here.
-fn collapse_ci_status(status: &str, conclusion: Option<&str>) -> CiStatus {
-    if status != "completed" {
-        return CiStatus::Run;
-    }
-    match conclusion {
-        Some("success") => CiStatus::Ok,
-        Some("failure" | "timed_out" | "action_required" | "startup_failure") => CiStatus::Fail,
-        Some("cancelled" | "skipped") => CiStatus::Cancelled,
-        Some("neutral") => CiStatus::Ok,
-        _ => CiStatus::None,
-    }
 }
 
 #[cfg(test)]

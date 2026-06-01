@@ -235,3 +235,70 @@ roundtrip is limited on macOS 14+, and building a sidecar
 `pending_clicks: HashMap<id, url>` plus a `NSDelegate` would have
 doubled the scope. Notifications are informative; the user clicks the
 popover for action. Revisit if it becomes a real ask.
+
+---
+
+## 2026-06-01 — Provider trait + unified registry
+
+Pre-polish refactor that finally retires the per-provider triplication the
+PRD §6.2 flagged. `github.rs`, `gitlab.rs`, and `codeberg.rs` each owned a
+full copy of the same shape — request/paginate/deserialize plus byte-
+identical helper functions — and `AppState` carried three separate
+`RwLock<HashMap<String, Arc<XProvider>>>` registries that every consumer
+(aggregator fan-out, auth commands, disconnect, clone) had to branch across.
+
+**`ProviderBackend` trait, list-only.** A single object-safe
+`#[async_trait] trait ProviderBackend` exposes `viewer/token/base_url`
+plus `list_waiting/list_repos/list_releases/list_ci`. Construction stays an
+inherent `connect` on each concrete type — its signature differs per
+provider (GitHub takes no base URL) and it returns `Self`, so it can't live
+on an object-safe trait. `AppState` now holds one
+`RwLock<HashMap<String, Arc<dyn ProviderBackend>>>`. Trait objects, not an
+`enum AnyProvider`: enum dispatch would have re-introduced a 3-arm match per
+method (the boilerplate we were deleting), and the per-tick cost is
+dominated by HTTP, not vtable indirection. The id's `<provider-slug>:`
+prefix (`accounts::provider_slug`) is how the legacy per-provider commands
+still filter "all GitHub accounts" out of the one map.
+
+**One `ProviderError`.** Replaced `GitHubError`/`GitLabError`/`CodebergError`
+(near-identical, differing only in the auth-scope hint and whether the HTTP
+error carried a base URL) with a single `provider_util::ProviderError`. Its
+`HttpStatus { provider, base_url: Option<String>, status }` reproduces the
+old per-provider Display strings; `Unauthorized(&'static str)` carries each
+provider's scope hint. The aggregator now handles one error type.
+
+**Fail-soft `list_waiting` everywhere.** GitHub and GitLab previously
+aborted the whole "waiting" fetch if any one search scope failed (rate
+limit, transient 5xx, panicked task); Codeberg already tolerated per-scope
+failures and only propagated hard `Unauthorized`. Unified on the fail-soft
+behaviour for all three — a menu-bar status app should degrade gracefully
+rather than blank the list when one filter rate-limits. Hard auth errors
+still propagate so the UI can prompt a reconnect.
+
+**Command surface: 9 → 3.** `gh_/gl_/cb_set_token`, `_status`, `_disconnect`
+collapsed into `provider_set_token` / `provider_status` /
+`provider_disconnect`, each taking a `Provider`. OAuth Device Flow stays
+GitHub-only (`gh_oauth_begin/poll`). This changed the JS↔Rust contract; the
+`src/lib/data/api.ts` wrappers keep their old names (thin adapters) so the
+two Svelte routes were untouched. The Keychain-first / registry-second /
+in-memory-last disconnect ordering (the secret-leak guard) was preserved
+exactly through the registry collapse.
+
+**Shared helpers → `provider_util.rs`.** `humanise_age`, `reason_priority`,
+`within_days`, and the GitHub-Actions `collapse_ci_status` (shared by GitHub
+and Gitea/Codeberg) moved here. GitLab keeps its own
+`collapse_pipeline_status` — its pipeline vocabulary genuinely differs, so
+forcing a shared signature would be a contortion.
+
+**Frontend stopped at dedup, deliberately.** Extracted `$lib/format.ts`
+(date/path/host helpers) and `defaultSettings()`, deleted dead `stub.ts`,
+and fixed a clutch of bugs (a `String.includes` host check that false-
+matched `gitlab.com` against `lab.com`, a divergent "no sync yet"
+placeholder, swallowed Keychain task panics now surfaced as real errors, a
+silently-swallowed settings-load in legacy migration). Did **not** force the
+main window and popover to share components/menus/state: on inspection the
+two are divergent-by-design (compact popover vs. spacious main), not
+mechanically duplicated, so a "shared" `RepoCard`/menu builder would either
+change one window's copy or need so many props it saves nothing. The real
+duplication (types, formatters, the settings literal) is gone; the rest is
+intentional UI divergence and stays per-route.

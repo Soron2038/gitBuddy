@@ -6,6 +6,7 @@
   import { listen } from '@tauri-apps/api/event';
   import Buddy from '$lib/Buddy.svelte';
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
+  import { humaniseSync, hostSuggestions, connectedHosts } from '$lib/format';
   import {
     ghSetToken,
     ghOAuthBegin,
@@ -24,6 +25,7 @@
     lastSyncInfo,
     getSettings,
     saveSettings,
+    defaultSettings,
     runEditor,
     indexLocalByRemote,
     localKeyForRepo,
@@ -66,20 +68,7 @@
   let locals: LocalRepo[] = $state([]);
   let releases: Release[] = $state([]);
   let ciRuns: CiRun[] = $state([]);
-  let settings: Settings = $state({
-    version: 2,
-    scan_roots: [],
-    scan_ignore: [],
-    gitlab_base_url: null,
-    codeberg_base_url: null,
-    editor_command: null,
-    notifications: {
-      enabled: true,
-      do_not_disturb: false,
-      events: { waiting: true, releases: true, ci_failure: true },
-    },
-    poll_interval_minutes: 5,
-  });
+  let settings: Settings = $state(defaultSettings());
 
   // ── UI state ──────────────────────────────────────────────────────────
   let view: View = $state('overview');
@@ -205,31 +194,13 @@
    *  onboarding so self-hosted hostnames don't have to be retyped. Hosts
    *  already connected via any account are filtered out to avoid offering
    *  duplicates. */
-  function hostSuggestionsFor(target: 'gitlab' | 'codeberg'): string[] {
-    const alreadyConnected = new Set<string>();
-    for (const a of accounts) {
-      if (!a.base_url) continue;
-      try {
-        alreadyConnected.add(new URL(a.base_url).host);
-      } catch {
-        /* malformed base_url — skip */
-      }
-    }
-    const out = new Set<string>();
-    for (const o of locals) {
-      const h = o.remote?.host;
-      if (!h) continue;
-      if (h === 'github.com') continue;
-      if (alreadyConnected.has(h)) continue;
-      const isGitlabLike = h.includes('gitlab');
-      if (target === 'gitlab' && !isGitlabLike && out.size > 0) continue;
-      if (target === 'codeberg' && isGitlabLike) continue;
-      out.add(h);
-    }
-    return Array.from(out).sort();
-  }
-  let gitlabHostSuggestions = $derived(hostSuggestionsFor('gitlab'));
-  let codebergHostSuggestions = $derived(hostSuggestionsFor('codeberg'));
+  let connectedAccountHosts = $derived(connectedHosts(accounts.map((a) => a.base_url)));
+  let gitlabHostSuggestions = $derived(
+    hostSuggestions('gitlab', locals, connectedAccountHosts),
+  );
+  let codebergHostSuggestions = $derived(
+    hostSuggestions('codeberg', locals, connectedAccountHosts),
+  );
 
   type ProvBadge = {
     /** Account.id — used as Svelte each-key and as the click-through target. */
@@ -715,15 +686,6 @@
     const handle = setInterval(() => (nowTick = Date.now()), 1000);
     return () => clearInterval(handle);
   });
-  function humaniseSync(d: Date | null, _nowMs: number): string {
-    if (!d) return 'never';
-    const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-    if (s < 5) return 'just now';
-    if (s < 60) return `${s} sec ago`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m} min ago`;
-    return `${Math.floor(m / 60)}h ago`;
-  }
   let syncText = $derived(humaniseSync(lastSyncedAt, nowTick));
 
   // Polling lives in the backend aggregator now — it fires `data-updated`

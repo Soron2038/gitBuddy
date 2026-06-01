@@ -16,6 +16,13 @@
   import Buddy from '$lib/Buddy.svelte';
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
   import {
+    humaniseSync,
+    hostSuggestions,
+    connectedHosts,
+    repoAge,
+    shortenPath,
+  } from '$lib/format';
+  import {
     ghStatus,
     ghSetToken,
     glStatus,
@@ -32,6 +39,7 @@
     aggregatorRefreshNow,
     lastSyncInfo,
     getSettings,
+    defaultSettings,
     runEditor,
     indexLocalByRemote,
     localKeyForRepo,
@@ -83,20 +91,7 @@
   // Settings is read-only here — toggling lives in the main window.
   // Loaded on mount so e.g. `editor_command` is available for the row
   // context menu without an extra round-trip per render.
-  let settings: Settings = $state({
-    version: 2,
-    scan_roots: [],
-    scan_ignore: [],
-    gitlab_base_url: null,
-    codeberg_base_url: null,
-    editor_command: null,
-    notifications: {
-      enabled: true,
-      do_not_disturb: false,
-      events: { waiting: true, releases: true, ci_failure: true },
-    },
-    poll_interval_minutes: 5,
-  });
+  let settings: Settings = $state(defaultSettings());
 
   // Context menu state — shared instance, opened on right-click of any
   // row. `menuItems` is recomputed per-target when the menu opens.
@@ -125,25 +120,12 @@
    *  already a connected provider. Drives the quick-pick chips for both
    *  GitLab and Codeberg onboarding so the user doesn't have to retype
    *  `gitlab.gwdg.de` or `codeberg.org`. */
+  // Thin wrapper: the shared logic lives in `$lib/format`, but keeping the
+  // `gl`/`cb` reads inside a function avoids TS narrowing them to `null` in
+  // the top-level reactive flow (they're assigned on connect).
   function hostSuggestionsFor(target: 'gitlab' | 'codeberg'): string[] {
-    const out = new Set<string>();
-    for (const o of locals) {
-      const h = o.remote?.host;
-      if (!h) continue;
-      if (h === 'github.com') continue;
-      if (gl && gl.base_url.includes(h)) continue;
-      if (cb && cb.base_url.includes(h)) continue;
-      // Cheap heuristic: hosts containing "gitlab" are GitLab-y, anything
-      // else is offered for Codeberg/Gitea. We don't gatekeep too strictly
-      // — the user might know better.
-      const isGitlabLike = h.includes('gitlab');
-      if (target === 'gitlab' && !isGitlabLike && out.size > 0) continue;
-      if (target === 'codeberg' && isGitlabLike) continue;
-      out.add(h);
-    }
-    return Array.from(out).sort();
+    return hostSuggestions(target, locals, connectedHosts([gl?.base_url, cb?.base_url]));
   }
-
   let gitlabHostSuggestions = $derived(hostSuggestionsFor('gitlab'));
   let codebergHostSuggestions = $derived(hostSuggestionsFor('codeberg'));
 
@@ -212,10 +194,16 @@
         return [] as LocalRepo[];
       });
 
-      // Settings load is cheap (small JSON, OS app-config dir).
+      // Settings load is cheap (small JSON, OS app-config dir). A failure
+      // leaves `settings` at defaults — which silently drops editor-dependent
+      // context-menu actions — so surface it rather than only logging. Don't
+      // clobber a more specific error (e.g. the local-scan failure above).
       getSettings()
         .then((s) => (settings = s))
-        .catch((e) => console.error('settings load:', e));
+        .catch((e) => {
+          console.error('settings load:', e);
+          error ??= `Settings failed to load: ${e}`;
+        });
 
       const [ghViewer, glRes, cbRes] = await Promise.all([
         ghStatus(),
@@ -457,27 +445,6 @@
     }
   });
 
-  function repoAge(pushed_at: string | null): string {
-    if (!pushed_at) return '—';
-    const d = new Date(pushed_at);
-    const mins = Math.floor((Date.now() - d.getTime()) / 60_000);
-    if (mins < 60) return `${Math.max(1, mins)}m`;
-    if (mins < 60 * 24) return `${Math.floor(mins / 60)}h`;
-    if (mins < 60 * 24 * 30) return `${Math.floor(mins / (60 * 24))}d`;
-    if (mins < 60 * 24 * 365) return `${Math.floor(mins / (60 * 24 * 30))}mo`;
-    return `${Math.floor(mins / (60 * 24 * 365))}y`;
-  }
-
-  /** Shorten an absolute path for compact display: replace $HOME with `~`
-   *  and trim to the last two path components if it's still too long. */
-  function shortenPath(p: string): string {
-    // The Rust side returns absolute paths; we don't know $HOME on the JS
-    // side without an extra Tauri call, so we just shorten cosmetically.
-    const parts = p.split('/').filter(Boolean);
-    if (parts.length <= 2) return p;
-    return `…/${parts.slice(-2).join('/')}`;
-  }
-
   async function openExternal(url: string) {
     try {
       await openUrl(url);
@@ -485,17 +452,6 @@
       // Opener plugin failure is non-fatal — silently swallow rather than
       // poison the popover with an error toast over a missing browser handler.
     }
-  }
-
-  function humaniseSync(d: Date | null, nowMs: number): string {
-    if (!d) return '—';
-    const s = Math.max(0, Math.floor((nowMs - d.getTime()) / 1000));
-    if (s < 5) return 'just now';
-    if (s < 60) return `${s} sec ago`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m} min ago`;
-    const h = Math.floor(m / 60);
-    return `${h}h ago`;
   }
 
   // Tick once per second so the "Synced 24 sec ago" footer text counts up

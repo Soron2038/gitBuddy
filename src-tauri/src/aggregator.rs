@@ -26,12 +26,10 @@
 
 use crate::{
     accounts,
-    codeberg::CodebergProvider,
     commands::AppState,
-    github::GitHubProvider,
-    gitlab::GitLabProvider,
     local_index::{self, LocalRepo},
     notifications::{self, Kind, SeenStore},
+    provider_util::ProviderBackend,
     settings::{self, NotificationSettings, Settings, POLL_INTERVAL_DEFAULT},
     types::{CiRun, CiStatus, ItemReason, Release, Repo, WaitingItem},
 };
@@ -179,53 +177,51 @@ fn diff_and_notify(
 ) {
     let cold_start = !store.initialised;
 
+    // Each item is recorded as seen exactly once (the first-sight timestamp is
+    // preserved across ticks so the TTL prune can expire it), and a
+    // notification fires only when it's a genuinely new sighting: past the
+    // cold-start seed and not already in the store.
     for item in &snapshot.waiting {
         let key = waiting_key(item);
-        if cold_start || store.waiting.contains_key(&key) {
-            store
-                .waiting
-                .entry(key)
-                .or_insert_with(|| now_ts.to_string());
-            continue;
+        let already_seen = store.waiting.contains_key(&key);
+        store
+            .waiting
+            .entry(key)
+            .or_insert_with(|| now_ts.to_string());
+        if !cold_start && !already_seen {
+            notifications::fire(
+                app,
+                settings,
+                Kind::Waiting {
+                    reason_label: waiting_reason_label(item.reason).to_string(),
+                    repo: item.repo.clone(),
+                    title: item.title.clone(),
+                },
+            );
         }
-        store.waiting.insert(key, now_ts.to_string());
-        notifications::fire(
-            app,
-            settings,
-            Kind::Waiting {
-                reason_label: waiting_reason_label(item.reason).to_string(),
-                repo: item.repo.clone(),
-                title: item.title.clone(),
-            },
-        );
     }
 
     for release in &snapshot.releases {
         let key = release_key(release);
-        if cold_start || store.releases.contains_key(&key) {
-            store
-                .releases
-                .entry(key)
-                .or_insert_with(|| now_ts.to_string());
-            continue;
+        let already_seen = store.releases.contains_key(&key);
+        store
+            .releases
+            .entry(key)
+            .or_insert_with(|| now_ts.to_string());
+        // The provider marks "published within last 7 days" via `is_new`.
+        // Older releases are backfill (the user just connected an account
+        // that's been around a while) — seed them silently so we don't spam
+        // on first sight of an old changelog.
+        if !cold_start && !already_seen && release.is_new {
+            notifications::fire(
+                app,
+                settings,
+                Kind::Release {
+                    repo: release.repo_full_name.clone(),
+                    tag_name: release.tag.clone(),
+                },
+            );
         }
-        // The provider already marks "published within last 7 days" via
-        // `is_new`. Treat older releases as backfill (the user just
-        // connected an account that's been around for a while) so we
-        // don't spam on first sight of an old changelog.
-        if !release.is_new {
-            store.releases.insert(key, now_ts.to_string());
-            continue;
-        }
-        store.releases.insert(key, now_ts.to_string());
-        notifications::fire(
-            app,
-            settings,
-            Kind::Release {
-                repo: release.repo_full_name.clone(),
-                tag_name: release.tag.clone(),
-            },
-        );
     }
 
     // CI-failure diff. Three gates compose:
@@ -258,22 +254,21 @@ fn diff_and_notify(
         }
 
         let key = ci_failure_key(run);
-        if cold_start || store.ci_failures.contains_key(&key) {
-            store
-                .ci_failures
-                .entry(key)
-                .or_insert_with(|| now_ts.to_string());
-            continue;
+        let already_seen = store.ci_failures.contains_key(&key);
+        store
+            .ci_failures
+            .entry(key)
+            .or_insert_with(|| now_ts.to_string());
+        if !cold_start && !already_seen {
+            notifications::fire(
+                app,
+                settings,
+                Kind::CiFailure {
+                    repo: run.repo_full_name.clone(),
+                    branch: run.branch.clone().unwrap_or_else(|| "main".to_string()),
+                },
+            );
         }
-        store.ci_failures.insert(key, now_ts.to_string());
-        notifications::fire(
-            app,
-            settings,
-            Kind::CiFailure {
-                repo: run.repo_full_name.clone(),
-                branch: run.branch.clone().unwrap_or_else(|| "main".to_string()),
-            },
-        );
     }
 
     if cold_start {
@@ -345,26 +340,13 @@ struct FetchSnapshot {
 /// what the pre-aggregator `list_*` commands did individually, but in a
 /// single coordinated pass per tick so the snapshot is internally consistent.
 async fn fetch_all(app: &AppHandle, state: &AppState) -> FetchSnapshot {
-    // Snapshot the provider registries up-front. The HashMap reads are cheap
-    // and we want to release the read locks before the await chain below
-    // touches the network, so a connect/disconnect during a tick doesn't
-    // block on the registry lock for tens of seconds.
-    let gh: Vec<(String, Arc<GitHubProvider>)> = state
-        .github
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let gl: Vec<(String, Arc<GitLabProvider>)> = state
-        .gitlab
-        .read()
-        .await
-        .iter()
-        .map(|(id, p)| (id.clone(), p.clone()))
-        .collect();
-    let cb: Vec<(String, Arc<CodebergProvider>)> = state
-        .codeberg
+    // Snapshot the provider registry up-front. The HashMap read is cheap and
+    // we want to release the read lock before the await chain below touches
+    // the network, so a connect/disconnect during a tick doesn't block on the
+    // registry lock for tens of seconds. One unified map means a single
+    // snapshot and a single fan-out loop per list, regardless of forge.
+    let providers: Vec<(String, Arc<dyn ProviderBackend>)> = state
+        .providers
         .read()
         .await
         .iter()
@@ -375,83 +357,35 @@ async fn fetch_all(app: &AppHandle, state: &AppState) -> FetchSnapshot {
 
     // Waiting items, ordered most-recent first to match the popover's
     // expectations.
-    for (id, p) in &gh {
+    for (id, p) in &providers {
         match p.list_waiting().await {
-            Ok(v) => tag_extend_waiting(&mut snapshot.waiting, v, id),
-            Err(e) => eprintln!("gitbuddy: github[{id}] list_waiting failed: {e}"),
-        }
-    }
-    for (id, p) in &gl {
-        match p.list_waiting().await {
-            Ok(v) => tag_extend_waiting(&mut snapshot.waiting, v, id),
-            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_waiting failed: {e}"),
-        }
-    }
-    for (id, p) in &cb {
-        match p.list_waiting().await {
-            Ok(v) => tag_extend_waiting(&mut snapshot.waiting, v, id),
-            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_waiting failed: {e}"),
+            Ok(v) => tag_extend(&mut snapshot.waiting, v, id),
+            Err(e) => eprintln!("gitbuddy: list_waiting[{id}] failed: {e}"),
         }
     }
     snapshot
         .waiting
         .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
-    for (id, p) in &gh {
+    for (id, p) in &providers {
         match p.list_repos().await {
-            Ok(v) => tag_extend_repos(&mut snapshot.repos, v, id),
-            Err(e) => eprintln!("gitbuddy: github[{id}] list_repos failed: {e}"),
-        }
-    }
-    for (id, p) in &gl {
-        match p.list_repos().await {
-            Ok(v) => tag_extend_repos(&mut snapshot.repos, v, id),
-            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_repos failed: {e}"),
-        }
-    }
-    for (id, p) in &cb {
-        match p.list_repos().await {
-            Ok(v) => tag_extend_repos(&mut snapshot.repos, v, id),
-            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_repos failed: {e}"),
+            Ok(v) => tag_extend(&mut snapshot.repos, v, id),
+            Err(e) => eprintln!("gitbuddy: list_repos[{id}] failed: {e}"),
         }
     }
     snapshot.repos.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
 
-    for (id, p) in &gh {
+    for (id, p) in &providers {
         match p.list_releases().await {
-            Ok(v) => tag_extend_releases(&mut snapshot.releases, v, id),
-            Err(e) => eprintln!("gitbuddy: github[{id}] list_releases failed: {e}"),
-        }
-    }
-    for (id, p) in &gl {
-        match p.list_releases().await {
-            Ok(v) => tag_extend_releases(&mut snapshot.releases, v, id),
-            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_releases failed: {e}"),
-        }
-    }
-    for (id, p) in &cb {
-        match p.list_releases().await {
-            Ok(v) => tag_extend_releases(&mut snapshot.releases, v, id),
-            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_releases failed: {e}"),
+            Ok(v) => tag_extend(&mut snapshot.releases, v, id),
+            Err(e) => eprintln!("gitbuddy: list_releases[{id}] failed: {e}"),
         }
     }
 
-    for (id, p) in &gh {
+    for (id, p) in &providers {
         match p.list_ci().await {
-            Ok(v) => tag_extend_ci(&mut snapshot.ci, v, id),
-            Err(e) => eprintln!("gitbuddy: github[{id}] list_ci failed: {e}"),
-        }
-    }
-    for (id, p) in &gl {
-        match p.list_ci().await {
-            Ok(v) => tag_extend_ci(&mut snapshot.ci, v, id),
-            Err(e) => eprintln!("gitbuddy: gitlab[{id}] list_ci failed: {e}"),
-        }
-    }
-    for (id, p) in &cb {
-        match p.list_ci().await {
-            Ok(v) => tag_extend_ci(&mut snapshot.ci, v, id),
-            Err(e) => eprintln!("gitbuddy: codeberg[{id}] list_ci failed: {e}"),
+            Ok(v) => tag_extend(&mut snapshot.ci, v, id),
+            Err(e) => eprintln!("gitbuddy: list_ci[{id}] failed: {e}"),
         }
     }
 
@@ -471,27 +405,36 @@ async fn fetch_all(app: &AppHandle, state: &AppState) -> FetchSnapshot {
     snapshot
 }
 
-fn tag_extend_waiting(out: &mut Vec<WaitingItem>, items: Vec<WaitingItem>, id: &str) {
-    out.extend(items.into_iter().map(|mut it| {
-        it.account_id = Some(id.to_string());
-        it
-    }));
+/// Items the aggregator stamps with the account id that surfaced them, so the
+/// UI can show per-account badges and the diff/notify pass can key by account.
+trait Tagged {
+    fn set_account_id(&mut self, id: &str);
 }
-fn tag_extend_repos(out: &mut Vec<Repo>, items: Vec<Repo>, id: &str) {
-    out.extend(items.into_iter().map(|mut it| {
-        it.account_id = Some(id.to_string());
-        it
-    }));
+impl Tagged for WaitingItem {
+    fn set_account_id(&mut self, id: &str) {
+        self.account_id = Some(id.to_string());
+    }
 }
-fn tag_extend_releases(out: &mut Vec<Release>, items: Vec<Release>, id: &str) {
-    out.extend(items.into_iter().map(|mut it| {
-        it.account_id = Some(id.to_string());
-        it
-    }));
+impl Tagged for Repo {
+    fn set_account_id(&mut self, id: &str) {
+        self.account_id = Some(id.to_string());
+    }
 }
-fn tag_extend_ci(out: &mut Vec<CiRun>, items: Vec<CiRun>, id: &str) {
+impl Tagged for Release {
+    fn set_account_id(&mut self, id: &str) {
+        self.account_id = Some(id.to_string());
+    }
+}
+impl Tagged for CiRun {
+    fn set_account_id(&mut self, id: &str) {
+        self.account_id = Some(id.to_string());
+    }
+}
+
+/// Append `items` to `out`, stamping each with the account `id` it came from.
+fn tag_extend<T: Tagged>(out: &mut Vec<T>, items: Vec<T>, id: &str) {
     out.extend(items.into_iter().map(|mut it| {
-        it.account_id = Some(id.to_string());
+        it.set_account_id(id);
         it
     }));
 }

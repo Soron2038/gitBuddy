@@ -16,6 +16,7 @@ use crate::{
     keychain,
     local_index::LocalRepo,
     oauth::{self, DeviceCodeResponse, PollOutcome},
+    provider_util::ProviderBackend,
     settings::{self, Settings},
     types::*,
 };
@@ -42,11 +43,15 @@ const GH_LEGACY_KEY: &str = "github";
 const GL_LEGACY_KEY: &str = "gitlab";
 const CB_LEGACY_KEY: &str = "codeberg";
 
-/// In-memory provider registry. One HashMap per provider type, keyed by
-/// `Account.id` (the v2 `<provider>:<host>:<login>` string). A single user
+/// In-memory provider registry. One `HashMap` keyed by `Account.id` (the v2
+/// `<provider>:<host>:<login>` string) holds every connected account across
+/// all forge types as `Arc<dyn ProviderBackend>`, so the aggregator fan-out
+/// and the auth/disconnect commands don't branch per provider. A single user
 /// can hold multiple accounts per provider — e.g. two GitLab instances or a
 /// personal + work GitHub — and each is restored / refreshed / removed
-/// independently.
+/// independently. The id's `<provider-slug>:` prefix (see
+/// `accounts::provider_slug`) is how the legacy per-provider commands still
+/// filter "all GitHub accounts" out of the unified map.
 ///
 /// The `cache` + two `Notify`s drive the backend aggregator loop. Provider
 /// commands here `refresh_trigger.notify_one()` after a connect/disconnect
@@ -54,9 +59,7 @@ const CB_LEGACY_KEY: &str = "codeberg";
 /// `settings_reload` so the loop picks up a changed poll interval without
 /// waiting out the current sleep.
 pub struct AppState {
-    pub github: RwLock<HashMap<String, Arc<GitHubProvider>>>,
-    pub gitlab: RwLock<HashMap<String, Arc<GitLabProvider>>>,
-    pub codeberg: RwLock<HashMap<String, Arc<CodebergProvider>>>,
+    pub providers: RwLock<HashMap<String, Arc<dyn ProviderBackend>>>,
     /// Snapshot of every aggregated list as of the last successful tick.
     /// `list_*` commands read from here instead of fanning out per call.
     pub cache: RwLock<AggregatorCache>,
@@ -75,9 +78,7 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            github: RwLock::new(HashMap::new()),
-            gitlab: RwLock::new(HashMap::new()),
-            codeberg: RwLock::new(HashMap::new()),
+            providers: RwLock::new(HashMap::new()),
             cache: RwLock::new(AggregatorCache::default()),
             refresh_trigger: Arc::new(Notify::new()),
             settings_reload: Arc::new(Notify::new()),
@@ -221,7 +222,11 @@ async fn migrate_legacy_keychain(app: &AppHandle) {
 
     // GitLab — needs the saved base URL.
     if !has("gitlab:") {
-        let stored = settings::load(app).ok();
+        let stored = settings::load(app)
+            .inspect_err(|e| {
+                eprintln!("gitbuddy: settings load for legacy gitlab migration failed: {e} — the account can't be migrated without its base URL and will be skipped");
+            })
+            .ok();
         let gl_base = stored.as_ref().and_then(|s| s.gitlab_base_url.clone());
         if let Some(base_url) = gl_base {
             match keychain::load(GL_LEGACY_KEY).await {
@@ -251,7 +256,11 @@ async fn migrate_legacy_keychain(app: &AppHandle) {
 
     // Codeberg / Gitea / Forgejo — base URL stored alongside.
     if !has("codeberg:") {
-        let stored = settings::load(app).ok();
+        let stored = settings::load(app)
+            .inspect_err(|e| {
+                eprintln!("gitbuddy: settings load for legacy codeberg migration failed: {e} — falling back to the codeberg.org default host");
+            })
+            .ok();
         let cb_base = stored
             .as_ref()
             .and_then(|s| s.codeberg_base_url.clone())
@@ -358,7 +367,11 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
         match account.provider {
             Provider::Github => match GitHubProvider::connect(token).await {
                 Ok(p) => {
-                    state.github.write().await.insert(id, Arc::new(p));
+                    state
+                        .providers
+                        .write()
+                        .await
+                        .insert(id, Arc::new(p) as Arc<dyn ProviderBackend>);
                 }
                 Err(e) => eprintln!("gitbuddy: restoring github session failed: {e}"),
             },
@@ -372,7 +385,11 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
                 };
                 match GitLabProvider::connect(token, base_url).await {
                     Ok(p) => {
-                        state.gitlab.write().await.insert(id, Arc::new(p));
+                        state
+                            .providers
+                            .write()
+                            .await
+                            .insert(id, Arc::new(p) as Arc<dyn ProviderBackend>);
                     }
                     Err(e) => eprintln!("gitbuddy: restoring gitlab session failed: {e}"),
                 }
@@ -384,7 +401,11 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
                     .unwrap_or_else(|| "https://codeberg.org".to_string());
                 match CodebergProvider::connect(token, base_url).await {
                     Ok(p) => {
-                        state.codeberg.write().await.insert(id, Arc::new(p));
+                        state
+                            .providers
+                            .write()
+                            .await
+                            .insert(id, Arc::new(p) as Arc<dyn ProviderBackend>);
                     }
                     Err(e) => eprintln!("gitbuddy: restoring codeberg session failed: {e}"),
                 }
@@ -393,47 +414,126 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
     }
 }
 
-// ── Per-provider auth commands ─────────────────────────────────────────────
+// ── Provider auth commands ─────────────────────────────────────────────────
 
+/// Connect (or re-validate) a PAT-authenticated account for any provider.
+/// GitHub ignores `base_url`; GitLab and Codeberg/Gitea require it. The
+/// connect → keychain → registry → settings order mirrors the old
+/// per-provider trio: the token is only persisted after a successful connect,
+/// and the registry insert is last so a failed keychain write never leaves an
+/// in-memory provider whose secret didn't land.
 #[tauri::command]
-pub async fn gh_set_token(
+pub async fn provider_set_token(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
+    provider: Provider,
     token: String,
+    base_url: Option<String>,
 ) -> Result<Viewer, String> {
-    let provider = GitHubProvider::connect(token.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-    let viewer = provider.viewer.clone();
-    let account = accounts::account_from(Provider::Github, &viewer, AuthMethod::Pat, None);
+    let (account, provider_box): (Account, Arc<dyn ProviderBackend>) = match provider {
+        Provider::Github => {
+            let p = GitHubProvider::connect(token.clone())
+                .await
+                .map_err(|e| e.to_string())?;
+            let account =
+                accounts::account_from(Provider::Github, &p.viewer, AuthMethod::Pat, None);
+            (account, Arc::new(p))
+        }
+        Provider::Gitlab | Provider::MpsdGitlab => {
+            let base_url = base_url
+                .clone()
+                .ok_or("GitLab needs a base URL (e.g. https://gitlab.com)")?;
+            let p = GitLabProvider::connect(token.clone(), base_url)
+                .await
+                .map_err(|e| e.to_string())?;
+            let account = accounts::account_from(
+                Provider::Gitlab,
+                &p.viewer,
+                AuthMethod::Pat,
+                Some(p.base_url().to_string()),
+            );
+            (account, Arc::new(p))
+        }
+        Provider::Codeberg => {
+            let base_url = base_url
+                .clone()
+                .ok_or("Codeberg/Gitea needs a base URL (e.g. https://codeberg.org)")?;
+            let p = CodebergProvider::connect(token.clone(), base_url)
+                .await
+                .map_err(|e| e.to_string())?;
+            let account = accounts::account_from(
+                Provider::Codeberg,
+                &p.viewer,
+                AuthMethod::Pat,
+                Some(p.base_url().to_string()),
+            );
+            (account, Arc::new(p))
+        }
+    };
+
+    let viewer = account.viewer.clone();
     let id = account.id.clone();
     keychain::save(&account.id, &token)
         .await
         .map_err(|e| format!("keychain: {e}"))?;
     accounts::upsert(&app, account)?;
-    state.github.write().await.insert(id, Arc::new(provider));
+
+    // Keep the per-provider base-URL hint in settings fresh so the next
+    // onboarding modal pre-fills the host. `ensure_initialized` no longer
+    // reads it, but the add-provider flow does. GitHub has no base URL.
+    if let Some(base) = provider_box.base_url().map(str::to_string) {
+        let mut s = settings::load(&app).unwrap_or_default();
+        match provider {
+            Provider::Gitlab | Provider::MpsdGitlab => s.gitlab_base_url = Some(base),
+            Provider::Codeberg => s.codeberg_base_url = Some(base),
+            Provider::Github => {}
+        }
+        settings::save(&app, &s)?;
+    }
+
+    state.providers.write().await.insert(id, provider_box);
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     aggregator::refresh_now(&state);
     Ok(viewer)
 }
 
-#[tauri::command]
-pub async fn gh_status(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-) -> Result<Option<Viewer>, String> {
-    state.ensure_initialized(&app).await;
-    // Legacy single-account status: returns the first connected GitHub
-    // account's viewer if any. Replaced wholesale by `accounts_list` once
-    // the per-account UI lands in the next frontend commit; until then the
-    // existing settings screen calls this and shows one row.
-    Ok(state
-        .github
+/// First connected provider whose account id carries this provider's slug,
+/// or `None`. The per-provider status commands use it to pull "the GitHub
+/// account" / "the GitLab account" out of the unified registry.
+async fn first_provider(state: &AppState, provider: Provider) -> Option<Arc<dyn ProviderBackend>> {
+    let prefix = format!("{}:", accounts::provider_slug(provider));
+    state
+        .providers
         .read()
         .await
-        .values()
-        .next()
-        .map(|p| p.viewer.clone()))
+        .iter()
+        .find(|(id, _)| id.starts_with(&prefix))
+        .map(|(_, p)| p.clone())
+}
+
+/// Legacy single-account status for one provider: the first connected
+/// account of that type, with its base URL (`None` for GitHub). Superseded by
+/// `accounts_list` for the multi-account UI; the current settings/onboarding
+/// screens still call this to show one row per provider.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct ProviderStatus {
+    pub viewer: Viewer,
+    pub base_url: Option<String>,
+}
+
+#[tauri::command]
+pub async fn provider_status(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+    provider: Provider,
+) -> Result<Option<ProviderStatus>, String> {
+    state.ensure_initialized(&app).await;
+    Ok(first_provider(&state, provider)
+        .await
+        .map(|p| ProviderStatus {
+            viewer: p.viewer().clone(),
+            base_url: p.base_url().map(str::to_string),
+        }))
 }
 
 /// Kick off the GitHub OAuth Device Flow. Returns the user_code (for the
@@ -502,7 +602,11 @@ pub async fn gh_oauth_poll(
                 .map_err(|e| format!("keychain: {e}"))?;
             let id = account.id.clone();
             accounts::upsert(&app, account)?;
-            state.github.write().await.insert(id, Arc::new(provider));
+            state
+                .providers
+                .write()
+                .await
+                .insert(id, Arc::new(provider) as Arc<dyn ProviderBackend>);
             let _ = app.emit(EVT_PROVIDER_CHANGED, ());
             aggregator::refresh_now(&state);
             Ok(GhOAuthPollResult::Success { viewer })
@@ -517,167 +621,36 @@ fn oauth_http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("http client: {e}"))
 }
 
+/// Disconnect every account of one provider at once — the "disconnect from
+/// this provider entirely" action behind the settings screen. Per-account
+/// disconnect is `accounts_disconnect`. Beyond the registry sweep this also
+/// deletes the pre-migration single-account Keychain key and, for the
+/// self-hostable forges, clears the persisted base-URL hint so the next
+/// onboarding starts from the default host rather than the disconnected one.
 #[tauri::command]
-pub async fn gh_disconnect(
+pub async fn provider_disconnect(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
+    provider: Provider,
 ) -> Result<(), String> {
-    // Legacy "disconnect from this provider entirely" semantics — wipes
-    // every GitHub account at once, with a last-ditch legacy-key sweep for
-    // any pre-migration install whose state somehow didn't get cleaned up
-    // by `migrate_legacy_keychain`. Per-account disconnect lives in
-    // `accounts_disconnect`; this command goes away once the UI migrates.
-    let sweep = disconnect_all_for_provider(&state, &app, Provider::Github).await;
-    let _ = keychain::delete(GH_LEGACY_KEY).await;
-    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
-    aggregator::refresh_now(&state);
-    sweep
-}
-
-#[tauri::command]
-pub async fn gl_set_token(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-    token: String,
-    base_url: String,
-) -> Result<Viewer, String> {
-    let provider = GitLabProvider::connect(token.clone(), base_url.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-    let viewer = provider.viewer.clone();
-    let account = accounts::account_from(
-        Provider::Gitlab,
-        &viewer,
-        AuthMethod::Pat,
-        Some(provider.base_url().to_string()),
-    );
-    keychain::save(&account.id, &token)
-        .await
-        .map_err(|e| format!("keychain: {e}"))?;
-    let id = account.id.clone();
-    accounts::upsert(&app, account)?;
-    // Keep gitlab_base_url in settings up to date — `ensure_initialized` no
-    // longer reads it, but it's still consumed by the onboarding modal to
-    // pre-fill the host suggestion next time the user reconnects.
-    let mut s = settings::load(&app).unwrap_or_default();
-    s.gitlab_base_url = Some(provider.base_url().to_string());
-    settings::save(&app, &s)?;
-
-    state.gitlab.write().await.insert(id, Arc::new(provider));
-    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
-    aggregator::refresh_now(&state);
-    Ok(viewer)
-}
-
-#[tauri::command]
-pub async fn gl_status(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-) -> Result<Option<GitLabStatus>, String> {
-    state.ensure_initialized(&app).await;
-    Ok(state
-        .gitlab
-        .read()
-        .await
-        .values()
-        .next()
-        .map(|p| GitLabStatus {
-            viewer: p.viewer.clone(),
-            base_url: p.base_url().to_string(),
-        }))
-}
-
-/// Returned by `gl_status`. The base URL is useful in the UI so we can show
-/// "connected to gitlab.gwdg.de" without an extra command call.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct GitLabStatus {
-    pub viewer: Viewer,
-    pub base_url: String,
-}
-
-#[tauri::command]
-pub async fn gl_disconnect(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let sweep = disconnect_all_for_provider(&state, &app, Provider::Gitlab).await;
-    let _ = keychain::delete(GL_LEGACY_KEY).await;
-    // Clear the base URL too so the next `+ Add` flow starts from
-    // gitlab.com rather than re-suggesting the disconnected host.
-    let mut s = settings::load(&app).unwrap_or_default();
-    s.gitlab_base_url = None;
-    settings::save(&app, &s)?;
-    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
-    aggregator::refresh_now(&state);
-    sweep
-}
-
-#[tauri::command]
-pub async fn cb_set_token(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-    token: String,
-    base_url: String,
-) -> Result<Viewer, String> {
-    let provider = CodebergProvider::connect(token.clone(), base_url.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-    let viewer = provider.viewer.clone();
-    let account = accounts::account_from(
-        Provider::Codeberg,
-        &viewer,
-        AuthMethod::Pat,
-        Some(provider.base_url().to_string()),
-    );
-    keychain::save(&account.id, &token)
-        .await
-        .map_err(|e| format!("keychain: {e}"))?;
-    let id = account.id.clone();
-    accounts::upsert(&app, account)?;
-    let mut s = settings::load(&app).unwrap_or_default();
-    s.codeberg_base_url = Some(provider.base_url().to_string());
-    settings::save(&app, &s)?;
-
-    state.codeberg.write().await.insert(id, Arc::new(provider));
-    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
-    aggregator::refresh_now(&state);
-    Ok(viewer)
-}
-
-#[tauri::command]
-pub async fn cb_status(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-) -> Result<Option<CodebergStatus>, String> {
-    state.ensure_initialized(&app).await;
-    Ok(state
-        .codeberg
-        .read()
-        .await
-        .values()
-        .next()
-        .map(|p| CodebergStatus {
-            viewer: p.viewer.clone(),
-            base_url: p.base_url().to_string(),
-        }))
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct CodebergStatus {
-    pub viewer: Viewer,
-    pub base_url: String,
-}
-
-#[tauri::command]
-pub async fn cb_disconnect(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let sweep = disconnect_all_for_provider(&state, &app, Provider::Codeberg).await;
-    let _ = keychain::delete(CB_LEGACY_KEY).await;
-    let mut s = settings::load(&app).unwrap_or_default();
-    s.codeberg_base_url = None;
-    settings::save(&app, &s)?;
+    let sweep = disconnect_all_for_provider(&state, &app, provider).await;
+    match provider {
+        Provider::Github => {
+            let _ = keychain::delete(GH_LEGACY_KEY).await;
+        }
+        Provider::Gitlab | Provider::MpsdGitlab => {
+            let _ = keychain::delete(GL_LEGACY_KEY).await;
+            let mut s = settings::load(&app).unwrap_or_default();
+            s.gitlab_base_url = None;
+            settings::save(&app, &s)?;
+        }
+        Provider::Codeberg => {
+            let _ = keychain::delete(CB_LEGACY_KEY).await;
+            let mut s = settings::load(&app).unwrap_or_default();
+            s.codeberg_base_url = None;
+            settings::save(&app, &s)?;
+        }
+    }
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     aggregator::refresh_now(&state);
     sweep
@@ -705,11 +678,9 @@ pub async fn accounts_disconnect(
         .await
         .map_err(|e| format!("removing token from keychain failed: {e}"))?;
     accounts::remove(&app, &account_id)?;
-    // Triple-remove on HashMaps is O(1) per call and avoids having to know
-    // upfront which provider owns the id. Only one will actually hold it.
-    state.github.write().await.remove(&account_id);
-    state.gitlab.write().await.remove(&account_id);
-    state.codeberg.write().await.remove(&account_id);
+    // One registry now holds every provider, keyed by account id — a single
+    // remove drops the right account regardless of which forge owns it.
+    state.providers.write().await.remove(&account_id);
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     aggregator::refresh_now(&state);
     Ok(())
@@ -731,27 +702,24 @@ async fn disconnect_all_for_provider(
     app: &AppHandle,
     provider: Provider,
 ) -> Result<(), String> {
+    // All provider ids share a `<slug>:` prefix (github:/gitlab:/codeberg:),
+    // so one prefix match selects every account of this provider out of the
+    // unified registry. `MpsdGitlab` collapses to the same `gitlab` slug.
+    let slug_prefix = format!("{}:", accounts::provider_slug(provider));
     let mut ids = std::collections::HashSet::new();
-    match provider {
-        Provider::Github => ids.extend(state.github.read().await.keys().cloned()),
-        Provider::Gitlab | Provider::MpsdGitlab => {
-            ids.extend(state.gitlab.read().await.keys().cloned())
-        }
-        Provider::Codeberg => ids.extend(state.codeberg.read().await.keys().cloned()),
-    }
+    ids.extend(
+        state
+            .providers
+            .read()
+            .await
+            .keys()
+            .filter(|k| k.starts_with(&slug_prefix))
+            .cloned(),
+    );
+    // And from accounts.json, in case the registry and the file have drifted.
     if let Ok(file) = accounts::load(app) {
         for a in file.accounts {
-            let matches = matches!(
-                (a.provider, provider),
-                (Provider::Github, Provider::Github)
-                    | (Provider::Gitlab | Provider::MpsdGitlab, Provider::Gitlab)
-                    | (
-                        Provider::Gitlab | Provider::MpsdGitlab,
-                        Provider::MpsdGitlab
-                    )
-                    | (Provider::Codeberg, Provider::Codeberg)
-            );
-            if matches {
+            if accounts::provider_slug(a.provider) == accounts::provider_slug(provider) {
                 ids.insert(a.id);
             }
         }
@@ -766,17 +734,7 @@ async fn disconnect_all_for_provider(
             errors.push(format!("registry remove for {id}: {e}"));
             continue;
         }
-        match provider {
-            Provider::Github => {
-                state.github.write().await.remove(&id);
-            }
-            Provider::Gitlab | Provider::MpsdGitlab => {
-                state.gitlab.write().await.remove(&id);
-            }
-            Provider::Codeberg => {
-                state.codeberg.write().await.remove(&id);
-            }
-        }
+        state.providers.write().await.remove(&id);
     }
     if errors.is_empty() {
         Ok(())
@@ -968,18 +926,12 @@ pub async fn clone_repo(
     // the click landing, fall through to anonymous and let libgit2 surface
     // a clear auth error.
     let token: Option<String> = if let Some(id) = account_id.as_deref() {
-        if let Some(p) = state.github.read().await.get(id) {
-            Some(p.token().to_string())
-        } else if let Some(p) = state.gitlab.read().await.get(id) {
-            Some(p.token().to_string())
-        } else {
-            state
-                .codeberg
-                .read()
-                .await
-                .get(id)
-                .map(|p| p.token().to_string())
-        }
+        state
+            .providers
+            .read()
+            .await
+            .get(id)
+            .map(|p| p.token().to_string())
     } else {
         None
     };

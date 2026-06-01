@@ -47,6 +47,10 @@ src-tauri/WixTools/
 # Permission allow-lists are session-specific and shouldn't be shared.
 .claude/
 
+# ── Tooling scratch ───────────────────────────────────────────────
+# Playwright MCP screenshots/console dumps from local smoke tests.
+.playwright-mcp/
+
 # ── Logs & coverage ───────────────────────────────────────────────
 *.log
 npm-debug.log*

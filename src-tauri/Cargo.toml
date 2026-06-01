@@ -30,6 +30,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 keyring = { version = "3", features = ["apple-native"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "2"
+# Lets the per-forge providers share one object-safe `ProviderBackend` trait
+# with `async fn` methods (boxed futures), so the aggregator and AppState can
+# hold `Arc<dyn ProviderBackend>` instead of three concrete provider maps.
+async-trait = "0.1"
 
 # M3 — Local index: filesystem walking + libgit2 for per-repo diagnostics.
 # `vendored-libgit2` ships libgit2 in-tree so we don't need a system package.

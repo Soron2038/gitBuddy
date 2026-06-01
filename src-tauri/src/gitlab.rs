@@ -6,32 +6,22 @@
 //! `Authorization: Bearer …`, which works for both classic PATs and the
 //! newer project/group access tokens.
 
+use crate::provider_util::{
+    humanise_age, reason_priority, within_days, ProviderBackend, ProviderError,
+};
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use thiserror::Error;
 
 const USER_AGENT: &str = concat!("gitBuddy/", env!("CARGO_PKG_VERSION"));
 
-#[derive(Debug, Error)]
-pub enum GitLabError {
-    #[error("network error: {0}")]
-    Network(#[from] reqwest::Error),
-    #[error("authentication failed — check that the token is valid and has the `api` scope")]
-    Unauthorized,
-    #[error("GitLab API at {base_url} returned HTTP {status}")]
-    HttpStatus {
-        base_url: String,
-        status: StatusCode,
-    },
-    #[error("invalid base URL: {0}")]
-    InvalidBaseUrl(String),
-}
+/// Hint surfaced when GitLab rejects the token — names the scope to check.
+const AUTH_HINT: &str = "check that the token is valid and has the `api` scope";
 
-pub type Result<T> = std::result::Result<T, GitLabError>;
+pub type Result<T> = std::result::Result<T, ProviderError>;
 
 pub struct GitLabProvider {
     client: Client,
@@ -56,11 +46,6 @@ impl GitLabProvider {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
-    }
-
-    /// See [`crate::github::GitHubProvider::token`].
-    pub fn token(&self) -> &str {
-        &self.token
     }
 
     /// Items where the user is assigned, review-requested, or authored —
@@ -129,13 +114,11 @@ impl GitLabProvider {
         for h in handles {
             match h.await {
                 Ok(Ok(mut v)) => items.append(&mut v),
-                Ok(Err(e)) => return Err(e),
-                Err(_) => {
-                    return Err(GitLabError::HttpStatus {
-                        base_url: base.clone(),
-                        status: StatusCode::INTERNAL_SERVER_ERROR,
-                    });
-                }
+                // Hard auth failures propagate; every other per-scope error
+                // (rate limit, transient 5xx, or a panicked task) is tolerated
+                // so one failing filter doesn't blank the whole "waiting" list.
+                Ok(Err(e @ ProviderError::Unauthorized(_))) => return Err(e),
+                Ok(Err(_)) | Err(_) => {}
             }
         }
 
@@ -172,10 +155,11 @@ impl GitLabProvider {
 
             match resp.status() {
                 s if s.is_success() => {}
-                StatusCode::UNAUTHORIZED => return Err(GitLabError::Unauthorized),
+                StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
                 s => {
-                    return Err(GitLabError::HttpStatus {
-                        base_url: self.base_url.clone(),
+                    return Err(ProviderError::HttpStatus {
+                        provider: "GitLab",
+                        base_url: Some(self.base_url.clone()),
                         status: s,
                     });
                 }
@@ -263,10 +247,35 @@ impl GitLabProvider {
     }
 }
 
+#[async_trait::async_trait]
+impl ProviderBackend for GitLabProvider {
+    fn viewer(&self) -> &Viewer {
+        &self.viewer
+    }
+    fn token(&self) -> &str {
+        &self.token
+    }
+    fn base_url(&self) -> Option<&str> {
+        Some(&self.base_url)
+    }
+    async fn list_waiting(&self) -> Result<Vec<WaitingItem>> {
+        self.list_waiting().await
+    }
+    async fn list_repos(&self) -> Result<Vec<Repo>> {
+        self.list_repos().await
+    }
+    async fn list_releases(&self) -> Result<Vec<Release>> {
+        self.list_releases().await
+    }
+    async fn list_ci(&self) -> Result<Vec<CiRun>> {
+        self.list_ci().await
+    }
+}
+
 fn normalise_base_url(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/').to_string();
     if trimmed.is_empty() {
-        return Err(GitLabError::InvalidBaseUrl(
+        return Err(ProviderError::InvalidBaseUrl(
             "base URL must not be empty".into(),
         ));
     }
@@ -276,7 +285,7 @@ fn normalise_base_url(raw: &str) -> Result<String> {
     // host. If a localhost dev-instance ever needs `http://`, gate it
     // explicitly on `localhost` / `127.0.0.1` / `::1` then.
     if !trimmed.starts_with("https://") {
-        return Err(GitLabError::InvalidBaseUrl(format!(
+        return Err(ProviderError::InvalidBaseUrl(format!(
             "base URL must start with https://: {trimmed}"
         )));
     }
@@ -305,9 +314,10 @@ async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Vi
                 name: r.name,
             })
         }
-        StatusCode::UNAUTHORIZED => Err(GitLabError::Unauthorized),
-        s => Err(GitLabError::HttpStatus {
-            base_url: base_url.to_string(),
+        StatusCode::UNAUTHORIZED => Err(ProviderError::Unauthorized(AUTH_HINT)),
+        s => Err(ProviderError::HttpStatus {
+            provider: "GitLab",
+            base_url: Some(base_url.to_string()),
             status: s,
         }),
     }
@@ -337,10 +347,11 @@ async fn fetch_items(
 
     match resp.status() {
         s if s.is_success() => {}
-        StatusCode::UNAUTHORIZED => return Err(GitLabError::Unauthorized),
+        StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         s => {
-            return Err(GitLabError::HttpStatus {
-                base_url: base_url.to_string(),
+            return Err(ProviderError::HttpStatus {
+                provider: "GitLab",
+                base_url: Some(base_url.to_string()),
                 status: s,
             });
         }
@@ -471,41 +482,6 @@ fn pick_provider(base_url: &str) -> Provider {
     }
 }
 
-fn humanise_age(ts: &str, now: DateTime<Utc>) -> String {
-    let Ok(t) = DateTime::parse_from_rfc3339(ts) else {
-        return "?".into();
-    };
-    let mins = (now - t.with_timezone(&Utc)).num_minutes();
-    if mins < 1 {
-        "now".into()
-    } else if mins < 60 {
-        format!("{mins}m")
-    } else if mins < 60 * 24 {
-        format!("{}h", mins / 60)
-    } else if mins < 60 * 24 * 30 {
-        format!("{}d", mins / (60 * 24))
-    } else if mins < 60 * 24 * 365 {
-        format!("{}mo", mins / (60 * 24 * 30))
-    } else {
-        format!("{}y", mins / (60 * 24 * 365))
-    }
-}
-
-fn reason_priority(r: ItemReason) -> u8 {
-    match r {
-        ItemReason::Assigned => 0,
-        ItemReason::Review => 1,
-        ItemReason::Authored => 2,
-        ItemReason::Mentioned => 3,
-    }
-}
-
-fn within_days(timestamp: &str, now: &DateTime<Utc>, days: i64) -> bool {
-    DateTime::parse_from_rfc3339(timestamp)
-        .map(|t| (*now - t.with_timezone(&Utc)).num_days() <= days)
-        .unwrap_or(false)
-}
-
 /// Repo.id from `into_repo` is shaped `"gl:<numeric>"` so the local-index
 /// join can tell GitLab and GitHub ids apart. The release/pipeline
 /// endpoints want the raw numeric id back; this peels the prefix.
@@ -536,13 +512,14 @@ async fn fetch_latest_release(
         // 404 means the project has no releases yet (or the project itself
         // is gone) — not an error.
         StatusCode::NOT_FOUND => return Ok(None),
-        StatusCode::UNAUTHORIZED => return Err(GitLabError::Unauthorized),
+        StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         // 403 happens on archived projects under some visibility settings —
         // graceful no-op rather than failing the whole batch.
         StatusCode::FORBIDDEN => return Ok(None),
         s => {
-            return Err(GitLabError::HttpStatus {
-                base_url: base_url.to_string(),
+            return Err(ProviderError::HttpStatus {
+                provider: "GitLab",
+                base_url: Some(base_url.to_string()),
                 status: s,
             });
         }
@@ -664,11 +641,12 @@ async fn fetch_latest_pipeline(
                 account_id: None,
             }));
         }
-        StatusCode::UNAUTHORIZED => return Err(GitLabError::Unauthorized),
+        StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         StatusCode::FORBIDDEN => return Ok(None),
         s => {
-            return Err(GitLabError::HttpStatus {
-                base_url: base_url.to_string(),
+            return Err(ProviderError::HttpStatus {
+                provider: "GitLab",
+                base_url: Some(base_url.to_string()),
                 status: s,
             });
         }
