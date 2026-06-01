@@ -1082,12 +1082,13 @@
 
 <div class="app">
 
-  <!-- Custom title bar (drag region). titleBarStyle: 'Overlay' on macOS
-       means the traffic lights are drawn on top of this area at the left. -->
-  <header class="titlebar" data-tauri-drag-region>
-    <span class="tb-spacer" data-tauri-drag-region></span>
+  <!-- Custom title bar. data-tauri-drag-region="deep" makes the whole bar a drag
+       handle (clickable children auto-excluded); needs core:window:allow-start-dragging
+       in capabilities/default.json. titleBarStyle:'Overlay' overlays the traffic lights. -->
+  <header class="titlebar" data-tauri-drag-region="deep">
+    <span class="tb-spacer"></span>
     <Buddy size={20} />
-    <span class="brand" data-tauri-drag-region>gitBuddy</span>
+    <span class="brand">gitBuddy</span>
     {#if view === 'settings'}
       <button
         type="button"
@@ -1101,11 +1102,11 @@
         </svg>
         Overview
       </button>
-      <span class="crumb" data-tauri-drag-region>/ <b>Settings</b></span>
+      <span class="crumb">/ <b>Settings</b></span>
     {:else}
-      <span class="crumb" data-tauri-drag-region>/ <b>Overview</b></span>
+      <span class="crumb">/ <b>Overview</b></span>
     {/if}
-    <span class="tb-flex" data-tauri-drag-region></span>
+    <span class="tb-flex"></span>
     <span class="sync">
       <span class="dot" aria-hidden="true"></span>
       {connected ? `Synced ${syncText}` : 'Not connected'}
