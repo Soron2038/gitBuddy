@@ -49,6 +49,43 @@ done
 
 BUNDLE_ROOT="src-tauri/target"
 OUT_DIR="release"
+ICNS="src-tauri/icons/icon.icns"
+
+# Give the .dmg FILE the gitBuddy icon in Finder. Tauri already bakes a
+# `.VolumeIcon.icns` into the image (so the *mounted* volume shows the icon),
+# but the .dmg file's own Finder icon stays generic otherwise. We attach the
+# icon to the file's resource fork — using only Xcode Command Line Tools,
+# which are a prerequisite for building Tauri anyway, so no extra dependency.
+#
+# Caveat: the resource-fork icon survives local copies and AirDrop but is
+# stripped by a browser download (a macOS limitation) — the volume icon shown
+# on mount is what survives web distribution. Best-effort: any failure here
+# just warns, it never fails an otherwise-good build (call site uses `|| …`).
+apply_dmg_icon() {
+  local target="$1"
+  if [[ ! -f "$ICNS" ]]; then
+    echo "  note: $ICNS not found — leaving the generic .dmg icon."
+    return 0
+  fi
+  for tool in sips DeRez Rez SetFile; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "  note: '$tool' missing (install Xcode Command Line Tools) — kept generic .dmg icon."
+      return 0
+    fi
+  done
+  local td
+  td="$(mktemp -d)"
+  cp "$ICNS" "$td/icon.icns"
+  # `sips -i` writes the image as the file's own custom-icon resource, which
+  # DeRez then extracts as an 'icns' resource we can graft onto the target.
+  sips -i "$td/icon.icns" >/dev/null 2>&1
+  DeRez -only icns "$td/icon.icns" > "$td/icon.rsrc" 2>/dev/null
+  xattr -d com.apple.ResourceFork "$target" 2>/dev/null || true  # drop any prior icon
+  Rez -append "$td/icon.rsrc" -o "$target" 2>/dev/null
+  SetFile -a C "$target"                                          # flag: has custom icon
+  rm -rf "$td"
+  echo "  ✓ applied app icon to the .dmg file."
+}
 
 if [[ "$CLEAN" -eq 1 ]]; then
   echo "▸ Cleaning previous bundles…"
@@ -83,10 +120,11 @@ fi
 APP="$(find "$BUNDLE_ROOT" -type d -name 'gitBuddy.app' -path '*/bundle/macos/*' -newer "$MARKER" \
   -print 2>/dev/null | head -n 1 || true)"
 
-# ── Copy the .dmg into ./release/ under a clean name ──────────────────────
+# ── Copy the .dmg into ./release/ under a clean name + brand its icon ─────
 mkdir -p "$OUT_DIR"
 DMG_NAME="$(basename "$DMG")"
 cp -f "$DMG" "$OUT_DIR/$DMG_NAME"
+apply_dmg_icon "$OUT_DIR/$DMG_NAME" || echo "  note: icon step skipped (non-fatal)."
 
 # ── Summary ───────────────────────────────────────────────────────────────
 echo
