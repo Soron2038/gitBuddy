@@ -1,8 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
-  import { open as openDialog } from '@tauri-apps/plugin-dialog';
+  import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+  import {
+    enable as enableAutostart,
+    disable as disableAutostart,
+    isEnabled as isAutostartEnabled,
+  } from '@tauri-apps/plugin-autostart';
+  import { check as checkUpdate, type Update } from '@tauri-apps/plugin-updater';
+  import { relaunch } from '@tauri-apps/plugin-process';
   import { listen } from '@tauri-apps/api/event';
   import Buddy from '$lib/Buddy.svelte';
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
@@ -25,8 +32,11 @@
     lastSyncInfo,
     getSettings,
     saveSettings,
+    exportConfig,
+    importConfig,
     defaultSettings,
     runEditor,
+    runTerminal,
     indexLocalByRemote,
     localKeyForRepo,
     providerChipText,
@@ -83,6 +93,63 @@
   $effect(() => {
     editorInput = settings.editor_command ?? '';
   });
+  let terminalInput = $state('');
+  $effect(() => {
+    terminalInput = settings.terminal_command ?? '';
+  });
+  // "Start at login" lives in the autostart plugin (a macOS LaunchAgent), not
+  // in settings.json — the plugin is the source of truth. We mirror it into
+  // this state on mount and after each toggle so the checkbox reflects reality.
+  let autostartEnabled = $state(false);
+  let autostartBusy = $state(false);
+
+  // ── In-app updater (PRD §6.5) ─────────────────────────────────────────
+  // Silent check on launch + a manual "Check for updates" button in Settings.
+  type UpdateState = 'idle' | 'checking' | 'available' | 'downloading' | 'uptodate' | 'error';
+  let updateState = $state<UpdateState>('idle');
+  let updateVersion = $state<string | null>(null);
+  let updateError = $state<string | null>(null);
+  // The resolved Update handle from `check()`, kept out of $state — it's a
+  // non-serialisable plugin object we only need to drive downloadAndInstall.
+  let pendingUpdate: Update | null = null;
+
+  /** Check the configured endpoint for a newer signed release. `silent` (the
+   *  launch check) swallows "up to date" / errors so nothing pops up; the
+   *  manual button passes `false` to surface that feedback in Settings. */
+  async function checkForUpdates(silent: boolean) {
+    if (updateState === 'checking' || updateState === 'downloading') return;
+    updateState = 'checking';
+    updateError = null;
+    try {
+      const update = await checkUpdate();
+      if (update) {
+        pendingUpdate = update;
+        updateVersion = update.version;
+        updateState = 'available';
+      } else {
+        updateState = silent ? 'idle' : 'uptodate';
+      }
+    } catch (e) {
+      // A missing/placeholder pubkey or offline endpoint lands here. Stay
+      // quiet on the launch check; report it only when the user asked.
+      updateError = String(e);
+      updateState = silent ? 'idle' : 'error';
+    }
+  }
+
+  /** Download + install the pending update, then relaunch into the new build. */
+  async function installUpdate() {
+    if (!pendingUpdate) return;
+    updateState = 'downloading';
+    updateError = null;
+    try {
+      await pendingUpdate.downloadAndInstall();
+      await relaunch();
+    } catch (e) {
+      updateError = String(e);
+      updateState = 'error';
+    }
+  }
 
   // Add-Provider state (only used inside the Settings view).
   let addingProvider = $state(false);
@@ -504,6 +571,7 @@
       : [],
   );
   let selectedEditorCmd = $derived(settings.editor_command?.trim() ?? '');
+  let selectedTerminalCmd = $derived(settings.terminal_command?.trim() ?? '');
 
   // ── Data loading ──────────────────────────────────────────────────────
   async function loadAllData() {
@@ -561,6 +629,19 @@
 
   onMount(() => {
     let cancelled = false;
+
+    // Hydrate the "Start at login" checkbox from the OS LaunchAgent state.
+    isAutostartEnabled()
+      .then((v) => {
+        if (!cancelled) autostartEnabled = v;
+      })
+      .catch(() => {
+        /* plugin unavailable — leave the checkbox off */
+      });
+
+    // Silent update check on launch. Surfaces a banner only if something's
+    // available; failures (placeholder pubkey in dev, offline) stay quiet.
+    void checkForUpdates(true);
 
     (async () => {
       try {
@@ -738,6 +819,10 @@
       if (editorCmd.length > 0) {
         m.push({ label: `Open in ${editorCmd}`, onclick: () => runEditor(localDiag.path) });
       }
+      const terminalCmd = settings.terminal_command?.trim() ?? '';
+      if (terminalCmd.length > 0) {
+        m.push({ label: `Open in ${terminalCmd}`, onclick: () => runTerminal(localDiag.path) });
+      }
     }
     if (r.clone_url || r.ssh_url) m.push({ separator: true });
     if (r.clone_url) {
@@ -831,6 +916,63 @@
     if (normalised === (settings.editor_command ?? null)) return;
     settings = { ...settings, editor_command: normalised };
     await persistSettings();
+  }
+
+  async function persistTerminalCommand() {
+    const next = terminalInput.trim();
+    const normalised = next.length === 0 ? null : next;
+    if (normalised === (settings.terminal_command ?? null)) return;
+    settings = { ...settings, terminal_command: normalised };
+    await persistSettings();
+  }
+
+  async function exportConfigFlow() {
+    try {
+      const path = await saveDialog({
+        defaultPath: 'gitbuddy-config.json',
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (!path) return; // user cancelled
+      await exportConfig(path);
+    } catch (e) {
+      error = `Export failed: ${e}`;
+    }
+  }
+
+  async function importConfigFlow() {
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (typeof selected !== 'string') return; // cancelled / unexpected shape
+      // Backend persists + returns the clamped settings; adopt them so the
+      // form reflects the imported values without a round-trip.
+      settings = await importConfig(selected);
+    } catch (e) {
+      error = `Import failed: ${e}`;
+    }
+  }
+
+  async function toggleAutostart(value: boolean) {
+    if (autostartBusy) return;
+    autostartBusy = true;
+    try {
+      if (value) await enableAutostart();
+      else await disableAutostart();
+    } catch (e) {
+      error = `Start at login: ${e}`;
+    } finally {
+      // Re-read the real state rather than trusting `value` — if the call
+      // failed the checkbox should snap back to what the OS actually has.
+      try {
+        autostartEnabled = await isAutostartEnabled();
+      } catch {
+        /* leave the prior value */
+      }
+      autostartBusy = false;
+    }
   }
 
   async function toggleNotificationsEnabled(value: boolean) {
@@ -1112,6 +1254,21 @@
       {connected ? `Synced ${syncText}` : 'Not connected'}
     </span>
   </header>
+
+  {#if updateState === 'available'}
+    <div class="update-banner">
+      <span class="update-text">
+        A new version of gitBuddy ({updateVersion}) is available.
+      </span>
+      <button type="button" class="update-install" onclick={installUpdate}>
+        Install &amp; restart
+      </button>
+    </div>
+  {:else if updateState === 'downloading'}
+    <div class="update-banner">
+      <span class="update-text">Downloading update…</span>
+    </div>
+  {/if}
 
   {#if view === 'overview'}
     <!-- ─────────── Overview ─────────── -->
@@ -1656,6 +1813,16 @@
                   data-tip="Open with {editorCmd}"
                 >
                   Open in {editorCmd}
+                </button>
+              {/if}
+              {#if selectedTerminalCmd.length > 0}
+                <button
+                  type="button"
+                  class="dp-action"
+                  onclick={() => runTerminal(localDiag.path)}
+                  data-tip="Open with {selectedTerminalCmd}"
+                >
+                  Open in {selectedTerminalCmd}
                 </button>
               {/if}
             {/if}
@@ -2271,6 +2438,46 @@
           />
         </section>
 
+        <!-- Open-in-terminal application -->
+        <section class="set-sec">
+          <h3>Open in <em>terminal</em></h3>
+          <p class="set-help">
+            macOS application opened when you pick <em>Open in terminal</em> from
+            a repo's right-click menu — a new window opens in the repo folder.
+            Use the app's name: <code>Terminal</code>, <code>iTerm</code>,
+            <code>Warp</code>, <code>Ghostty</code>. Leave empty to hide that
+            menu entry.
+          </p>
+          <input
+            type="text"
+            class="set-input"
+            bind:value={terminalInput}
+            onblur={persistTerminalCommand}
+            onkeydown={(e) => e.key === 'Enter' && persistTerminalCommand()}
+            placeholder="Terminal"
+            spellcheck="false"
+            autocomplete="off"
+          />
+        </section>
+
+        <!-- Start at login -->
+        <section class="set-sec">
+          <h3>Start at <em>login</em></h3>
+          <p class="set-help">
+            Launch gitBuddy automatically when you log in to macOS. It starts
+            straight into the menu bar — no window pops up.
+          </p>
+          <label class="set-toggle">
+            <input
+              type="checkbox"
+              checked={autostartEnabled}
+              disabled={autostartBusy}
+              onchange={(e) => toggleAutostart((e.target as HTMLInputElement).checked)}
+            />
+            <span>Start gitBuddy at login</span>
+          </label>
+        </section>
+
         <!-- Notifications -->
         <section class="set-sec">
           <h3><em>Notifications</em></h3>
@@ -2353,6 +2560,58 @@
             <span class="set-slider-value">
               every {settings.poll_interval_minutes}&nbsp;min
             </span>
+          </div>
+        </section>
+
+        <!-- Backup & restore configuration -->
+        <section class="set-sec">
+          <h3>Backup &amp; <em>restore</em></h3>
+          <p class="set-help">
+            Save your settings (scan roots, ignore patterns, editor/terminal
+            commands, notification preferences, sync interval, instance URLs)
+            to a JSON file, or load them on another machine. Accounts and
+            tokens are <strong>not</strong> included — reconnect those after an
+            import.
+          </p>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button type="button" class="set-add" onclick={exportConfigFlow}>
+              Export config…
+            </button>
+            <button type="button" class="set-add" onclick={importConfigFlow}>
+              Import config…
+            </button>
+          </div>
+        </section>
+
+        <!-- Updates -->
+        <section class="set-sec">
+          <h3><em>Updates</em></h3>
+          <p class="set-help">
+            gitBuddy checks for a new signed release on launch. You can also
+            check manually — updates download and install in place, then the
+            app restarts.
+          </p>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+            <button
+              type="button"
+              class="set-add"
+              onclick={() => checkForUpdates(false)}
+              disabled={updateState === 'checking' || updateState === 'downloading'}
+            >
+              {updateState === 'checking' ? 'Checking…' : 'Check for updates'}
+            </button>
+            {#if updateState === 'available'}
+              <button type="button" class="set-add" onclick={installUpdate}>
+                Install {updateVersion} &amp; restart
+              </button>
+            {/if}
+            {#if updateState === 'uptodate'}
+              <span class="set-update-status">You're on the latest version.</span>
+            {:else if updateState === 'downloading'}
+              <span class="set-update-status">Downloading…</span>
+            {:else if updateState === 'error'}
+              <span class="set-update-status err">Update check failed: {updateError}</span>
+            {/if}
           </div>
         </section>
 
@@ -2766,6 +3025,38 @@
     padding: 8px 12px;
     border-radius: var(--r-sm);
   }
+
+  /* Update banner — sits under the title bar in both views. */
+  .update-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 18px;
+    background: var(--sage-soft);
+    border-bottom: 1px solid var(--sage);
+    font-size: 12.5px;
+    color: var(--ink);
+  }
+  .update-text { font-weight: 500; }
+  .update-install {
+    flex-shrink: 0;
+    height: 28px;
+    padding: 0 14px;
+    background: var(--terracotta);
+    color: var(--paper);
+    border: none;
+    border-radius: var(--r-sm);
+    font-size: 12px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .update-install:hover { opacity: 0.9; }
+  .set-update-status {
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+  .set-update-status.err { color: var(--plum); }
 
   .greet-row {
     display: flex;

@@ -157,16 +157,11 @@ pub async fn tick(app: &AppHandle, state: &AppState) {
     }
 }
 
-/// Compare the current snapshot against the persisted seen-store. On a
-/// cold start (`initialised == false`) we *only* seed — every visible
-/// item is recorded as already-seen and the flag flips. From the next
-/// tick on, anything not in the store is genuinely new and produces a
-/// `notifications::fire` call.
-///
-/// Mutates the store in place; the caller is responsible for persisting
-/// afterwards. Kept in this module (not `notifications`) because the diff
-/// shape is aggregator-internal — `notifications` deliberately doesn't
-/// know what a `WaitingItem` looks like.
+/// Settings-gated wrapper around [`compute_new_events`]: compute the genuinely
+/// new events for this tick (mutating the seen-store in place), then fire each
+/// through `notifications::fire`, which applies the user's master / DnD /
+/// per-event gates. Split this way so the diff core is unit-testable without a
+/// Tauri `AppHandle`.
 fn diff_and_notify(
     app: &AppHandle,
     settings: &NotificationSettings,
@@ -175,12 +170,36 @@ fn diff_and_notify(
     store: &mut SeenStore,
     now_ts: &str,
 ) {
+    for kind in compute_new_events(snapshot, viewer_logins, store, now_ts) {
+        notifications::fire(app, settings, kind);
+    }
+}
+
+/// Pure diff core. Walks the snapshot, records every sighting in `store`
+/// (preserving the first-seen timestamp so the TTL prune can expire it), and
+/// returns the events that are *genuinely new* — past the cold-start seed and
+/// not already recorded. No `AppHandle`, no settings gates: the gating stays in
+/// `notifications::fire`, which the wrapper applies to each returned event.
+/// Kept in this module (not `notifications`) because the diff shape is
+/// aggregator-internal — `notifications` deliberately doesn't know what a
+/// `WaitingItem` looks like.
+///
+/// On a cold start (`!store.initialised`) every visible item is seeded as
+/// already-seen and the flag flips, so the returned vec is empty — a fresh
+/// install / upgrade never replays a backlog.
+fn compute_new_events(
+    snapshot: &FetchSnapshot,
+    viewer_logins: &HashMap<String, String>,
+    store: &mut SeenStore,
+    now_ts: &str,
+) -> Vec<Kind> {
     let cold_start = !store.initialised;
+    let mut events = Vec::new();
 
     // Each item is recorded as seen exactly once (the first-sight timestamp is
-    // preserved across ticks so the TTL prune can expire it), and a
-    // notification fires only when it's a genuinely new sighting: past the
-    // cold-start seed and not already in the store.
+    // preserved across ticks so the TTL prune can expire it), and an event is
+    // emitted only on a genuinely new sighting: past the cold-start seed and
+    // not already in the store.
     for item in &snapshot.waiting {
         let key = waiting_key(item);
         let already_seen = store.waiting.contains_key(&key);
@@ -189,15 +208,11 @@ fn diff_and_notify(
             .entry(key)
             .or_insert_with(|| now_ts.to_string());
         if !cold_start && !already_seen {
-            notifications::fire(
-                app,
-                settings,
-                Kind::Waiting {
-                    reason_label: waiting_reason_label(item.reason).to_string(),
-                    repo: item.repo.clone(),
-                    title: item.title.clone(),
-                },
-            );
+            events.push(Kind::Waiting {
+                reason_label: waiting_reason_label(item.reason).to_string(),
+                repo: item.repo.clone(),
+                title: item.title.clone(),
+            });
         }
     }
 
@@ -208,19 +223,14 @@ fn diff_and_notify(
             .releases
             .entry(key)
             .or_insert_with(|| now_ts.to_string());
-        // The provider marks "published within last 7 days" via `is_new`.
-        // Older releases are backfill (the user just connected an account
-        // that's been around a while) — seed them silently so we don't spam
-        // on first sight of an old changelog.
+        // `is_new` = published within the last 7 days. Older releases are
+        // backfill (the user just connected a long-lived account) — seed them
+        // silently so we don't spam on first sight of an old changelog.
         if !cold_start && !already_seen && release.is_new {
-            notifications::fire(
-                app,
-                settings,
-                Kind::Release {
-                    repo: release.repo_full_name.clone(),
-                    tag_name: release.tag.clone(),
-                },
-            );
+            events.push(Kind::Release {
+                repo: release.repo_full_name.clone(),
+                tag_name: release.tag.clone(),
+            });
         }
     }
 
@@ -235,7 +245,7 @@ fn diff_and_notify(
     //      key is composed from the run's `html_url` when available, so
     //      a re-run (which gets a fresh URL) counts as a new event;
     //      a tick that sees the *same* still-failing run reuses the
-    //      already-stored key and no second notification fires.
+    //      already-stored key and no second event fires.
     for run in &snapshot.ci {
         if run.status != CiStatus::Fail {
             continue;
@@ -260,20 +270,18 @@ fn diff_and_notify(
             .entry(key)
             .or_insert_with(|| now_ts.to_string());
         if !cold_start && !already_seen {
-            notifications::fire(
-                app,
-                settings,
-                Kind::CiFailure {
-                    repo: run.repo_full_name.clone(),
-                    branch: run.branch.clone().unwrap_or_else(|| "main".to_string()),
-                },
-            );
+            events.push(Kind::CiFailure {
+                repo: run.repo_full_name.clone(),
+                branch: run.branch.clone().unwrap_or_else(|| "main".to_string()),
+            });
         }
     }
 
     if cold_start {
         store.initialised = true;
     }
+
+    events
 }
 
 fn waiting_key(item: &WaitingItem) -> String {
@@ -451,4 +459,216 @@ fn current_poll_interval(app: &AppHandle) -> Duration {
         .map(|s: &Settings| s.poll_interval_minutes)
         .unwrap_or(POLL_INTERVAL_DEFAULT) as u64;
     Duration::from_secs(minutes * 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ItemKind, Provider};
+
+    fn waiting(id: &str, account: &str) -> WaitingItem {
+        WaitingItem {
+            id: id.into(),
+            kind: ItemKind::Pr,
+            title: format!("Item {id}"),
+            repo: "o/r".into(),
+            provider: Provider::Github,
+            reason: ItemReason::Review,
+            url: "https://example.com".into(),
+            age_human: "1d".into(),
+            updated_at: "2026-06-01T00:00:00Z".into(),
+            account_id: Some(account.into()),
+        }
+    }
+
+    fn release(tag: &str, account: &str, is_new: bool) -> Release {
+        Release {
+            repo_id: "1".into(),
+            repo_full_name: "o/r".into(),
+            provider: Provider::Github,
+            tag: tag.into(),
+            name: tag.into(),
+            published_at: "2026-06-01T00:00:00Z".into(),
+            html_url: "https://example.com".into(),
+            is_prerelease: false,
+            is_new,
+            age_human: "1d".into(),
+            account_id: Some(account.into()),
+        }
+    }
+
+    fn ci(status: CiStatus, author: Option<&str>, account: Option<&str>, url: &str) -> CiRun {
+        CiRun {
+            repo_id: "1".into(),
+            repo_full_name: "o/r".into(),
+            status,
+            html_url: Some(url.into()),
+            branch: Some("main".into()),
+            workflow_name: Some("CI".into()),
+            author_login: author.map(Into::into),
+            account_id: account.map(Into::into),
+        }
+    }
+
+    /// `SeenStore` whose cold-start seed has already happened, so the diff
+    /// emits on new sightings instead of silently seeding.
+    fn seeded_store() -> SeenStore {
+        SeenStore {
+            initialised: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cold_start_seeds_without_emitting() {
+        let mut store = SeenStore::default(); // initialised == false
+        let snapshot = FetchSnapshot {
+            waiting: vec![waiting("1", "acc")],
+            releases: vec![release("v1", "acc", true)],
+            ..Default::default()
+        };
+        let events = compute_new_events(
+            &snapshot,
+            &HashMap::new(),
+            &mut store,
+            "2026-06-02T00:00:00Z",
+        );
+        assert!(events.is_empty(), "cold start must emit nothing");
+        assert!(store.initialised, "cold start flips the flag");
+        // Everything visible is recorded as seen so the *next* tick is the
+        // first one that can emit.
+        assert!(store
+            .waiting
+            .contains_key(&waiting_key(&snapshot.waiting[0])));
+        assert!(store
+            .releases
+            .contains_key(&release_key(&snapshot.releases[0])));
+    }
+
+    #[test]
+    fn second_tick_emits_only_genuinely_new() {
+        let mut store = seeded_store();
+        let snap1 = FetchSnapshot {
+            waiting: vec![waiting("1", "acc")],
+            ..Default::default()
+        };
+        let ev1 = compute_new_events(&snap1, &HashMap::new(), &mut store, "t1");
+        assert_eq!(ev1.len(), 1, "first sighting of item 1 emits");
+        assert!(matches!(ev1[0], Kind::Waiting { .. }));
+
+        // Same item again → already seen → nothing.
+        let ev2 = compute_new_events(&snap1, &HashMap::new(), &mut store, "t2");
+        assert!(ev2.is_empty(), "re-seeing the same item must not emit");
+
+        // A brand-new item alongside the old one → only the new one emits.
+        let snap3 = FetchSnapshot {
+            waiting: vec![waiting("1", "acc"), waiting("2", "acc")],
+            ..Default::default()
+        };
+        let ev3 = compute_new_events(&snap3, &HashMap::new(), &mut store, "t3");
+        assert_eq!(ev3.len(), 1, "only the unseen item emits");
+    }
+
+    #[test]
+    fn same_id_across_accounts_emits_independently() {
+        let mut store = seeded_store();
+        let snap = FetchSnapshot {
+            waiting: vec![waiting("1", "acc-a"), waiting("1", "acc-b")],
+            ..Default::default()
+        };
+        let ev = compute_new_events(&snap, &HashMap::new(), &mut store, "t");
+        assert_eq!(ev.len(), 2, "the same id via two accounts is two events");
+    }
+
+    #[test]
+    fn release_emits_only_when_is_new() {
+        let mut store = seeded_store();
+        let snap = FetchSnapshot {
+            releases: vec![release("v1", "acc", false)], // backfill, not new
+            ..Default::default()
+        };
+        let ev = compute_new_events(&snap, &HashMap::new(), &mut store, "t");
+        assert!(ev.is_empty(), "stale release must not emit");
+        // …but it is still recorded so it never emits later either.
+        assert!(store.releases.contains_key(&release_key(&snap.releases[0])));
+    }
+
+    #[test]
+    fn ci_failure_requires_fail_status_and_matching_author() {
+        let mut store = seeded_store();
+        let mut viewers = HashMap::new();
+        viewers.insert("acc".to_string(), "bjoernw".to_string());
+
+        // Passing run → no event.
+        let ok = FetchSnapshot {
+            ci: vec![ci(CiStatus::Ok, Some("bjoernw"), Some("acc"), "u1")],
+            ..Default::default()
+        };
+        assert!(compute_new_events(&ok, &viewers, &mut store, "t").is_empty());
+
+        // Failure triggered by someone else → no event.
+        let other = FetchSnapshot {
+            ci: vec![ci(CiStatus::Fail, Some("someoneelse"), Some("acc"), "u2")],
+            ..Default::default()
+        };
+        assert!(compute_new_events(&other, &viewers, &mut store, "t").is_empty());
+
+        // Failure I triggered (case-insensitive match) → one event.
+        let mine = FetchSnapshot {
+            ci: vec![ci(CiStatus::Fail, Some("BjoernW"), Some("acc"), "u3")],
+            ..Default::default()
+        };
+        let ev = compute_new_events(&mine, &viewers, &mut store, "t");
+        assert_eq!(ev.len(), 1);
+        assert!(matches!(ev[0], Kind::CiFailure { .. }));
+
+        // Same still-failing run on the next tick → no second event.
+        assert!(compute_new_events(&mine, &viewers, &mut store, "t").is_empty());
+    }
+
+    #[test]
+    fn ci_failure_skips_when_author_or_viewer_missing() {
+        let mut store = seeded_store();
+        // No author surfaced by the provider → skip.
+        let no_author = FetchSnapshot {
+            ci: vec![ci(CiStatus::Fail, None, Some("acc"), "u")],
+            ..Default::default()
+        };
+        assert!(compute_new_events(&no_author, &HashMap::new(), &mut store, "t").is_empty());
+
+        // Author present but the account has no known viewer login → skip.
+        let no_viewer = FetchSnapshot {
+            ci: vec![ci(CiStatus::Fail, Some("me"), Some("acc"), "u")],
+            ..Default::default()
+        };
+        assert!(compute_new_events(&no_viewer, &HashMap::new(), &mut store, "t").is_empty());
+    }
+
+    #[test]
+    fn key_functions_namespace_by_account() {
+        let w = waiting("42", "github:github.com:me");
+        assert_eq!(waiting_key(&w), "github:github.com:me:42");
+
+        let r = release("v2", "acc", true);
+        assert_eq!(release_key(&r), "acc:o/r:v2");
+
+        let c = ci(CiStatus::Fail, Some("me"), Some("acc"), "https://run/1");
+        assert_eq!(ci_failure_key(&c), "acc:https://run/1");
+
+        // Without a URL the key falls back to repo:branch so a still-failing
+        // run on a branch collapses to one key.
+        let mut c2 = c.clone();
+        c2.html_url = None;
+        assert_eq!(ci_failure_key(&c2), "acc:o/r:main");
+    }
+
+    #[test]
+    fn tag_extend_stamps_account_id() {
+        let mut out: Vec<WaitingItem> = Vec::new();
+        let mut item = waiting("1", "placeholder");
+        item.account_id = None; // provider leaves it unset
+        tag_extend(&mut out, vec![item], "acc-x");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].account_id.as_deref(), Some("acc-x"));
+    }
 }

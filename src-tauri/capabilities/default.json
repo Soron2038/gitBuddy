@@ -9,6 +9,9 @@
     "opener:default",
     "dialog:default",
     "clipboard-manager:allow-write-text",
-    "notification:default"
+    "notification:default",
+    "autostart:default",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

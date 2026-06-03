@@ -47,6 +47,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
+        // "Start at login" (PRD §4.9). Default macOS launcher is a LaunchAgent;
+        // no args needed — gitBuddy launches into the menu bar regardless.
+        .plugin(tauri_plugin_autostart::Builder::new().build())
+        // `relaunch` after the updater installs a new bundle (PRD §6.5).
+        .plugin(tauri_plugin_process::init())
         .manage(Arc::new(AppState::default()))
         .invoke_handler(tauri::generate_handler![
             commands::provider_set_token,
@@ -68,9 +73,18 @@ pub fn run() {
             commands::clone_repo,
             commands::get_settings,
             commands::save_settings,
+            commands::export_config,
+            commands::import_config,
             commands::run_editor,
+            commands::run_terminal,
         ])
         .setup(|app| {
+            // In-app auto-update (PRD §6.5). Desktop-only; the frontend drives
+            // the actual `check()` (silent on launch + a Settings button).
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             // gitBuddy lives in the menu bar — no dock icon by default.
             // Opening the main window flips this back to Regular so the
             // window can take focus normally.

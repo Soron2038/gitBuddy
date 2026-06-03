@@ -180,9 +180,9 @@ export interface NotificationEventToggles {
   ci_failure: boolean;
 }
 
-/** Persistent user settings. Schema v2 (M6.5+). The on-disk file is
- *  silently migrated from v1 by the Rust loader on first launch after an
- *  upgrade, so the frontend doesn't need to know about the older shape. */
+/** Persistent user settings. Schema v3 (M7+). The on-disk file is
+ *  silently migrated from older versions by the Rust loader on first launch
+ *  after an upgrade, so the frontend doesn't need to know about older shapes. */
 export interface Settings {
   version: number;
   scan_roots: string[];
@@ -192,6 +192,9 @@ export interface Settings {
   /** Shell command spawned by "Open in editor" — repo path is appended.
    *  Empty/null disables that quick-action menu entry. */
   editor_command: string | null;
+  /** macOS application name for "Open in terminal" (e.g. "Terminal", "iTerm",
+   *  "Warp"), launched via `open -a`. Empty/null disables that menu entry. */
+  terminal_command: string | null;
   notifications: NotificationSettings;
   /** Aggregator polling cadence in minutes. Clamped backend-side to
    *  `[1, 60]`; the UI should also enforce that band so a user can't
@@ -211,12 +214,13 @@ export const POLL_INTERVAL_DEFAULT = 5;
  *  the shape lives here instead of being copy-pasted into each route. */
 export function defaultSettings(): Settings {
   return {
-    version: 2,
+    version: 3,
     scan_roots: [],
     scan_ignore: [],
     gitlab_base_url: null,
     codeberg_base_url: null,
     editor_command: null,
+    terminal_command: null,
     notifications: {
       enabled: true,
       do_not_disturb: false,
@@ -384,6 +388,16 @@ export const getSettings = (): Promise<Settings> => invoke('get_settings');
 export const saveSettings = (settings: Settings): Promise<void> =>
   invoke('save_settings', { settings });
 
+/** Export portable config (settings only) to `path` as pretty-printed JSON.
+ *  Accounts and tokens are intentionally excluded — see the backend command. */
+export const exportConfig = (path: string): Promise<void> =>
+  invoke('export_config', { path });
+
+/** Import a config JSON (written by `exportConfig`) from `path`. Returns the
+ *  persisted (clamped) settings so the caller can update its state in place. */
+export const importConfig = (path: string): Promise<Settings> =>
+  invoke('import_config', { path });
+
 /** Aggregator metadata exposed by `last_sync_info` so a freshly-opened
  *  window can hydrate its "Synced X ago" footer without waiting for the
  *  next backend tick. */
@@ -416,6 +430,11 @@ export interface DataUpdatedPayload {
  *  editor_command is set in Settings. */
 export const runEditor = (path: string): Promise<void> =>
   invoke('run_editor', { path });
+
+/** Open the configured terminal application at `path` via `open -a`. Fails if
+ *  no terminal_command is set in Settings. */
+export const runTerminal = (path: string): Promise<void> =>
+  invoke('run_terminal', { path });
 
 /** Clone a remote repo to `<parentDir>/<folderName>`. When `accountId` is
  *  given the backend uses that account's stored token for HTTPS auth —

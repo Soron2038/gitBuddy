@@ -5,8 +5,9 @@
 //! plus a single `notifications_enabled` bool. v2 (M6.5+) wraps notification
 //! preferences in a struct so per-event toggles + Do-Not-Disturb fit, and
 //! introduces `poll_interval_minutes` so users can dial the aggregator
-//! cadence without rebuilding. The migration is silent and one-shot: on the
-//! first launch after upgrade, `load()` rewrites the file in v2 form.
+//! cadence without rebuilding. v3 (M7) adds `terminal_command` for the
+//! "Open in terminal" quick action. The migration is silent and one-shot: on
+//! the first launch after upgrade, `load()` rewrites the file in v3 form.
 
 use crate::util::atomic_write;
 use serde::{Deserialize, Serialize};
@@ -14,9 +15,9 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 /// Current schema version. Bumped on every breaking change to the on-disk
-/// JSON layout. Migration logic in `migrate_from_value` covers v1→v2; later
+/// JSON layout. Migration logic in `migrate_from_value` covers v1→v2→v3; later
 /// bumps should add a `vN_to_vN_plus_1` step rather than rewriting history.
-pub const CURRENT_VERSION: u32 = 2;
+pub const CURRENT_VERSION: u32 = 3;
 
 /// Sane band for the user-configurable polling cadence (minutes).
 /// Below 1 min hammers the provider APIs and burns rate-limit budget;
@@ -53,6 +54,12 @@ pub struct Settings {
     /// appended as the last argument (e.g. `"code"` becomes `code /Users/.../repo`).
     #[serde(default)]
     pub editor_command: Option<String>,
+    /// macOS application name used by the "Open in terminal" quick action,
+    /// launched via `open -a "<name>" <repo-path>` so a GUI terminal opens a
+    /// new window in the repo directory (e.g. `"Terminal"`, `"iTerm"`,
+    /// `"Warp"`). Whitespace- or empty-string disables the menu entry.
+    #[serde(default)]
+    pub terminal_command: Option<String>,
     /// Notification preferences. The frontend gates UI on these; the backend
     /// aggregator gates the actual `notifications::fire` call so a toggle
     /// flipped in one window takes effect everywhere via `settings-changed`.
@@ -133,6 +140,7 @@ impl Default for Settings {
             gitlab_base_url: None,
             codeberg_base_url: None,
             editor_command: None,
+            terminal_command: None,
             notifications: NotificationSettings::default(),
             poll_interval_minutes: POLL_INTERVAL_DEFAULT,
         }
@@ -223,8 +231,11 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
 /// `AppHandle` so the migration is unit-testable.
 fn migrate_from_value(value: serde_json::Value, from_version: u32) -> Result<Settings, String> {
     match from_version {
+        // v1's notification shape differs from the current struct, so it gets
+        // a dedicated step that also lands the v3 fields at their defaults.
         0 | 1 => migrate_v1_to_v2(value),
-        // A future bump would chain here: 2 → 3 → ... using the loaded
+        2 => migrate_v2_to_v3(value),
+        // A future bump would chain here: 3 → 4 → ... using the loaded
         // intermediate Settings as input.
         v => Err(format!("unsupported settings version on disk: {v}")),
     }
@@ -254,6 +265,8 @@ fn migrate_v1_to_v2(value: serde_json::Value) -> Result<Settings, String> {
         gitlab_base_url: v1.gitlab_base_url,
         codeberg_base_url: v1.codeberg_base_url,
         editor_command: v1.editor_command,
+        // v3 field — v1 predates the "Open in terminal" action.
+        terminal_command: None,
         notifications: NotificationSettings {
             // Carry the v1 master toggle forward; per-event toggles default
             // to "on" so the upgrade doesn't surprise the user with new
@@ -263,6 +276,17 @@ fn migrate_v1_to_v2(value: serde_json::Value) -> Result<Settings, String> {
         },
         poll_interval_minutes: POLL_INTERVAL_DEFAULT,
     })
+}
+
+/// v2→v3 added `terminal_command`. v2's on-disk shape is otherwise identical
+/// to the current struct, and `terminal_command` carries `#[serde(default)]`,
+/// so the current `Settings` deserialises a v2 file directly with the new
+/// field defaulting to `None`. We only restamp the version.
+fn migrate_v2_to_v3(value: serde_json::Value) -> Result<Settings, String> {
+    let mut settings: Settings =
+        serde_json::from_value(value).map_err(|e| format!("v2 parse: {e}"))?;
+    settings.version = CURRENT_VERSION;
+    Ok(settings)
 }
 
 #[cfg(test)]
@@ -281,7 +305,7 @@ mod tests {
             "notifications_enabled": true,
         });
         let s = migrate_from_value(v1, 1).expect("migration");
-        assert_eq!(s.version, 2);
+        assert_eq!(s.version, CURRENT_VERSION);
         assert!(s.notifications.enabled);
         assert!(!s.notifications.do_not_disturb);
         assert!(s.notifications.events.waiting);
@@ -289,6 +313,8 @@ mod tests {
         assert!(s.notifications.events.ci_failure);
         assert_eq!(s.poll_interval_minutes, POLL_INTERVAL_DEFAULT);
         assert_eq!(s.editor_command.as_deref(), Some("code"));
+        // v1 predates the terminal action — it lands at its default.
+        assert_eq!(s.terminal_command, None);
     }
 
     #[test]
@@ -308,7 +334,36 @@ mod tests {
         let on_disk_version = v1.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
         assert_eq!(on_disk_version, 1);
         let s = migrate_from_value(v1, on_disk_version).expect("migration");
-        assert_eq!(s.version, 2);
+        assert_eq!(s.version, CURRENT_VERSION);
+    }
+
+    #[test]
+    fn migrates_v2_to_v3_defaults_terminal_command() {
+        // A canonical v2 file: every current field except `terminal_command`,
+        // which v2 predates. The migration restamps the version and leaves the
+        // new field at its `None` default.
+        let v2 = json!({
+            "version": 2,
+            "scan_roots": ["/Users/x/Developer"],
+            "scan_ignore": ["target"],
+            "gitlab_base_url": "https://gitlab.gwdg.de",
+            "codeberg_base_url": null,
+            "editor_command": "code",
+            "notifications": {
+                "enabled": true,
+                "do_not_disturb": false,
+                "events": { "waiting": true, "releases": false, "ci_failure": true }
+            },
+            "poll_interval_minutes": 10,
+        });
+        let s = migrate_from_value(v2, 2).expect("migration");
+        assert_eq!(s.version, CURRENT_VERSION);
+        assert_eq!(s.terminal_command, None);
+        // Existing v2 fields survive untouched.
+        assert_eq!(s.editor_command.as_deref(), Some("code"));
+        assert_eq!(s.gitlab_base_url.as_deref(), Some("https://gitlab.gwdg.de"));
+        assert_eq!(s.poll_interval_minutes, 10);
+        assert!(!s.notifications.events.releases);
     }
 
     #[test]

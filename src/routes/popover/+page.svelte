@@ -41,6 +41,7 @@
     getSettings,
     defaultSettings,
     runEditor,
+    runTerminal,
     indexLocalByRemote,
     localKeyForRepo,
     providerLabel,
@@ -270,6 +271,7 @@
     const local = localByKey.get(localKeyForRepo(r));
     const localPath = local?.[0]?.path;
     const hasEditor = !!(settings.editor_command && settings.editor_command.trim());
+    const hasTerminal = !!(settings.terminal_command && settings.terminal_command.trim());
 
     const items: MenuItem[] = [
       { label: 'Open in browser', onclick: () => void openUrl(r.html_url) },
@@ -282,6 +284,18 @@
           onclick: async () => {
             try {
               await runEditor(localPath);
+            } catch (err) {
+              error = String(err);
+            }
+          },
+        });
+      }
+      if (hasTerminal) {
+        items.push({
+          label: `Open in terminal (${settings.terminal_command?.trim()})`,
+          onclick: async () => {
+            try {
+              await runTerminal(localPath);
             } catch (err) {
               error = String(err);
             }
@@ -309,6 +323,7 @@
   function openLocalRepoMenu(e: MouseEvent, l: LocalRepo) {
     e.preventDefault();
     const hasEditor = !!(settings.editor_command && settings.editor_command.trim());
+    const hasTerminal = !!(settings.terminal_command && settings.terminal_command.trim());
     const items: MenuItem[] = [
       { label: 'Show in Finder', onclick: () => void revealItemInDir(l.path) },
     ];
@@ -318,6 +333,18 @@
         onclick: async () => {
           try {
             await runEditor(l.path);
+          } catch (err) {
+            error = String(err);
+          }
+        },
+      });
+    }
+    if (hasTerminal) {
+      items.push({
+        label: `Open in terminal (${settings.terminal_command?.trim()})`,
+        onclick: async () => {
+          try {
+            await runTerminal(l.path);
           } catch (err) {
             error = String(err);
           }

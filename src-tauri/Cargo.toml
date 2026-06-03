@@ -21,6 +21,15 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
+# M7 — "Start at login" toggle (PRD §4.9). Manages a macOS LaunchAgent; the
+# plugin is the single source of truth for the on/off state (queried via
+# `isEnabled`), so there's no mirrored field in settings.json to drift.
+tauri-plugin-autostart = "2"
+# M7 — in-app auto-update (PRD §6.5). `updater` checks a signed `latest.json`
+# on the GitHub release and installs the new bundle; `process` provides the
+# `relaunch` the frontend calls after `downloadAndInstall`.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -45,4 +54,9 @@ async-trait = "0.1"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 walkdir = "2"
 dirs = "6"
+
+[dev-dependencies]
+# Local-index tests build real git repos in a throwaway temp dir and run the
+# libgit2 diagnostics against them; tempfile handles creation + cleanup.
+tempfile = "3"
 

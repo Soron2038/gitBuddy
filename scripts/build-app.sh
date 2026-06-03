@@ -15,14 +15,20 @@
 #
 # Any flags other than --clean are passed straight through to `tauri build`.
 #
-# SIGNING: this produces an *ad-hoc / unsigned* bundle. Production signing +
-# notarization with an Apple Developer ID is a later milestone (see
-# docs/DECISIONS.md and PRD M7). Until then, opening the .app on another Mac
-# trips Gatekeeper — the recipient right-clicks the app and chooses "Open", or
-# runs `xattr -dr com.apple.quarantine /path/to/gitBuddy.app`. If the standard
-# Apple signing env vars (APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD,
-# APPLE_TEAM_ID) are exported, `tauri build` picks them up automatically and
-# this script needs no change.
+# SIGNING (Apple): without the standard Apple env vars this produces an
+# *ad-hoc / unsigned* bundle — opening the .app on another Mac trips Gatekeeper
+# (recipient right-clicks → "Open", or `xattr -dr com.apple.quarantine
+# /path/to/gitBuddy.app`). Export APPLE_SIGNING_IDENTITY, APPLE_ID,
+# APPLE_PASSWORD and APPLE_TEAM_ID and `tauri build` signs + notarizes + staples
+# automatically; this script needs no change. See docs/RELEASING.md.
+#
+# SIGNING (updater): tauri.conf.json sets `bundle.createUpdaterArtifacts: true`,
+# so `tauri build` also emits a `.app.tar.gz` updater bundle and its `.sig`
+# minisign signature — but ONLY if TAURI_SIGNING_PRIVATE_KEY (and, if the key
+# is password-protected, TAURI_SIGNING_PRIVATE_KEY_PASSWORD) is exported. Generate
+# the keypair once with `npm run tauri signer generate` and paste the public key
+# into tauri.conf.json's `plugins.updater.pubkey`. Without the env var the build
+# fails at the bundle step. See docs/RELEASING.md for the full release flow.
 
 set -euo pipefail
 
@@ -126,13 +132,37 @@ DMG_NAME="$(basename "$DMG")"
 cp -f "$DMG" "$OUT_DIR/$DMG_NAME"
 apply_dmg_icon "$OUT_DIR/$DMG_NAME" || echo "  note: icon step skipped (non-fatal)."
 
+# ── Copy updater artifacts (.app.tar.gz + .sig) when this build made them ──
+# Produced only when TAURI_SIGNING_PRIVATE_KEY was exported (the build emits
+# them next to the .app under bundle/macos/). Both go on the GitHub release and
+# are referenced from latest.json — see docs/RELEASING.md.
+UPDATER_TARBALL="$(find "$BUNDLE_ROOT" -type f -name '*.app.tar.gz' -path '*/bundle/macos/*' \
+  -newer "$MARKER" -print 2>/dev/null | head -n 1 || true)"
+UPDATER_FOUND=0
+if [[ -n "$UPDATER_TARBALL" ]]; then
+  cp -f "$UPDATER_TARBALL" "$OUT_DIR/"
+  [[ -f "$UPDATER_TARBALL.sig" ]] && cp -f "$UPDATER_TARBALL.sig" "$OUT_DIR/"
+  UPDATER_FOUND=1
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────
 echo
 echo "✓ Build complete."
 echo
 printf '  %-9s %s\n' "DMG:" "$OUT_DIR/$DMG_NAME  ($(du -h "$OUT_DIR/$DMG_NAME" | cut -f1))"
 [[ -n "$APP" ]] && printf '  %-9s %s\n' "App:" "$APP"
+if [[ "$UPDATER_FOUND" -eq 1 ]]; then
+  printf '  %-9s %s\n' "Updater:" "$OUT_DIR/$(basename "$UPDATER_TARBALL") (+ .sig)"
+fi
 echo
-echo "  This bundle is unsigned (ad-hoc). On another Mac, Gatekeeper will block"
-echo "  it until the recipient right-clicks → Open, or runs:"
+if [[ "$UPDATER_FOUND" -eq 1 ]]; then
+  echo "  Updater artifacts present — upload the .dmg, the .app.tar.gz and its .sig"
+  echo "  to the GitHub release, then publish latest.json. See docs/RELEASING.md."
+else
+  echo "  No updater artifacts: TAURI_SIGNING_PRIVATE_KEY was not set, so the"
+  echo "  in-app updater can't ship this build. See docs/RELEASING.md to enable it."
+fi
+echo
+echo "  If unsigned (no Apple env vars), Gatekeeper blocks the .app on other Macs"
+echo "  until the recipient right-clicks → Open, or runs:"
 echo "    xattr -dr com.apple.quarantine \"/Applications/gitBuddy.app\""

@@ -992,6 +992,54 @@ pub fn save_settings(
     Ok(())
 }
 
+/// Export portable configuration (settings only) to a user-chosen `path` as
+/// pretty-printed JSON — the `settings.json` content (scan roots + ignore
+/// patterns, editor/terminal commands, notification preferences, poll
+/// interval, provider base URLs). The frontend picks `path` via a native save
+/// dialog; the actual file write stays in the Rust core where the rest of the
+/// persistence lives, so no extra fs plugin/capability is needed.
+///
+/// Accounts and tokens are deliberately excluded. Tokens live only in the
+/// Keychain and never leave it; an account record without its secret can't be
+/// restored into a working connection (there's no "needs re-auth" account
+/// state), so on a new machine the user reconnects accounts — the base URLs
+/// they need for self-hosted instances ride along in the settings above.
+/// Start-at-login is a macOS LaunchAgent owned by the OS and likewise out of
+/// band.
+#[tauri::command]
+pub fn export_config(app: AppHandle, path: String) -> Result<(), String> {
+    let settings = settings::load(&app)?;
+    let json =
+        serde_json::to_string_pretty(&settings).map_err(|e| format!("serialising config: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("writing {path}: {e}"))
+}
+
+/// Import configuration previously produced by `export_config` from a
+/// user-chosen `path`. Reads the file, parses it into `Settings` (rejecting
+/// anything malformed), persists it through the same atomic-write + clamp path
+/// `save_settings` uses, then wakes the aggregator so changed scan roots / poll
+/// interval take effect immediately instead of on the next idle tick. Returns
+/// the persisted (clamped) settings so the caller can refresh its own state
+/// without a follow-up `get_settings`.
+#[tauri::command]
+pub fn import_config(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+    path: String,
+) -> Result<Settings, String> {
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("reading {path}: {e}"))?;
+    let settings: Settings =
+        serde_json::from_str(&raw).map_err(|e| format!("parsing config: {e}"))?;
+    settings::save(&app, &settings)?;
+    let _ = app.emit(EVT_SETTINGS_CHANGED, ());
+    state.settings_reload.notify_one();
+    // Scan roots may have changed — kick an immediate tick so the local index
+    // reflects the imported config without waiting out the poll interval.
+    aggregator::refresh_now(&state);
+    // Hand back the clamped, persisted form (poll interval pinned to band).
+    settings::load(&app)
+}
+
 /// Run the user-configured editor command with `path` appended as the final
 /// argument. Shells out via `sh -c` so PATH lookup (and aliases like `code`,
 /// `cursor`, `zed`) work without us having to teach the binary about every
@@ -1021,4 +1069,35 @@ pub async fn run_editor(app: AppHandle, path: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("editor task panicked: {e}"))?
+}
+
+/// Open the user-configured terminal application at `path` via macOS
+/// `open -a "<App>" <path>`, which launches (or reuses) that terminal with a
+/// new session in the repo directory. Unlike `run_editor`, `terminal_command`
+/// is an *application name* (e.g. "Terminal", "iTerm", "Warp"), not a shell
+/// command — GUI terminals don't take a working directory as a positional CLI
+/// arg, but `open -a` opens them in the given folder. Empty/unset → error
+/// surfaced to the UI.
+#[tauri::command]
+pub async fn run_terminal(app: AppHandle, path: String) -> Result<(), String> {
+    let settings = settings::load(&app)?;
+    let app_name = settings.terminal_command.unwrap_or_default();
+    let app_name = app_name.trim().to_string();
+    if app_name.is_empty() {
+        return Err("No terminal application configured. Set one in Settings.".into());
+    }
+
+    // `open` does its own argument handling, so we pass the app name and path
+    // as separate args (no shell, no manual escaping needed).
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg(&app_name)
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("opening terminal failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("terminal task panicked: {e}"))?
 }
