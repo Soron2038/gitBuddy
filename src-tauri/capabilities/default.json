@@ -5,6 +5,7 @@
   "windows": ["main", "popover"],
   "permissions": [
     "core:default",
+    "core:app:allow-version",
     "core:window:allow-start-dragging",
     "opener:default",
     "dialog:default",

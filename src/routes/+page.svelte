@@ -10,6 +10,7 @@
   } from '@tauri-apps/plugin-autostart';
   import { check as checkUpdate, type Update } from '@tauri-apps/plugin-updater';
   import { relaunch } from '@tauri-apps/plugin-process';
+  import { getVersion } from '@tauri-apps/api/app';
   import { listen } from '@tauri-apps/api/event';
   import Buddy from '$lib/Buddy.svelte';
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
@@ -109,6 +110,9 @@
   let updateState = $state<UpdateState>('idle');
   let updateVersion = $state<string | null>(null);
   let updateError = $state<string | null>(null);
+  // The currently-running app version, shown in Settings → Updates so the user
+  // can see at a glance which build they're on (and confirm an update landed).
+  let appVersion = $state<string | null>(null);
   // The resolved Update handle from `check()`, kept out of $state — it's a
   // non-serialisable plugin object we only need to drive downloadAndInstall.
   let pendingUpdate: Update | null = null;
@@ -642,6 +646,15 @@
     // Silent update check on launch. Surfaces a banner only if something's
     // available; failures (placeholder pubkey in dev, offline) stay quiet.
     void checkForUpdates(true);
+
+    // Resolve the running version for the Settings → Updates display.
+    getVersion()
+      .then((v) => {
+        if (!cancelled) appVersion = v;
+      })
+      .catch(() => {
+        /* leave null — the line just won't render */
+      });
 
     (async () => {
       try {
@@ -2591,6 +2604,9 @@
             check manually — updates download and install in place, then the
             app restarts.
           </p>
+          {#if appVersion}
+            <p class="set-help">You're running gitBuddy <strong>{appVersion}</strong>.</p>
+          {/if}
           <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
             <button
               type="button"
