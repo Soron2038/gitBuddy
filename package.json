@@ -1,6 +1,6 @@
 {
   "name": "gitbuddy",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Menu-bar companion for GitHub, GitLab and Codeberg repositories",
   "type": "module",
   "scripts": {
