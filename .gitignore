@@ -71,3 +71,4 @@ Desktop.ini
 *.zip
 release/
 dist/
+__pycache__/
