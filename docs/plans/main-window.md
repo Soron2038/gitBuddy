@@ -1,6 +1,7 @@
 # Main Window — Implementation Plan
 
-> **Status:** drafted 2026-05-13, awaiting execution.
+> **Status:** drafted 2026-05-13 — **executed; shipped with v1.0** (kept as
+> a historical record of the design reasoning).
 > **Why now:** the popover is a complete daily-driver, but the "Open main
 > window" button opens a window full of M1 mockup data. The main window
 > is the last big functional gap before OAuth (M6.3) and the v1 release
