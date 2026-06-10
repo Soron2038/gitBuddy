@@ -88,16 +88,15 @@
   let error: string | null = $state(null);
   let lastSyncedAt: Date | null = $state(null);
 
-  // Settings-form state (editable mirrors of `settings`).
+  // Settings-form state (editable mirrors of `settings`). Deliberately NOT
+  // kept in sync via $effect: an effect tracking `settings` re-fires on
+  // every persist or settings-changed event and would clobber what the user
+  // is typing. The inputs are seeded once after the initial load (and after
+  // an explicit import) via syncCommandInputs(); from then on they're
+  // user-owned until blur/Enter persists them.
   let savingSettings = $state(false);
   let editorInput = $state('');
-  $effect(() => {
-    editorInput = settings.editor_command ?? '';
-  });
   let terminalInput = $state('');
-  $effect(() => {
-    terminalInput = settings.terminal_command ?? '';
-  });
   // "Start at login" lives in the autostart plugin (a macOS LaunchAgent), not
   // in settings.json — the plugin is the source of truth. We mirror it into
   // this state on mount and after each toggle so the checkbox reflects reality.
@@ -578,6 +577,10 @@
   let selectedTerminalCmd = $derived(settings.terminal_command?.trim() ?? '');
 
   // ── Data loading ──────────────────────────────────────────────────────
+  /** Set while the component is mounted; flipped by the onMount teardown so
+   *  in-flight loads stop writing state into an unmounted component. */
+  let cancelled = false;
+
   async function loadAllData() {
     const [
       fetchedItems,
@@ -594,6 +597,7 @@
       listLocalRepos().catch(() => []),
       getSettings().catch(() => settings),
     ]);
+    if (cancelled) return;
     items = fetchedItems;
     repos = fetchedRepos;
     releases = fetchedReleases;
@@ -605,9 +609,9 @@
     // back to `null` covers the cold-start window before the first tick.
     try {
       const info = await lastSyncInfo();
-      lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
+      if (!cancelled) lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
     } catch {
-      lastSyncedAt = null;
+      if (!cancelled) lastSyncedAt = null;
     }
   }
 
@@ -632,7 +636,7 @@
   }
 
   onMount(() => {
-    let cancelled = false;
+    cancelled = false;
 
     // Hydrate the "Start at login" checkbox from the OS LaunchAgent state.
     isAutostartEnabled()
@@ -668,9 +672,12 @@
             listLocalRepos().catch(() => []),
             getSettings().catch(() => settings),
           ]);
-          locals = fetchedLocals;
-          settings = fetchedSettings;
+          if (!cancelled) {
+            locals = fetchedLocals;
+            settings = fetchedSettings;
+          }
         }
+        if (!cancelled) syncCommandInputs();
       } catch (e) {
         if (!cancelled) error = String(e);
       } finally {
@@ -734,6 +741,14 @@
 
     return () => {
       cancelled = true;
+      // A device-flow in progress must not keep polling (and writing state)
+      // after the component is gone — clear both OAuth timers plus the
+      // refresh safety timeout.
+      resetOAuthState();
+      if (refreshSafetyHandle) {
+        clearTimeout(refreshSafetyHandle);
+        refreshSafetyHandle = null;
+      }
       void unlistenDataPromise.then((u) => u());
       void unlistenProviderPromise.then((u) => u());
       void unlistenSettingsPromise.then((u) => u());
@@ -750,7 +765,7 @@
     try {
       await loadAllData();
     } catch (e) {
-      error = String(e);
+      if (!cancelled) error = String(e);
     }
   }
 
@@ -923,6 +938,14 @@
     }
   }
 
+  /** Seed the editor/terminal text inputs from the persisted settings.
+   *  Called only after loads the user initiated (mount, import) — never
+   *  from the settings-changed listener, which can fire mid-typing. */
+  function syncCommandInputs() {
+    editorInput = settings.editor_command ?? '';
+    terminalInput = settings.terminal_command ?? '';
+  }
+
   async function persistEditorCommand() {
     const next = editorInput.trim();
     const normalised = next.length === 0 ? null : next;
@@ -963,6 +986,7 @@
       // Backend persists + returns the clamped settings; adopt them so the
       // form reflects the imported values without a round-trip.
       settings = await importConfig(selected);
+      syncCommandInputs();
     } catch (e) {
       error = `Import failed: ${e}`;
     }
@@ -1327,8 +1351,12 @@
         class="iconbtn"
         class:bell={waitingCount > 0}
         data-count={waitingCount}
-        data-tip={waitingCount > 0 ? `${waitingCount} waiting` : 'Nothing waiting'}
-        aria-label="Notifications"
+        data-tip={waitingCount > 0 ? `${waitingCount} waiting — show` : 'Nothing waiting'}
+        aria-label="Show items waiting on you"
+        onclick={() => {
+          view = 'overview';
+          status = 'on-you';
+        }}
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
