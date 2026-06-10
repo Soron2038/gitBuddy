@@ -211,10 +211,6 @@ fn ahead_behind(repo: &Repository) -> (u32, u32) {
     let Some(local_oid) = head.target() else {
         return (0, 0);
     };
-    let Ok(head_branch) = head.peel_to_commit() else {
-        return (0, 0);
-    };
-    let _ = head_branch; // silence unused warning if peel fails later
 
     let Some(shorthand) = head.shorthand() else {
         return (0, 0);
