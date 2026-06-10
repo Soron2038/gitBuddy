@@ -22,10 +22,13 @@ All commands run from repo root unless noted.
 | Rust format check | `cd src-tauri && cargo fmt --all -- --check` |
 | Rust format apply | `cd src-tauri && cargo fmt --all` |
 | Rust tests | `cd src-tauri && cargo test --lib` |
-| Release bundle (unsigned, local) | `npm run tauri build` |
+| Frontend bundle (no Tauri) | `npm run build` |
+| Release build (signed) | `scripts/build-app.sh` — see `docs/RELEASING.md` |
 | Tray icon regen | `python3 scripts/regenerate-tray-icon.py` |
 
-There is no CI — the commands above are the local verification gate. Before a release, run `npm run tauri build` to smoke-test the macOS bundle.
+There is no CI — the commands above are the local verification gate.
+
+**`npm run tauri build` requires `TAURI_SIGNING_PRIVATE_KEY`** since v1.0: `bundle.createUpdaterArtifacts` is enabled, so the bundle step fails without the updater signing key. For a local smoke-test without the key use `scripts/build-app.sh --unsigned` (skips updater artifacts and notarization). The full signed/notarized release flow is documented in `docs/RELEASING.md`.
 
 ### First `cargo build` is slow
 
@@ -41,14 +44,14 @@ There is no CI — the commands above are the local verification gate. Before a 
 
 ### Two windows
 
-- `popover` — small (~360×500), anchored under the tray icon. Always-on. In release builds it auto-hides on focus-loss (the `WindowEvent::Focused(false)` handler in `lib.rs` is gated by `#[cfg(not(debug_assertions))]` so devtools/screenshots don't dismiss it during dev).
+- `popover` — small (440×620), anchored under the tray icon. Always-on. In release builds it auto-hides on focus-loss (the `WindowEvent::Focused(false)` handler in `lib.rs` is gated by `#[cfg(not(debug_assertions))]` so devtools/screenshots don't dismiss it during dev).
 - `main` — full window for repo browsing, settings, account management. Close button hides instead of quits and flips the dock icon off (`ActivationPolicy::Accessory`).
 
 App stays out of the dock by default (`Accessory`); opening `main` flips to `Regular` until it's hidden again.
 
 ### Provider modules
 
-`github.rs`, `gitlab.rs`, `codeberg.rs` each own one forge. They are **not** behind a shared trait yet (PRD §6.2 calls for one, but as of M6.4 each provider's `commands::*` entry points are explicit per-provider: `gh_*`, `gl_*`, `cb_*`). When generalising, the trait should expose `list_repos`, `list_items`, `list_releases`, `list_ci_runs`, `authenticate`.
+`github.rs`, `gitlab.rs`, `codeberg.rs` each own one forge. Since M6.4+ they sit behind the shared `ProviderBackend` trait in `provider_util.rs` (`viewer`, `token`, `base_url`, `list_waiting`, `list_repos`, `list_releases(&[Repo])`, `list_ci(&[Repo])`); the aggregator and commands hold `Arc<dyn ProviderBackend>` keyed by account id. Construction stays an inherent `connect()` per concrete type. Auth/data commands are provider-generic (`provider_set_token`, `provider_status`, `provider_disconnect`, `accounts_*`); only the GitHub OAuth device flow keeps `gh_oauth_*` commands. The repo list is fetched once per tick by the aggregator and passed into `list_releases`/`list_ci` — don't re-fetch it inside a provider.
 
 ### Auth & secret storage
 
@@ -77,7 +80,7 @@ This wrapper does **not** run for `tauri build` (release bundles) — production
 
 ### Not Mac App Store compatible
 
-`Cargo.toml` enables Tauri's `macos-private-api` feature for real window transparency (rounded popover corners). This uses private Apple symbols, which precludes MAS submission. Distribution is signed/notarized DMG via GitHub Releases (post-M7).
+`Cargo.toml` enables Tauri's `macos-private-api` feature for real window transparency (rounded popover corners). This uses private Apple symbols, which precludes MAS submission. Distribution is a signed/notarized DMG via GitHub Releases with in-app auto-update (`tauri-plugin-updater`, minisign-signed `latest.json`) — shipping since v1.0; the release procedure lives in `docs/RELEASING.md`.
 
 ### Tray icon is an embedded template PNG
 
@@ -86,7 +89,7 @@ This wrapper does **not** run for `tauri build` (release bundles) — production
 ## Conventions to follow
 
 - **`docs/DECISIONS.md` is append-only**. If a decision is being reversed, add a new dated entry that explains why and points back at the older one — don't edit history.
-- **No test infrastructure exists yet** on the Rust side. When adding tests, the PRD's verification plan (§12) calls for provider conformance tests with recorded HTTP fixtures, libgit2 wrapper tests against fixture repos, and aggregator merge tests.
+- **Rust unit tests live in per-module `#[cfg(test)]` blocks** (~70 tests: provider fixture deserialization, oauth parsing, settings migrations, aggregator diff logic, and libgit2 tests against temp fixture repos in `local_index.rs`). Run via `cargo test --lib`. Still missing from the PRD §12 plan: HTTP-level provider conformance tests with a mock server (pagination, rate-limit and error paths) — there is no `wiremock`/`httpmock` dev-dependency yet.
 - **Settings & accounts use `util::atomic_write`** — never write JSON config files directly with `serde_json::to_writer`; the atomic helper survives mid-write crashes.
 - **Frontend uses Svelte 5 runes** (`$state`, `$derived`, etc.) — not the legacy reactive `$:` syntax.
 - **Static adapter, no SSR**: `svelte.config.js` uses `@sveltejs/adapter-static`. The frontend is a single-page bundle Tauri loads from disk; there is no server runtime.

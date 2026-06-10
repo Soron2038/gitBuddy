@@ -8,12 +8,14 @@
 # name so it's easy to find and hand off.
 #
 # Usage:
-#   scripts/build-app.sh                 # build for the host architecture
+#   scripts/build-app.sh                 # release build (needs TAURI_SIGNING_PRIVATE_KEY)
+#   scripts/build-app.sh --unsigned      # local smoke-test build, no updater artifacts
 #   scripts/build-app.sh --clean         # wipe the old bundle dir first
 #   scripts/build-app.sh --target aarch64-apple-darwin   # arch-specific build
 #   scripts/build-app.sh --target universal-apple-darwin # fat binary
 #
-# Any flags other than --clean are passed straight through to `tauri build`.
+# Any flags other than --clean / --unsigned are passed straight through to
+# `tauri build`.
 #
 # SIGNING (Apple): without the standard Apple env vars this produces an
 # *ad-hoc / unsigned* bundle — opening the .app on another Mac trips Gatekeeper
@@ -43,15 +45,36 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 1
 fi
 
-# ── Parse args: peel off --clean, pass the rest to `tauri build` ──────────
+# ── Parse args: peel off --clean / --unsigned, pass the rest through ──────
 CLEAN=0
+UNSIGNED=0
 PASSTHROUGH=()
 for arg in "$@"; do
   case "$arg" in
     --clean) CLEAN=1 ;;
+    --unsigned) UNSIGNED=1 ;;
     *) PASSTHROUGH+=("$arg") ;;
   esac
 done
+
+# ── Fail fast on the missing updater key ───────────────────────────────────
+# tauri.conf.json sets `bundle.createUpdaterArtifacts: true`, so a default
+# build *will* fail at the bundle step (after minutes of compiling) without
+# TAURI_SIGNING_PRIVATE_KEY. Catch that up front; --unsigned opts into a
+# local build that disables updater artifacts instead.
+if [[ "$UNSIGNED" -eq 0 && -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+  echo "error: TAURI_SIGNING_PRIVATE_KEY is not set." >&2
+  echo "       A release build signs the updater artifact and needs the minisign key" >&2
+  echo "       (see docs/RELEASING.md). For a local smoke-test without the key, run:" >&2
+  echo "         scripts/build-app.sh --unsigned" >&2
+  exit 1
+fi
+if [[ "$UNSIGNED" -eq 1 ]]; then
+  # Overlay config: skip updater artifacts so the bundle step succeeds with
+  # no signing key. The resulting .dmg installs fine but cannot be shipped
+  # through the in-app updater.
+  PASSTHROUGH+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+fi
 
 BUNDLE_ROOT="src-tauri/target"
 OUT_DIR="release"
