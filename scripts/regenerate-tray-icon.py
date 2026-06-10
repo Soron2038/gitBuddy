@@ -8,7 +8,7 @@ to match the menu bar appearance, so the source has to be pure black-on-
 transparent with crisp alpha edges — which is what this script produces by
 drawing at 8× supersample and downsampling with Lanczos.
 
-The matching tray-icon.svg next to this script is the design reference; this
+The matching src-tauri/icons/tray-icon.svg is the design reference; this
 script is the canonical renderer because Tauri eats PNG and macOS doesn't
 ship a reliable system-level SVG-to-PNG converter at small sizes.
 
@@ -143,7 +143,9 @@ def main() -> None:
 
     img = img.resize((SIZE, SIZE), Image.LANCZOS)
     img.save(OUT, "PNG", optimize=True)
-    print(f"wrote {OUT.relative_to(Path.cwd())} ({SIZE}×{SIZE}, RGBA)")
+    # Absolute path on purpose: relative_to(Path.cwd()) raises ValueError
+    # when the script is run from anywhere but the repo root.
+    print(f"wrote {OUT} ({SIZE}×{SIZE}, RGBA)")
 
 
 if __name__ == "__main__":
