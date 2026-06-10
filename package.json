@@ -3,6 +3,13 @@
   "version": "1.0.1",
   "description": "Menu-bar companion for GitHub, GitLab and Codeberg repositories",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Soron2038/gitBuddy.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
