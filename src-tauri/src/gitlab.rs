@@ -7,7 +7,8 @@
 //! newer project/group access tokens.
 
 use crate::provider_util::{
-    http_client, humanise_age, reason_priority, within_days, ProviderBackend, ProviderError,
+    http_client, http_error, humanise_age, reason_priority, within_days, ProviderBackend,
+    ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
@@ -155,11 +156,7 @@ impl GitLabProvider {
                 s if s.is_success() => {}
                 StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
                 s => {
-                    return Err(ProviderError::HttpStatus {
-                        provider: "GitLab",
-                        base_url: Some(self.base_url.clone()),
-                        status: s,
-                    });
+                    return Err(http_error("GitLab", Some(self.base_url.clone()), s));
                 }
             }
 
@@ -313,11 +310,7 @@ async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Vi
             })
         }
         StatusCode::UNAUTHORIZED => Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => Err(ProviderError::HttpStatus {
-            provider: "GitLab",
-            base_url: Some(base_url.to_string()),
-            status: s,
-        }),
+        s => Err(http_error("GitLab", Some(base_url.to_string()), s)),
     }
 }
 
@@ -347,11 +340,7 @@ async fn fetch_items(
         s if s.is_success() => {}
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         s => {
-            return Err(ProviderError::HttpStatus {
-                provider: "GitLab",
-                base_url: Some(base_url.to_string()),
-                status: s,
-            });
+            return Err(http_error("GitLab", Some(base_url.to_string()), s));
         }
     }
 
@@ -515,11 +504,7 @@ async fn fetch_latest_release(
         // graceful no-op rather than failing the whole batch.
         StatusCode::FORBIDDEN => return Ok(None),
         s => {
-            return Err(ProviderError::HttpStatus {
-                provider: "GitLab",
-                base_url: Some(base_url.to_string()),
-                status: s,
-            });
+            return Err(http_error("GitLab", Some(base_url.to_string()), s));
         }
     }
 
@@ -642,11 +627,7 @@ async fn fetch_latest_pipeline(
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         StatusCode::FORBIDDEN => return Ok(None),
         s => {
-            return Err(ProviderError::HttpStatus {
-                provider: "GitLab",
-                base_url: Some(base_url.to_string()),
-                status: s,
-            });
+            return Err(http_error("GitLab", Some(base_url.to_string()), s));
         }
     }
 

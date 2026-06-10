@@ -7,8 +7,8 @@
 //! milestone one of the providers.
 
 use crate::provider_util::{
-    collapse_ci_status, http_client, humanise_age, reason_priority, within_days, ProviderBackend,
-    ProviderError,
+    collapse_ci_status, http_client, http_error, humanise_age, reason_priority, within_days,
+    ProviderBackend, ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
@@ -135,13 +135,7 @@ impl GitHubProvider {
             match resp.status() {
                 s if s.is_success() => {}
                 StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-                s => {
-                    return Err(ProviderError::HttpStatus {
-                        provider: "GitHub",
-                        base_url: None,
-                        status: s,
-                    })
-                }
+                s => return Err(http_error("GitHub", None, s)),
             }
 
             let raw: Vec<RawRepo> = resp.json().await?;
@@ -304,13 +298,7 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
         // 403 can happen when the repo's owner has disabled actions for
         // forks; treat it the same as "no CI" to keep the batch flowing.
         StatusCode::FORBIDDEN => return Ok(None),
-        s => {
-            return Err(ProviderError::HttpStatus {
-                provider: "GitHub",
-                base_url: None,
-                status: s,
-            })
-        }
+        s => return Err(http_error("GitHub", None, s)),
     }
 
     let body: WorkflowRunsResp = resp.json().await?;
@@ -360,13 +348,7 @@ async fn fetch_latest_release(
         // 404 just means "no releases yet" — not an error.
         StatusCode::NOT_FOUND => return Ok(None),
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => {
-            return Err(ProviderError::HttpStatus {
-                provider: "GitHub",
-                base_url: None,
-                status: s,
-            })
-        }
+        s => return Err(http_error("GitHub", None, s)),
     }
 
     #[derive(Deserialize)]
@@ -471,11 +453,7 @@ async fn fetch_viewer(client: &Client, token: &str) -> Result<Viewer> {
             })
         }
         StatusCode::UNAUTHORIZED => Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => Err(ProviderError::HttpStatus {
-            provider: "GitHub",
-            base_url: None,
-            status: s,
-        }),
+        s => Err(http_error("GitHub", None, s)),
     }
 }
 
@@ -496,13 +474,7 @@ async fn search_issues(
     match resp.status() {
         s if s.is_success() => {}
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => {
-            return Err(ProviderError::HttpStatus {
-                provider: "GitHub",
-                base_url: None,
-                status: s,
-            })
-        }
+        s => return Err(http_error("GitHub", None, s)),
     }
 
     #[derive(Deserialize)]

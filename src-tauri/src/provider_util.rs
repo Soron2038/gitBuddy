@@ -54,6 +54,32 @@ pub enum ProviderError {
     },
     #[error("invalid base URL: {0}")]
     InvalidBaseUrl(String),
+    /// HTTP 429 — the forge is throttling us. Distinct from `HttpStatus` so
+    /// the aggregator can name the condition in `last_error` (instead of a
+    /// bare status code) and a future backoff can key on it.
+    #[error("{provider} is rate-limiting requests (HTTP 429) — waiting for the next tick")]
+    RateLimited { provider: &'static str },
+}
+
+/// Map a non-success HTTP status to the right `ProviderError`. Factored so
+/// every provider's fallback arm classifies 429 as [`ProviderError::RateLimited`]
+/// instead of a generic `HttpStatus`. (GitHub's *secondary* limit — 403 with
+/// `x-ratelimit-remaining: 0` — is not detected here because several call
+/// sites legitimately treat 403 as "feature disabled".)
+pub(crate) fn http_error(
+    provider: &'static str,
+    base_url: Option<String>,
+    status: StatusCode,
+) -> ProviderError {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        ProviderError::RateLimited { provider }
+    } else {
+        ProviderError::HttpStatus {
+            provider,
+            base_url,
+            status,
+        }
+    }
 }
 
 /// The behaviour every forge provider implements. Construction stays an
@@ -159,6 +185,22 @@ mod tests {
         assert!(within_days("2026-05-09T12:00:00Z", &now, 7));
         assert!(!within_days("2026-04-01T12:00:00Z", &now, 7));
         assert!(!within_days("garbage", &now, 7));
+    }
+
+    #[test]
+    fn http_error_maps_429_to_rate_limited() {
+        assert!(matches!(
+            http_error("GitHub", None, StatusCode::TOO_MANY_REQUESTS),
+            ProviderError::RateLimited { .. }
+        ));
+        assert!(matches!(
+            http_error(
+                "GitLab",
+                Some("https://gitlab.com".into()),
+                StatusCode::BAD_GATEWAY
+            ),
+            ProviderError::HttpStatus { .. }
+        ));
     }
 
     #[test]

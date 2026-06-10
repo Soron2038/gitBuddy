@@ -3,8 +3,8 @@
 //! REST API at `/api/v1/`, so this module mirrors github.rs closely.
 
 use crate::provider_util::{
-    collapse_ci_status, http_client, humanise_age, reason_priority, within_days, ProviderBackend,
-    ProviderError,
+    collapse_ci_status, http_client, http_error, humanise_age, reason_priority, within_days,
+    ProviderBackend, ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
@@ -107,11 +107,7 @@ impl CodebergProvider {
                 s if s.is_success() => {}
                 StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
                 s => {
-                    return Err(ProviderError::HttpStatus {
-                        provider: "Gitea",
-                        base_url: Some(self.base_url.clone()),
-                        status: s,
-                    });
+                    return Err(http_error("Gitea", Some(self.base_url.clone()), s));
                 }
             }
 
@@ -256,11 +252,7 @@ async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Vi
             })
         }
         StatusCode::UNAUTHORIZED => Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => Err(ProviderError::HttpStatus {
-            provider: "Gitea",
-            base_url: Some(base_url.to_string()),
-            status: s,
-        }),
+        s => Err(http_error("Gitea", Some(base_url.to_string()), s)),
     }
 }
 
@@ -293,11 +285,7 @@ async fn search_issues(
             s if s.is_success() => {}
             StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
             s => {
-                return Err(ProviderError::HttpStatus {
-                    provider: "Gitea",
-                    base_url: Some(base_url.to_string()),
-                    status: s,
-                });
+                return Err(http_error("Gitea", Some(base_url.to_string()), s));
             }
         }
 
@@ -435,11 +423,7 @@ async fn fetch_latest_release(
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         StatusCode::FORBIDDEN => return Ok(None),
         s => {
-            return Err(ProviderError::HttpStatus {
-                provider: "Gitea",
-                base_url: Some(base_url.to_string()),
-                status: s,
-            });
+            return Err(http_error("Gitea", Some(base_url.to_string()), s));
         }
     }
 
@@ -561,11 +545,7 @@ async fn fetch_latest_ci_run(
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         StatusCode::FORBIDDEN => return Ok(None),
         s => {
-            return Err(ProviderError::HttpStatus {
-                provider: "Gitea",
-                base_url: Some(base_url.to_string()),
-                status: s,
-            });
+            return Err(http_error("Gitea", Some(base_url.to_string()), s));
         }
     }
 
