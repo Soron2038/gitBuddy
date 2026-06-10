@@ -378,6 +378,9 @@ struct RawRepo {
     fork: bool,
     private: bool,
     updated_at: Option<String>,
+    /// Time of the last actual push. `updated_at` also moves on metadata
+    /// edits, so it's only the fallback for old instances lacking this field.
+    pushed_at: Option<String>,
 }
 
 impl From<RawRepo> for Repo {
@@ -401,7 +404,7 @@ impl From<RawRepo> for Repo {
             clone_url: r.clone_url,
             is_fork: r.fork,
             is_private: r.private,
-            pushed_at: r.updated_at,
+            pushed_at: r.pushed_at.or(r.updated_at),
             account_id: None,
         }
     }
@@ -620,6 +623,46 @@ mod tests {
     #[test]
     fn rejects_missing_scheme() {
         assert!(normalise_base_url("codeberg.example.com").is_err());
+    }
+
+    #[test]
+    fn repo_pushed_at_prefers_pushed_at_over_updated_at() {
+        // Gitea's `updated_at` moves on metadata edits (description,
+        // settings); only `pushed_at` tracks actual pushes. The "recently
+        // pushed" sort must use the latter or a description edit bumps the
+        // repo to the top.
+        let raw: RawRepo = serde_json::from_str(
+            r#"{
+                "id": 7, "name": "r", "full_name": "o/r",
+                "default_branch": "main", "description": null,
+                "stars_count": 0, "html_url": "https://codeberg.org/o/r",
+                "ssh_url": null, "clone_url": null,
+                "fork": false, "private": false,
+                "updated_at": "2026-06-01T00:00:00Z",
+                "pushed_at": "2026-01-01T00:00:00Z"
+            }"#,
+        )
+        .expect("parse");
+        let repo: Repo = raw.into();
+        assert_eq!(repo.pushed_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn repo_pushed_at_falls_back_to_updated_at() {
+        // Very old Gitea builds don't expose `pushed_at` — fall back to
+        // `updated_at` rather than dropping the timestamp entirely.
+        let raw: RawRepo = serde_json::from_str(
+            r#"{
+                "id": 7, "name": "r", "full_name": "o/r",
+                "default_branch": null, "description": null,
+                "stars_count": 0, "html_url": "u", "ssh_url": null,
+                "clone_url": null, "fork": false, "private": false,
+                "updated_at": "2026-06-01T00:00:00Z"
+            }"#,
+        )
+        .expect("parse");
+        let repo: Repo = raw.into();
+        assert_eq!(repo.pushed_at.as_deref(), Some("2026-06-01T00:00:00Z"));
     }
 
     fn fixture(actor_block: &str) -> String {
