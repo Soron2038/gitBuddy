@@ -216,29 +216,32 @@ fn parse_poll(body: &str) -> Result<PollOutcome> {
 
     // Report *which* fields are missing without echoing the body — the body
     // could carry the access_token even when other fields are absent.
-    if raw.access_token.is_none() || raw.token_type.is_none() || raw.scope.is_none() {
-        let mut missing = Vec::new();
-        if raw.access_token.is_none() {
-            missing.push("access_token");
+    match (raw.access_token, raw.token_type, raw.scope) {
+        (Some(access_token), Some(token_type), Some(scope)) => {
+            Ok(PollOutcome::Success(OAuthTokens {
+                access_token,
+                token_type,
+                scope,
+                obtained_at: Utc::now().to_rfc3339(),
+            }))
         }
-        if raw.token_type.is_none() {
-            missing.push("token_type");
+        (access_token, token_type, scope) => {
+            let mut missing = Vec::new();
+            if access_token.is_none() {
+                missing.push("access_token");
+            }
+            if token_type.is_none() {
+                missing.push("token_type");
+            }
+            if scope.is_none() {
+                missing.push("scope");
+            }
+            Err(OAuthError::BadResponse(format!(
+                "success response missing fields: {}",
+                missing.join(", ")
+            )))
         }
-        if raw.scope.is_none() {
-            missing.push("scope");
-        }
-        return Err(OAuthError::BadResponse(format!(
-            "success response missing fields: {}",
-            missing.join(", ")
-        )));
     }
-
-    Ok(PollOutcome::Success(OAuthTokens {
-        access_token: raw.access_token.unwrap(),
-        token_type: raw.token_type.unwrap(),
-        scope: raw.scope.unwrap(),
-        obtained_at: Utc::now().to_rfc3339(),
-    }))
 }
 
 /// Minimal form-encoder. The full `url` crate would pull in extra dependencies
