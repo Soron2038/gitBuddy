@@ -53,7 +53,7 @@ npm install
 npm run tauri dev          # run locally
 npm run check              # frontend type-check
 cd src-tauri && cargo test --lib   # Rust tests
-scripts/build-app.sh       # produce a release .dmg
+scripts/build-app.sh --unsigned    # produce a local .dmg (no updater key needed)
 ```
 
 The first `cargo build` is slow — `git2` compiles libgit2 and OpenSSL in-tree.
@@ -61,7 +61,9 @@ The first `cargo build` is slow — `git2` compiles libgit2 and OpenSSL in-tree.
 ## Releasing
 
 Cutting a signed, notarized, auto-updatable release is documented step by step
-in [docs/RELEASING.md](docs/RELEASING.md).
+in [docs/RELEASING.md](docs/RELEASING.md). What changed per version lives in
+the [CHANGELOG](CHANGELOG.md) and on the
+[Releases](https://github.com/Soron2038/gitBuddy/releases) page.
 
 ## License
 
