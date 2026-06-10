@@ -7,8 +7,8 @@
 //! newer project/group access tokens.
 
 use crate::provider_util::{
-    http_client, http_error, humanise_age, reason_priority, within_days, ProviderBackend,
-    ProviderError,
+    http_client, http_error, humanise_age, normalise_base_url, reason_priority, within_days,
+    ProviderBackend, ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
@@ -263,26 +263,6 @@ impl ProviderBackend for GitLabProvider {
     async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
         self.list_ci(repos).await
     }
-}
-
-fn normalise_base_url(raw: &str) -> Result<String> {
-    let trimmed = raw.trim().trim_end_matches('/').to_string();
-    if trimmed.is_empty() {
-        return Err(ProviderError::InvalidBaseUrl(
-            "base URL must not be empty".into(),
-        ));
-    }
-    // HTTPS-only: a self-hosted GitLab base URL is the channel the PAT goes
-    // over on every API call. Accepting `http://` here would send the bearer
-    // token in clear if the user pastes (or is phished into) a plain-HTTP
-    // host. If a localhost dev-instance ever needs `http://`, gate it
-    // explicitly on `localhost` / `127.0.0.1` / `::1` then.
-    if !trimmed.starts_with("https://") {
-        return Err(ProviderError::InvalidBaseUrl(format!(
-            "base URL must start with https://: {trimmed}"
-        )));
-    }
-    Ok(trimmed)
 }
 
 async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Viewer> {
@@ -676,24 +656,6 @@ fn collapse_pipeline_status(status: &str) -> CiStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalises_trailing_slash() {
-        assert_eq!(
-            normalise_base_url("https://gitlab.gwdg.de/").unwrap(),
-            "https://gitlab.gwdg.de"
-        );
-    }
-
-    #[test]
-    fn rejects_missing_scheme() {
-        assert!(normalise_base_url("gitlab.example.com").is_err());
-    }
-
-    #[test]
-    fn rejects_http_scheme() {
-        assert!(normalise_base_url("http://gitlab.example.com").is_err());
-    }
 
     #[test]
     fn strip_iid_handles_issue_and_mr_refs() {

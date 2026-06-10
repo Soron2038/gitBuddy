@@ -82,6 +82,28 @@ pub(crate) fn http_error(
     }
 }
 
+/// Normalise a user-supplied forge base URL: trim whitespace and trailing
+/// slashes, reject empty input. HTTPS-only — the base URL is the channel the
+/// PAT travels on for every API call, and `http://` would send the bearer
+/// token in clear if the user pastes (or is phished into) a plain-HTTP host.
+/// If a localhost dev-instance ever needs `http://`, gate it explicitly on
+/// `localhost` / `127.0.0.1` / `::1` then. Shared by the self-hostable
+/// forges (GitLab, Gitea/Forgejo); GitHub has no base URL.
+pub(crate) fn normalise_base_url(raw: &str) -> Result<String, ProviderError> {
+    let trimmed = raw.trim().trim_end_matches('/').to_string();
+    if trimmed.is_empty() {
+        return Err(ProviderError::InvalidBaseUrl(
+            "base URL must not be empty".into(),
+        ));
+    }
+    if !trimmed.starts_with("https://") {
+        return Err(ProviderError::InvalidBaseUrl(format!(
+            "base URL must start with https://: {trimmed}"
+        )));
+    }
+    Ok(trimmed)
+}
+
 /// The behaviour every forge provider implements. Construction stays an
 /// inherent `connect` on each concrete type (its signature differs per
 /// provider and it returns `Self`, so it can't live on an object-safe
@@ -190,6 +212,21 @@ mod tests {
         assert!(within_days("2026-05-09T12:00:00Z", &now, 7));
         assert!(!within_days("2026-04-01T12:00:00Z", &now, 7));
         assert!(!within_days("garbage", &now, 7));
+    }
+
+    #[test]
+    fn normalise_base_url_trims_and_enforces_https() {
+        assert_eq!(
+            normalise_base_url("https://codeberg.org/").unwrap(),
+            "https://codeberg.org"
+        );
+        assert_eq!(
+            normalise_base_url("  https://gitlab.gwdg.de/  ").unwrap(),
+            "https://gitlab.gwdg.de"
+        );
+        assert!(normalise_base_url("http://gitlab.example.com").is_err());
+        assert!(normalise_base_url("gitlab.example.com").is_err());
+        assert!(normalise_base_url("   ").is_err());
     }
 
     #[test]

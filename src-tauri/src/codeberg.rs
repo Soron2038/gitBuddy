@@ -3,8 +3,8 @@
 //! REST API at `/api/v1/`, so this module mirrors github.rs closely.
 
 use crate::provider_util::{
-    collapse_ci_status, http_client, http_error, humanise_age, reason_priority, within_days,
-    ProviderBackend, ProviderError,
+    collapse_ci_status, http_client, http_error, humanise_age, normalise_base_url, reason_priority,
+    within_days, ProviderBackend, ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
@@ -205,25 +205,6 @@ impl ProviderBackend for CodebergProvider {
     async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
         self.list_ci(repos).await
     }
-}
-
-fn normalise_base_url(raw: &str) -> Result<String> {
-    let trimmed = raw.trim().trim_end_matches('/').to_string();
-    if trimmed.is_empty() {
-        return Err(ProviderError::InvalidBaseUrl(
-            "base URL must not be empty".into(),
-        ));
-    }
-    // HTTPS-only: a self-hosted Gitea/Forgejo base URL is the channel the PAT
-    // travels on for every API call. `http://` here would send the bearer
-    // token in clear. If a localhost dev-instance ever needs `http://`, gate
-    // it explicitly on `localhost` / `127.0.0.1` / `::1` then.
-    if !trimmed.starts_with("https://") {
-        return Err(ProviderError::InvalidBaseUrl(format!(
-            "base URL must start with https://: {trimmed}"
-        )));
-    }
-    Ok(trimmed)
 }
 
 async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Viewer> {
@@ -583,24 +564,6 @@ mod tests {
             extract_repo_from_url("https://codeberg.org/forgejo/runner/issues/42"),
             "forgejo/runner"
         );
-    }
-
-    #[test]
-    fn normalises_trailing_slash() {
-        assert_eq!(
-            normalise_base_url("https://codeberg.org/").unwrap(),
-            "https://codeberg.org"
-        );
-    }
-
-    #[test]
-    fn rejects_http_scheme() {
-        assert!(normalise_base_url("http://codeberg.example.com").is_err());
-    }
-
-    #[test]
-    fn rejects_missing_scheme() {
-        assert!(normalise_base_url("codeberg.example.com").is_err());
     }
 
     #[test]
