@@ -18,11 +18,14 @@ export function humaniseSync(d: Date | null, nowMs: number): string {
   return `${Math.floor(m / 60)}h ago`;
 }
 
-/** Compact age of a repo's last push ("3d", "2mo", "1y"); "—" when unknown. */
-export function repoAge(pushed_at: string | null): string {
+/** Compact age of a repo's last push ("3d", "2mo", "1y"); "—" when unknown.
+ *  `nowMs` is passed in (same contract as {@link humaniseSync}) so the
+ *  caller's once-per-second tick keeps displayed ages fresh — an internal
+ *  `Date.now()` would be invisible to Svelte's reactivity and go stale. */
+export function repoAge(pushed_at: string | null, nowMs: number): string {
   if (!pushed_at) return '—';
   const d = new Date(pushed_at);
-  const mins = Math.floor((Date.now() - d.getTime()) / 60_000);
+  const mins = Math.floor((nowMs - d.getTime()) / 60_000);
   if (mins < 60) return `${Math.max(1, mins)}m`;
   if (mins < 60 * 24) return `${Math.floor(mins / 60)}h`;
   if (mins < 60 * 24 * 30) return `${Math.floor(mins / (60 * 24))}d`;

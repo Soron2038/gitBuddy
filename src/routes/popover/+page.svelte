@@ -23,11 +23,9 @@
     shortenPath,
   } from '$lib/format';
   import {
-    ghStatus,
+    accountsList,
     ghSetToken,
-    glStatus,
     glSetToken,
-    cbStatus,
     cbSetToken,
     openMainWindow,
     openMainSettings,
@@ -152,6 +150,29 @@
   // suppresses the dialog. After that, the popover is purely a viewer.
   let notificationPermission: 'granted' | 'denied' | 'unrequested' = $state('unrequested');
 
+  /** Rebuild the single-account-per-provider heads (`viewer`/`gl`/`cb`)
+   *  from the canonical multi-account registry — the same derivation the
+   *  main window's refreshAuth uses, so both windows agree on auth state
+   *  (the popover previously read the legacy per-provider status path,
+   *  which diverges once more than one account per provider exists). */
+  async function refreshAuth() {
+    const accounts = await accountsList();
+    const gh = accounts.find((a) => a.provider === 'github');
+    const glAcct = accounts.find(
+      (a) => a.provider === 'gitlab' || a.provider === 'mpsd-gitlab',
+    );
+    const cbAcct = accounts.find((a) => a.provider === 'codeberg');
+    viewer = gh?.viewer ?? null;
+    gl =
+      glAcct && glAcct.base_url
+        ? { viewer: glAcct.viewer, base_url: glAcct.base_url }
+        : null;
+    cb =
+      cbAcct && cbAcct.base_url
+        ? { viewer: cbAcct.viewer, base_url: cbAcct.base_url }
+        : null;
+  }
+
   /** Fetch waiting items (aggregated across providers) and the local clone
    *  index in parallel. Shared between the on-mount and post-connect paths. */
   async function loadInitialData() {
@@ -206,14 +227,7 @@
           error ??= `Settings failed to load: ${e}`;
         });
 
-      const [ghViewer, glRes, cbRes] = await Promise.all([
-        ghStatus(),
-        glStatus(),
-        cbStatus(),
-      ]);
-      viewer = ghViewer;
-      gl = glRes;
-      cb = cbRes;
+      await refreshAuth();
 
       // Default the onboarding tab to whichever provider can still be added.
       if (!viewer && (gl || cb)) chosenProvider = 'github';
@@ -245,14 +259,13 @@
     error = null;
     try {
       if (chosenProvider === 'github') {
-        viewer = await ghSetToken(tokenInput.trim());
+        await ghSetToken(tokenInput.trim());
       } else if (chosenProvider === 'gitlab') {
         await glSetToken(tokenInput.trim(), gitlabBaseInput.trim());
-        gl = await glStatus();
       } else {
         await cbSetToken(tokenInput.trim(), codebergBaseInput.trim());
-        cb = await cbStatus();
       }
+      await refreshAuth();
       tokenInput = '';
       await loadInitialData();
     } catch (e) {
@@ -500,58 +513,54 @@
   //                          aggregator tick, so the data-updated handler
   //                          will re-pull the new account's items shortly.
   //   * `settings-changed` — notifications toggle, editor command, etc.
-  $effect(() => {
-    let unlistenData: (() => void) | null = null;
-    let unlistenProvider: (() => void) | null = null;
-    let unlistenSettings: (() => void) | null = null;
+  //
+  // Registered via onMount (not $effect): listeners must attach exactly
+  // once, and the teardown must work even if it runs before the listen()
+  // promises resolve — hence the promise-unwrap pattern the main window
+  // uses too.
+  onMount(() => {
+    let cancelled = false;
 
-    void listen<DataUpdatedPayload>('data-updated', async () => {
+    const unlistenDataPromise = listen<DataUpdatedPayload>('data-updated', async () => {
+      if (cancelled) return;
       await reloadFromCache();
       refreshing = false;
       if (refreshSafetyHandle) {
         clearTimeout(refreshSafetyHandle);
         refreshSafetyHandle = null;
       }
-    }).then((u) => {
-      unlistenData = u;
     });
 
-    void listen<unknown>('provider-changed', async () => {
+    const unlistenProviderPromise = listen<unknown>('provider-changed', async () => {
       try {
-        const [ghViewer, glRes, cbRes] = await Promise.all([
-          ghStatus(),
-          glStatus(),
-          cbStatus(),
-        ]);
-        viewer = ghViewer;
-        gl = glRes;
-        cb = cbRes;
+        await refreshAuth();
         if (!(viewer || gl || cb)) {
           items = [];
         }
         // The auth command already kicked the aggregator; data-updated will
         // refresh the rest of the lists shortly.
       } catch (e) {
-        error = String(e);
+        if (!cancelled) error = String(e);
       }
-    }).then((u) => {
-      unlistenProvider = u;
     });
 
-    void listen<unknown>('settings-changed', async () => {
+    const unlistenSettingsPromise = listen<unknown>('settings-changed', async () => {
       try {
         settings = await getSettings();
       } catch (e) {
-        error = String(e);
+        if (!cancelled) error = String(e);
       }
-    }).then((u) => {
-      unlistenSettings = u;
     });
 
     return () => {
-      unlistenData?.();
-      unlistenProvider?.();
-      unlistenSettings?.();
+      cancelled = true;
+      if (refreshSafetyHandle) {
+        clearTimeout(refreshSafetyHandle);
+        refreshSafetyHandle = null;
+      }
+      void unlistenDataPromise.then((u) => u());
+      void unlistenProviderPromise.then((u) => u());
+      void unlistenSettingsPromise.then((u) => u());
     };
   });
 </script>
@@ -811,8 +820,10 @@
         <button
           class="tab"
           class:on={activeTab === 'waiting'}
+          id="tab-waiting"
           role="tab"
           aria-selected={activeTab === 'waiting'}
+          aria-controls="panel-main"
           onclick={() => (activeTab = 'waiting')}
         >
           Waiting <span class="n">{items.length}</span>
@@ -820,8 +831,10 @@
         <button
           class="tab"
           class:on={activeTab === 'repos'}
+          id="tab-repos"
           role="tab"
           aria-selected={activeTab === 'repos'}
+          aria-controls="panel-main"
           onclick={() => (activeTab = 'repos')}
         >
           Repos
@@ -829,15 +842,17 @@
         <button
           class="tab"
           class:on={activeTab === 'releases'}
+          id="tab-releases"
           role="tab"
           aria-selected={activeTab === 'releases'}
+          aria-controls="panel-main"
           onclick={() => (activeTab = 'releases')}
         >
           Releases
         </button>
       </div>
 
-      <div class="list" role="tabpanel">
+      <div class="list" id="panel-main" role="tabpanel" aria-labelledby={'tab-' + activeTab}>
         {#if error}
           <div class="err-banner">{error}</div>
         {/if}
@@ -960,7 +975,7 @@
                     {/if}
                   </span>
                 </span>
-                <span class="age">{repoAge(r.pushed_at)}</span>
+                <span class="age">{repoAge(r.pushed_at, now)}</span>
               </button>
             {/each}
           {/if}
@@ -974,7 +989,7 @@
               <small>None of your most-recent repos have published a release.</small>
             </div>
           {:else}
-            {#each releases as r (r.repo_id)}
+            {#each releases as r (r.repo_id + ':' + r.tag)}
               <button
                 class="row release-row"
                 type="button"
