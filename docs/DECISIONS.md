@@ -352,3 +352,36 @@ caching essential; warm runs should stay in single-digit minutes). It does
 **not** build a Tauri bundle — that was the expensive, low-signal part of
 the removed workflow, and release builds remain a local, signed,
 tag-driven process per `docs/RELEASING.md`.
+
+## 2026-06-10 — Main-window decomposition: DetailPane + RepoCard, no ListView
+
+Follow-up to the 2026-06-01 "frontend stopped at dedup" entry, which scoped
+*cross-window* sharing. This pass decomposed *within* the main window, with
+every step verified visually (Playwright against the vite dev server, Tauri
+IPC stubbed via `scripts/dev/tauri-ipc-stub.js` so fixture data makes
+before/after screenshots comparable).
+
+**Extracted:** `DetailPane.svelte` (pane chrome, quick actions, clone form,
+CI/release/waiting sections — the parent recreates it per repo via `{#key}`,
+which replaces the old clone-state-reset `$effect`) and `RepoCard.svelte`
+(the former `repoCardEntry` snippet). `+page.svelte` went from ~4.5k to
+~3.45k lines.
+
+**Scoped-CSS coupling resolved by a window stylesheet, not duplication.**
+The lists, cards and pane share a visual vocabulary (`.row` family,
+`.kind-chip`, `.pchip`, `.rci`, badges). Svelte scoping doesn't cross
+component boundaries, so those rules moved to `routes/main-window.css`,
+imported once by the route — global *within this window's document* only.
+Each Tauri window is its own webview/document, so this cannot leak into the
+popover; component-scoped overrides still win on specificity.
+
+**Deliberately NOT extracted: a generic ListView.** After the CSS moved to
+the shared stylesheet, the remaining duplication is two ~40-line `{#each}`
+blocks (waiting, releases — "local" turned out to be the RepoCard grid, not
+a row list) whose content differs in every column. A shared component would
+need chip/title/meta/trailing snippet props — the same props-explosion the
+2026-06-01 entry rejected. Re-attempt only if a third row list appears.
+
+The Settings view (~1k lines incl. the OAuth device-flow machine) is the
+remaining large block and would be the natural next extraction; it was out
+of scope here.
