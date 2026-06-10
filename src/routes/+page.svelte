@@ -15,6 +15,7 @@
   import Buddy from '$lib/Buddy.svelte';
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
   import { humaniseSync, hostSuggestions, connectedHosts } from '$lib/format';
+  import { deriveProviderHeads } from '$lib/data/auth';
   import {
     ghSetToken,
     ghOAuthBegin,
@@ -617,21 +618,10 @@
 
   async function refreshAuth() {
     accounts = await accountsList();
-    // Legacy single-account-per-provider helpers used by the rest of the
-    // UI; rebuilt from the canonical accounts list each refresh. Picking
-    // "first match per provider" preserves the existing render paths
-    // while the multi-account-aware Account-Liste in Settings shows
-    // every entry.
-    const gh = accounts.find((a) => a.provider === 'github');
-    const glAcct = accounts.find((a) => a.provider === 'gitlab' || a.provider === 'mpsd-gitlab');
-    const cbAcct = accounts.find((a) => a.provider === 'codeberg');
-    viewer = gh?.viewer ?? null;
-    gl = glAcct && glAcct.base_url
-      ? { viewer: glAcct.viewer, base_url: glAcct.base_url }
-      : null;
-    cb = cbAcct && cbAcct.base_url
-      ? { viewer: cbAcct.viewer, base_url: cbAcct.base_url }
-      : null;
+    // Legacy single-account-per-provider heads used by the rest of the UI;
+    // rebuilt from the canonical accounts list each refresh (shared
+    // derivation — see $lib/data/auth).
+    ({ viewer, gl, cb } = deriveProviderHeads(accounts));
     syncAccountFilter();
   }
 

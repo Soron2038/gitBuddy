@@ -22,6 +22,7 @@
     repoAge,
     shortenPath,
   } from '$lib/format';
+  import { deriveProviderHeads } from '$lib/data/auth';
   import {
     accountsList,
     ghSetToken,
@@ -151,26 +152,11 @@
   let notificationPermission: 'granted' | 'denied' | 'unrequested' = $state('unrequested');
 
   /** Rebuild the single-account-per-provider heads (`viewer`/`gl`/`cb`)
-   *  from the canonical multi-account registry — the same derivation the
-   *  main window's refreshAuth uses, so both windows agree on auth state
-   *  (the popover previously read the legacy per-provider status path,
-   *  which diverges once more than one account per provider exists). */
+   *  from the canonical multi-account registry — the shared derivation in
+   *  $lib/data/auth, so both windows agree on auth state. */
   async function refreshAuth() {
     const accounts = await accountsList();
-    const gh = accounts.find((a) => a.provider === 'github');
-    const glAcct = accounts.find(
-      (a) => a.provider === 'gitlab' || a.provider === 'mpsd-gitlab',
-    );
-    const cbAcct = accounts.find((a) => a.provider === 'codeberg');
-    viewer = gh?.viewer ?? null;
-    gl =
-      glAcct && glAcct.base_url
-        ? { viewer: glAcct.viewer, base_url: glAcct.base_url }
-        : null;
-    cb =
-      cbAcct && cbAcct.base_url
-        ? { viewer: cbAcct.viewer, base_url: cbAcct.base_url }
-        : null;
+    ({ viewer, gl, cb } = deriveProviderHeads(accounts));
   }
 
   /** Fetch waiting items (aggregated across providers) and the local clone
