@@ -29,8 +29,8 @@ use crate::{
     commands::AppState,
     local_index::{self, LocalRepo},
     notifications::{self, Kind, SeenStore},
-    provider_util::ProviderBackend,
-    settings::{self, NotificationSettings, Settings, POLL_INTERVAL_DEFAULT},
+    provider_util::{ProviderBackend, ProviderError},
+    settings::{self, NotificationSettings, Settings},
     types::{CiRun, CiStatus, ItemReason, Release, Repo, WaitingItem},
 };
 use chrono::Utc;
@@ -69,21 +69,21 @@ pub fn spawn_loop(app: AppHandle, state: Arc<AppState>) {
 /// breaking out only if the runtime shuts down.
 async fn run_loop(app: &AppHandle, state: &AppState) {
     loop {
-        tick(app, state).await;
+        // The tick hands back the settings it ran with, so the sleep below
+        // needs no second disk read. A save_settings *during* the tick still
+        // takes effect immediately: it fires `settings_reload`, whose stored
+        // permit makes the select! return at once, and the next iteration
+        // re-reads the file.
+        let settings = tick(app, state).await;
 
-        // Re-read the interval *after* each tick so a save_settings during
-        // a tick is picked up next sleep — combined with the `Notify`
-        // wakeup below, this gives near-instant feedback on a slider drag.
-        let sleep_for = current_poll_interval(app);
+        let sleep_for = poll_interval(&settings);
         tokio::select! {
             _ = tokio::time::sleep(sleep_for) => {}
             _ = state.refresh_trigger.notified() => {
                 // Manual refresh or auth change — tick immediately.
             }
             _ = state.settings_reload.notified() => {
-                // Settings changed; the new poll interval takes effect on
-                // the very next iteration because `current_poll_interval`
-                // is called above.
+                // Settings changed; the next iteration's tick reloads them.
             }
         }
     }
@@ -96,20 +96,23 @@ pub fn refresh_now(state: &AppState) {
     state.refresh_trigger.notify_one();
 }
 
-/// Run a single fetch + cache write + diff + notify + event emit.
-/// Public so `commands.rs` can invoke it during tests; production drives
-/// it from `run_loop`.
-pub async fn tick(app: &AppHandle, state: &AppState) {
-    let snapshot = fetch_all(app, state).await;
+/// Run a single fetch + cache write + diff + notify + event emit. Returns
+/// the settings the tick ran with so `run_loop` can derive its sleep without
+/// a second disk read. Public so `commands.rs` can invoke it during tests;
+/// production drives it from `run_loop`.
+pub async fn tick(app: &AppHandle, state: &AppState) -> Settings {
+    // One settings read per tick: the fetch (scan roots), the notification
+    // gates and the caller's sleep interval all see the same values. A load
+    // failure falls back to defaults for the gates — the worst case is a
+    // one-tick over-notify, which is preferable to skipping notifications
+    // altogether on a transient disk hiccup.
+    let loaded = settings::load(app);
+    let snapshot = fetch_all(state, &loaded).await;
+    let settings = loaded.unwrap_or_default();
+
     let synced_at = Utc::now().to_rfc3339();
     let now_ts = synced_at.clone();
 
-    // Load settings + seen-store outside the cache write lock so the
-    // notification step (which doesn't touch the cache) can't be blocked
-    // by a reader. Failures load defaults instead of aborting — the worst
-    // case is a one-tick over-notify, which is preferable to skipping
-    // notifications altogether on a transient disk hiccup.
-    let settings = settings::load(app).unwrap_or_default();
     let mut store = notifications::load(app);
     notifications::prune(&mut store);
 
@@ -155,6 +158,8 @@ pub async fn tick(app: &AppHandle, state: &AppState) {
     if let Err(e) = app.emit("data-updated", DataUpdatedPayload { synced_at }) {
         eprintln!("gitbuddy: emitting data-updated failed: {e}");
     }
+
+    settings
 }
 
 /// Settings-gated wrapper around [`compute_new_events`]: compute the genuinely
@@ -344,15 +349,19 @@ struct FetchSnapshot {
     error: Option<String>,
 }
 
-/// Run all four aggregated fetches plus the local scan in parallel. Mirrors
-/// what the pre-aggregator `list_*` commands did individually, but in a
-/// single coordinated pass per tick so the snapshot is internally consistent.
-async fn fetch_all(app: &AppHandle, state: &AppState) -> FetchSnapshot {
+/// Run every provider's fetches plus the local scan for one tick. Providers
+/// run concurrently (one task each, so a slow forge can't serialise the
+/// others); within a provider the waiting/repo fetches overlap too, and the
+/// repo list is fetched once and feeds both the releases and CI lookups.
+/// Mirrors what the pre-aggregator `list_*` commands did individually, but
+/// in a single coordinated pass per tick so the snapshot is internally
+/// consistent.
+async fn fetch_all(state: &AppState, settings: &Result<Settings, String>) -> FetchSnapshot {
     // Snapshot the provider registry up-front. The HashMap read is cheap and
     // we want to release the read lock before the await chain below touches
     // the network, so a connect/disconnect during a tick doesn't block on the
     // registry lock for tens of seconds. One unified map means a single
-    // snapshot and a single fan-out loop per list, regardless of forge.
+    // snapshot and a single fan-out, regardless of forge.
     let providers: Vec<(String, Arc<dyn ProviderBackend>)> = state
         .providers
         .read()
@@ -361,56 +370,101 @@ async fn fetch_all(app: &AppHandle, state: &AppState) -> FetchSnapshot {
         .map(|(id, p)| (id.clone(), p.clone()))
         .collect();
 
-    let mut snapshot = FetchSnapshot::default();
-
-    // Waiting items, ordered most-recent first to match the popover's
-    // expectations.
-    for (id, p) in &providers {
-        match p.list_waiting().await {
-            Ok(v) => tag_extend(&mut snapshot.waiting, v, id),
-            Err(e) => eprintln!("gitbuddy: list_waiting[{id}] failed: {e}"),
-        }
+    let mut tasks = Vec::with_capacity(providers.len());
+    for (id, p) in providers {
+        tasks.push(tokio::spawn(async move {
+            let (waiting, repos) = tokio::join!(p.list_waiting(), p.list_repos());
+            // Releases and CI reuse the repo list fetched above; on a repo
+            // fetch error they see an empty slice, preserving the per-list
+            // failure isolation the sequential version had.
+            let known = repos.as_deref().unwrap_or(&[]);
+            let (releases, ci) = tokio::join!(p.list_releases(known), p.list_ci(known));
+            (id, waiting, repos, releases, ci)
+        }));
     }
+
+    let mut snapshot = FetchSnapshot::default();
+    for task in tasks {
+        let (id, waiting, repos, releases, ci) = match task.await {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("gitbuddy: provider fetch task panicked: {e}");
+                continue;
+            }
+        };
+        merge_result(
+            &mut snapshot.waiting,
+            waiting,
+            &id,
+            "list_waiting",
+            &mut snapshot.error,
+        );
+        merge_result(
+            &mut snapshot.repos,
+            repos,
+            &id,
+            "list_repos",
+            &mut snapshot.error,
+        );
+        merge_result(
+            &mut snapshot.releases,
+            releases,
+            &id,
+            "list_releases",
+            &mut snapshot.error,
+        );
+        merge_result(&mut snapshot.ci, ci, &id, "list_ci", &mut snapshot.error);
+    }
+
+    // Waiting items most-recent first (the popover's expectation); repos by
+    // last push. Sorting after the merge keeps multi-account output stable
+    // regardless of which provider's task finished first.
     snapshot
         .waiting
         .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-
-    for (id, p) in &providers {
-        match p.list_repos().await {
-            Ok(v) => tag_extend(&mut snapshot.repos, v, id),
-            Err(e) => eprintln!("gitbuddy: list_repos[{id}] failed: {e}"),
-        }
-    }
     snapshot.repos.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
-
-    for (id, p) in &providers {
-        match p.list_releases().await {
-            Ok(v) => tag_extend(&mut snapshot.releases, v, id),
-            Err(e) => eprintln!("gitbuddy: list_releases[{id}] failed: {e}"),
-        }
-    }
-
-    for (id, p) in &providers {
-        match p.list_ci().await {
-            Ok(v) => tag_extend(&mut snapshot.ci, v, id),
-            Err(e) => eprintln!("gitbuddy: list_ci[{id}] failed: {e}"),
-        }
-    }
 
     // Local index scan — runs on a blocking thread because libgit2 is
     // synchronous. We try, and on failure record the error for the UI but
     // leave the cache's prior local list intact (the caller decides via
     // `cache.last_error`) so a momentary scan glitch doesn't blank the
-    // "Local clones" view.
-    match settings::load(app) {
-        Ok(s) => match tokio::task::spawn_blocking(move || local_index::scan(&s)).await {
-            Ok(v) => snapshot.locals = v,
-            Err(e) => snapshot.error = Some(format!("Local scan task panicked: {e}")),
-        },
+    // "Local clones" view. When settings failed to load we skip the scan
+    // rather than scanning default roots the user may have removed.
+    match settings {
+        Ok(s) => {
+            let s = s.clone();
+            match tokio::task::spawn_blocking(move || local_index::scan(&s)).await {
+                Ok(v) => snapshot.locals = v,
+                Err(e) => snapshot.error = Some(format!("Local scan task panicked: {e}")),
+            }
+        }
         Err(e) => snapshot.error = Some(format!("Loading settings failed: {e}")),
     }
 
     snapshot
+}
+
+/// Fold one provider list result into the snapshot: `Ok` extends the list
+/// (stamping the account id), `Err` is logged without aborting the tick.
+/// Rate limiting additionally lands in the snapshot error so the UI shows
+/// it — the user can act on that (lower the poll cadence) in a way they
+/// can't for a transient 5xx.
+fn merge_result<T: Tagged>(
+    out: &mut Vec<T>,
+    res: Result<Vec<T>, ProviderError>,
+    id: &str,
+    what: &str,
+    error_slot: &mut Option<String>,
+) {
+    match res {
+        Ok(v) => tag_extend(out, v, id),
+        Err(e) => {
+            eprintln!("gitbuddy: {what}[{id}] failed: {e}");
+            if matches!(e, ProviderError::RateLimited { .. }) {
+                *error_slot = Some(e.to_string());
+            }
+        }
+    }
 }
 
 /// Items the aggregator stamps with the account id that surfaced them, so the
@@ -447,18 +501,12 @@ fn tag_extend<T: Tagged>(out: &mut Vec<T>, items: Vec<T>, id: &str) {
     }));
 }
 
-/// Read the user's configured poll interval from Settings. `Settings::load`
+/// Sleep duration for the user's configured poll cadence. `Settings::load`
 /// already clamps `poll_interval_minutes` to `[1, 60]`, so this never
-/// produces a sleep less than a minute or more than an hour. A load
-/// failure (corrupt file, missing dir) falls back to the default rather
-/// than letting the loop panic — better to keep polling at 5 min than to
-/// silently stop.
-fn current_poll_interval(app: &AppHandle) -> Duration {
-    let minutes: u64 = settings::load(app)
-        .as_ref()
-        .map(|s: &Settings| s.poll_interval_minutes)
-        .unwrap_or(POLL_INTERVAL_DEFAULT) as u64;
-    Duration::from_secs(minutes * 60)
+/// produces a sleep under a minute or over an hour (and a load failure
+/// upstream falls back to `Settings::default()`, i.e. 5 minutes).
+fn poll_interval(settings: &Settings) -> Duration {
+    Duration::from_secs(settings.poll_interval_minutes as u64 * 60)
 }
 
 #[cfg(test)]

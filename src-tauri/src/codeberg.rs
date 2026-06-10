@@ -125,11 +125,10 @@ impl CodebergProvider {
     /// Latest release per repo, for the N most-recently-updated repos. Same
     /// shape and caps as the github / gitlab equivalents — one call per
     /// repo, failures tolerated per-repo.
-    pub async fn list_releases(&self) -> Result<Vec<Release>> {
+    pub async fn list_releases(&self, repos: &[Repo]) -> Result<Vec<Release>> {
         const MAX_REPOS_TO_CHECK: usize = 60;
 
-        let mut repos = self.list_repos().await?;
-        repos.truncate(MAX_REPOS_TO_CHECK);
+        let repos: Vec<Repo> = repos.iter().take(MAX_REPOS_TO_CHECK).cloned().collect();
 
         let mut handles = Vec::with_capacity(repos.len());
         for repo in repos {
@@ -158,11 +157,10 @@ impl CodebergProvider {
     /// Latest Gitea Actions workflow run on each repo's default branch.
     /// Best-effort — repos without Actions enabled return 404 and we
     /// surface a "no ci" marker so the row still gets a coloured dot.
-    pub async fn list_ci(&self) -> Result<Vec<CiRun>> {
+    pub async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
         const MAX_REPOS_TO_CHECK: usize = 60;
 
-        let mut repos = self.list_repos().await?;
-        repos.truncate(MAX_REPOS_TO_CHECK);
+        let repos: Vec<Repo> = repos.iter().take(MAX_REPOS_TO_CHECK).cloned().collect();
 
         let mut handles = Vec::with_capacity(repos.len());
         for repo in repos {
@@ -201,11 +199,11 @@ impl ProviderBackend for CodebergProvider {
     async fn list_repos(&self) -> Result<Vec<Repo>> {
         self.list_repos().await
     }
-    async fn list_releases(&self) -> Result<Vec<Release>> {
-        self.list_releases().await
+    async fn list_releases(&self, repos: &[Repo]) -> Result<Vec<Release>> {
+        self.list_releases(repos).await
     }
-    async fn list_ci(&self) -> Result<Vec<CiRun>> {
-        self.list_ci().await
+    async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
+        self.list_ci(repos).await
     }
 }
 

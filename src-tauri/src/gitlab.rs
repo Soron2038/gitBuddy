@@ -175,11 +175,10 @@ impl GitLabProvider {
     /// the viewer has access to. Bounded for the same reason as the GitHub
     /// equivalent — one HTTP call per project, and dormant archives don't
     /// merit the spend.
-    pub async fn list_releases(&self) -> Result<Vec<Release>> {
+    pub async fn list_releases(&self, repos: &[Repo]) -> Result<Vec<Release>> {
         const MAX_PROJECTS_TO_CHECK: usize = 60;
 
-        let mut repos = self.list_repos().await?;
-        repos.truncate(MAX_PROJECTS_TO_CHECK);
+        let repos: Vec<Repo> = repos.iter().take(MAX_PROJECTS_TO_CHECK).cloned().collect();
         let self_hosted = self.is_self_hosted();
 
         let mut handles = Vec::with_capacity(repos.len());
@@ -209,11 +208,10 @@ impl GitLabProvider {
     /// Latest pipeline run on each project's default branch. Used by the UI's
     /// per-repo CI status dot. GitLab's pipeline list endpoint is filtered
     /// by `ref` (branch) and `per_page=1` to get just the head.
-    pub async fn list_ci(&self) -> Result<Vec<CiRun>> {
+    pub async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
         const MAX_PROJECTS_TO_CHECK: usize = 60;
 
-        let mut repos = self.list_repos().await?;
-        repos.truncate(MAX_PROJECTS_TO_CHECK);
+        let repos: Vec<Repo> = repos.iter().take(MAX_PROJECTS_TO_CHECK).cloned().collect();
 
         let mut handles = Vec::with_capacity(repos.len());
         for repo in repos {
@@ -259,11 +257,11 @@ impl ProviderBackend for GitLabProvider {
     async fn list_repos(&self) -> Result<Vec<Repo>> {
         self.list_repos().await
     }
-    async fn list_releases(&self) -> Result<Vec<Release>> {
-        self.list_releases().await
+    async fn list_releases(&self, repos: &[Repo]) -> Result<Vec<Release>> {
+        self.list_releases(repos).await
     }
-    async fn list_ci(&self) -> Result<Vec<CiRun>> {
-        self.list_ci().await
+    async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
+        self.list_ci(repos).await
     }
 }
 

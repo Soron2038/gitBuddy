@@ -99,8 +99,13 @@ pub trait ProviderBackend: Send + Sync {
 
     async fn list_waiting(&self) -> Result<Vec<WaitingItem>, ProviderError>;
     async fn list_repos(&self) -> Result<Vec<Repo>, ProviderError>;
-    async fn list_releases(&self) -> Result<Vec<Release>, ProviderError>;
-    async fn list_ci(&self) -> Result<Vec<CiRun>, ProviderError>;
+    /// `repos` is the result of one `list_repos` call per tick, passed in by
+    /// the aggregator. Releases/CI used to re-fetch the repo list internally,
+    /// which tripled the API spend per tick (pagination included) for no
+    /// fresher data.
+    async fn list_releases(&self, repos: &[Repo]) -> Result<Vec<Release>, ProviderError>;
+    /// See [`Self::list_releases`] for the `repos` contract.
+    async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>, ProviderError>;
 }
 
 /// Render an RFC3339 timestamp as a compact relative age ("now", "30m",

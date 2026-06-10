@@ -149,15 +149,14 @@ impl GitHubProvider {
         Ok(all)
     }
 
-    /// Latest release per repo, for the N most-recently-pushed repos the
-    /// viewer has access to. Bounded because /releases/latest is one call
-    /// per repo and we don't want to spend the rate-limit budget on dormant
-    /// archives.
-    pub async fn list_releases(&self) -> Result<Vec<Release>> {
+    /// Latest release per repo, for the N most-recently-pushed of the given
+    /// `repos` (the aggregator's once-per-tick `list_repos` result). Bounded
+    /// because /releases/latest is one call per repo and we don't want to
+    /// spend the rate-limit budget on dormant archives.
+    pub async fn list_releases(&self, repos: &[Repo]) -> Result<Vec<Release>> {
         const MAX_REPOS_TO_CHECK: usize = 60;
 
-        let mut repos = self.list_repos().await?;
-        repos.truncate(MAX_REPOS_TO_CHECK);
+        let repos: Vec<Repo> = repos.iter().take(MAX_REPOS_TO_CHECK).cloned().collect();
 
         let mut handles = Vec::with_capacity(repos.len());
         for repo in repos {
@@ -186,13 +185,12 @@ impl GitHubProvider {
     }
 
     /// Latest CI workflow run on each repo's default branch, for the N most-
-    /// recently-pushed repos. Used to paint a coloured status dot next to
-    /// each repo row in the UI.
-    pub async fn list_ci(&self) -> Result<Vec<CiRun>> {
+    /// recently-pushed of the given `repos`. Used to paint a coloured status
+    /// dot next to each repo row in the UI.
+    pub async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
         const MAX_REPOS_TO_CHECK: usize = 60;
 
-        let mut repos = self.list_repos().await?;
-        repos.truncate(MAX_REPOS_TO_CHECK);
+        let repos: Vec<Repo> = repos.iter().take(MAX_REPOS_TO_CHECK).cloned().collect();
 
         let mut handles = Vec::with_capacity(repos.len());
         for repo in repos {
@@ -230,11 +228,11 @@ impl ProviderBackend for GitHubProvider {
     async fn list_repos(&self) -> Result<Vec<Repo>> {
         self.list_repos().await
     }
-    async fn list_releases(&self) -> Result<Vec<Release>> {
-        self.list_releases().await
+    async fn list_releases(&self, repos: &[Repo]) -> Result<Vec<Release>> {
+        self.list_releases(repos).await
     }
-    async fn list_ci(&self) -> Result<Vec<CiRun>> {
-        self.list_ci().await
+    async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
+        self.list_ci(repos).await
     }
 }
 
