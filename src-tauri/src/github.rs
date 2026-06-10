@@ -7,7 +7,8 @@
 //! milestone one of the providers.
 
 use crate::provider_util::{
-    collapse_ci_status, humanise_age, reason_priority, within_days, ProviderBackend, ProviderError,
+    collapse_ci_status, http_client, humanise_age, reason_priority, within_days, ProviderBackend,
+    ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
@@ -17,7 +18,6 @@ use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 
 const API_BASE: &str = "https://api.github.com";
-const USER_AGENT: &str = concat!("gitBuddy/", env!("CARGO_PKG_VERSION"));
 const ACCEPT: &str = "application/vnd.github+json";
 
 /// Hint surfaced when GitHub rejects the token — names the scope to check.
@@ -36,7 +36,7 @@ impl GitHubProvider {
     /// token works by hitting `/user`. Returns the authenticated viewer so
     /// callers can show a "connected as @login" confirmation.
     pub async fn connect(token: String) -> Result<Self> {
-        let client = Client::builder().user_agent(USER_AGENT).build()?;
+        let client = http_client()?;
         let viewer = fetch_viewer(&client, &token).await?;
         Ok(Self {
             client,

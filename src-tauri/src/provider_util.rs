@@ -12,8 +12,24 @@
 
 use crate::types::{CiRun, CiStatus, ItemReason, Release, Repo, Viewer, WaitingItem};
 use chrono::{DateTime, Utc};
-use reqwest::StatusCode;
+use reqwest::{Client, StatusCode};
+use std::time::Duration;
 use thiserror::Error;
+
+/// Shared User-Agent for every outbound HTTP request (providers + OAuth).
+pub(crate) const USER_AGENT: &str = concat!("gitBuddy/", env!("CARGO_PKG_VERSION"));
+
+/// Build the reqwest client every provider (and the OAuth flow) uses. The
+/// deadlines matter: without them a host that accepts the TCP connection but
+/// never answers would hang its fetch — and the aggregator tick awaiting it —
+/// forever.
+pub(crate) fn http_client() -> reqwest::Result<Client> {
+    Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+}
 
 /// One error type for every forge provider. Before this existed, each
 /// provider carried a near-identical `GitHubError` / `GitLabError` /

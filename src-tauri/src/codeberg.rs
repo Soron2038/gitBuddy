@@ -3,7 +3,8 @@
 //! REST API at `/api/v1/`, so this module mirrors github.rs closely.
 
 use crate::provider_util::{
-    collapse_ci_status, humanise_age, reason_priority, within_days, ProviderBackend, ProviderError,
+    collapse_ci_status, http_client, humanise_age, reason_priority, within_days, ProviderBackend,
+    ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
@@ -12,7 +13,6 @@ use chrono::Utc;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 
-const USER_AGENT: &str = concat!("gitBuddy/", env!("CARGO_PKG_VERSION"));
 const ACCEPT: &str = "application/json";
 
 /// Hint surfaced when the Gitea/Forgejo API rejects the token.
@@ -30,7 +30,7 @@ pub struct CodebergProvider {
 impl CodebergProvider {
     pub async fn connect(token: String, base_url: String) -> Result<Self> {
         let base_url = normalise_base_url(&base_url)?;
-        let client = Client::builder().user_agent(USER_AGENT).build()?;
+        let client = http_client()?;
         let viewer = fetch_viewer(&client, &token, &base_url).await?;
         Ok(Self {
             client,

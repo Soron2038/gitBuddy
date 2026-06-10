@@ -615,10 +615,7 @@ pub async fn gh_oauth_poll(
 }
 
 fn oauth_http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .user_agent(concat!("gitBuddy/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("http client: {e}"))
+    crate::provider_util::http_client().map_err(|e| format!("http client: {e}"))
 }
 
 /// Disconnect every account of one provider at once — the "disconnect from
