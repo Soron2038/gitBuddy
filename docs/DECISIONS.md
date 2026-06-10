@@ -302,3 +302,53 @@ mechanically duplicated, so a "shared" `RepoCard`/menu builder would either
 change one window's copy or need so many props it saves nothing. The real
 duplication (types, formatters, the settings literal) is gone; the rest is
 intentional UI divergence and stays per-route.
+
+## 2026-06-10 — Updater design (documenting the shipped v1.0 mechanism)
+
+The in-app updater shipped with v1.0 but never got a DECISIONS entry; the
+*how* lives in `docs/RELEASING.md`, this is the *why*.
+
+**`tauri-plugin-updater` against a GitHub-Releases-hosted `latest.json`.**
+The endpoint is `https://github.com/Soron2038/gitBuddy/releases/latest/
+download/latest.json` — i.e. the manifest is just another release asset, no
+server to run, no extra infrastructure to keep alive. Every release attaches
+its own `latest.json`; the `releases/latest` indirection means installed
+apps always read the newest one.
+
+**Integrity = minisign signature, not the transport.** The app embeds the
+minisign *public* key in `tauri.conf.json` (`plugins.updater.pubkey` —
+public by design, committing it is correct) and refuses any artifact whose
+`.sig` doesn't verify. A compromised GitHub account or a TLS middlebox can
+therefore serve a manifest, but not a installable malicious build, without
+the private key (held only in the maintainer's `~/.tauri/`, never in the
+repo). This is why `bundle.createUpdaterArtifacts: true` makes
+`TAURI_SIGNING_PRIVATE_KEY` a hard build requirement — an unsigned updater
+artifact would be unshippable anyway. Local smoke-test builds opt out via
+`scripts/build-app.sh --unsigned`.
+
+**`latest.json` is generated, not hand-written** (since today —
+`scripts/generate-latest-json.sh`). The manifest's `signature` field carries
+the full `.sig` contents; hand-pasting it was the one release step where a
+silent typo bricks auto-update for the entire installed base.
+
+## 2026-06-10 — CI re-introduced (minimal), reversing 2026-06-05 removal
+
+Commit `fd23bd1` removed the GitHub Actions workflow with the rationale
+that local verification suffices for a single-author project and that the
+macOS runner's 10× minute multiplier was the dominant cost. Two facts have
+changed under that rationale:
+
+1. **The repo is public** — the 10× multiplier only meters *private* repo
+   billing; on public repos, hosted runners (including macOS) are free.
+   The cost argument is void.
+2. **Releases now auto-update user machines.** Since v1.0, a regression
+   that reaches a release propagates to every installed copy via the
+   updater. A pre-merge gate is cheap insurance against exactly that.
+
+The new `.github/workflows/ci.yml` is deliberately minimal: type-check,
+`cargo fmt --check`, `clippy -D warnings`, `cargo test --lib` on
+`macos-latest` with `Swatinem/rust-cache` (vendored libgit2 + OpenSSL make
+caching essential; warm runs should stay in single-digit minutes). It does
+**not** build a Tauri bundle — that was the expensive, low-signal part of
+the removed workflow, and release builds remain a local, signed,
+tag-driven process per `docs/RELEASING.md`.
