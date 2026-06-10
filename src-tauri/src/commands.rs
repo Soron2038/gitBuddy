@@ -922,13 +922,31 @@ pub async fn clone_repo(
     // If the account vanished between the frontend showing the button and
     // the click landing, fall through to anonymous and let libgit2 surface
     // a clear auth error.
+    //
+    // When a token IS used, pin the clone to the account's own host: the
+    // clone URL originates from a forge API response, and a malicious or
+    // compromised instance could return a clone_url pointing at a foreign
+    // HTTPS host to harvest the token the credentials callback hands out.
     let token: Option<String> = if let Some(id) = account_id.as_deref() {
-        state
-            .providers
-            .read()
-            .await
-            .get(id)
-            .map(|p| p.token().to_string())
+        match state.providers.read().await.get(id) {
+            Some(p) => {
+                let expected = match p.base_url() {
+                    Some(base) => {
+                        url_host(base).ok_or_else(|| "Account base URL unparseable.".to_string())?
+                    }
+                    // GitHub provider carries no base URL — it is always
+                    // github.com.
+                    None => "github.com".to_string(),
+                };
+                if url_host(&url).as_deref() != Some(expected.as_str()) {
+                    return Err(format!(
+                        "Clone URL host does not match the account's host ({expected})."
+                    ));
+                }
+                Some(p.token().to_string())
+            }
+            None => None,
+        }
     } else {
         None
     };
@@ -1112,4 +1130,55 @@ pub async fn run_terminal(app: AppHandle, path: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("terminal task panicked: {e}"))?
+}
+
+/// Host component of an `https://` URL: scheme, userinfo, port and path
+/// stripped, lowercased. `None` when the input isn't https or has no host.
+/// Hand-rolled (like `oauth::urlencode`) to avoid pulling in the `url` crate
+/// for one field.
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit('@').next()?;
+    let host = host_port.split(':').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_host_extracts_and_normalises() {
+        assert_eq!(
+            url_host("https://GitHub.com/o/r.git").as_deref(),
+            Some("github.com")
+        );
+        // Userinfo must not fool the host comparison…
+        assert_eq!(
+            url_host("https://github.com@evil.example/o/r.git").as_deref(),
+            Some("evil.example")
+        );
+        // …nor may an explicit port.
+        assert_eq!(
+            url_host("https://gitlab.gwdg.de:8443/o/r.git").as_deref(),
+            Some("gitlab.gwdg.de")
+        );
+        assert_eq!(
+            url_host("https://codeberg.org").as_deref(),
+            Some("codeberg.org")
+        );
+    }
+
+    #[test]
+    fn url_host_rejects_non_https_and_hostless() {
+        assert_eq!(url_host("http://github.com/o/r"), None);
+        assert_eq!(url_host("git://github.com/o/r"), None);
+        assert_eq!(url_host("https:///path-only"), None);
+        assert_eq!(url_host(""), None);
+    }
 }
