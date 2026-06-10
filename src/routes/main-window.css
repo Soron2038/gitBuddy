@@ -1,0 +1,183 @@
+/* Shared visual vocabulary of the MAIN WINDOW, used by +page.svelte and the
+ * components extracted from it (DetailPane, …). Imported once by
+ * src/routes/+page.svelte, so these rules are global *within this window's
+ * document* — each Tauri window is its own webview/document, so nothing here
+ * can leak into the popover route.
+ *
+ * Lives outside Svelte's scoped <style> on purpose: Svelte scoping does not
+ * cross component boundaries, and these classes (.row family, chips, badges)
+ * are deliberately shared between the page's list views and the extracted
+ * components. Scoped overrides in components (e.g. DetailPane's `.dp-item`)
+ * win over these single-class rules by specificity. */
+
+/* Inline text-button (used in empty states to deep-link into Settings). */
+.link-inline {
+  color: var(--terracotta);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Provider chip — square monogram identifying the forge. */
+.pchip {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: var(--cream-2);
+  color: var(--ink-2);
+  font-weight: 700;
+  font-size: 11px;
+  font-family: var(--font-display);
+}
+.pchip.gh { background: #2E211B; color: #FAF4EA; }
+.pchip.gl { background: linear-gradient(135deg, #E89C5C, #C66243); color: white; }
+.pchip.cb { background: linear-gradient(135deg, #8DBBC9, #4E7A8A); color: white; }
+.pchip.gl-self { background: linear-gradient(135deg, #B6A5C9, #6E5E80); color: white; }
+
+/* CI status chip — dot + label; base colour is the passing state. */
+.rci {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.rci .b {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sage);
+}
+.rci.fail { color: var(--terracotta); }
+.rci.fail .b { background: var(--terracotta); }
+.rci.run { color: #B68C2C; }
+.rci.run .b {
+  background: var(--butter);
+  animation: rci 1.4s ease-in-out infinite;
+}
+.rci.none { color: var(--ink-3); opacity: 0.5; }
+.rci.none .b { background: var(--ink-4); }
+.rci.cancelled { color: var(--ink-3); }
+.rci.cancelled .b { background: var(--ink-4); }
+@keyframes rci {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.5; transform: scale(0.8); }
+}
+
+/* Row vocabulary — the list-item shape shared by the waiting list, the
+ * releases list, the local list and the detail pane's item section. */
+.row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.row {
+  width: 100%;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 12px 16px;
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  gap: 14px;
+  align-items: center;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.row:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-2);
+}
+.kind-chip {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  color: white;
+  flex-shrink: 0;
+}
+.kind-chip.pr { background: linear-gradient(135deg, #80987B, #4A5E48); }
+.kind-chip.mr { background: linear-gradient(135deg, #E8A06A, #C66243); }
+.kind-chip.is { background: linear-gradient(135deg, #B6A5C9, #6E5E80); }
+.kind-chip.rel {
+  background: linear-gradient(135deg, #F1D58A, #B68C2C);
+  color: var(--ink);
+}
+.row-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.row-title {
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--ink);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.row-meta {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.row-dot { color: var(--ink-4); }
+.row-repo { color: var(--ink-2); }
+.row-reason { color: var(--terracotta); text-transform: lowercase; }
+.row-prov { color: var(--ink-3); }
+.row-tag {
+  background: var(--cream-2);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--ink-2);
+}
+.row-age {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.badge-pre {
+  background: var(--plum-soft);
+  color: var(--plum);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.new-badge {
+  background: var(--terracotta);
+  color: white;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
