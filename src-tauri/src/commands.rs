@@ -1055,31 +1055,29 @@ pub async fn import_config(
 }
 
 /// Run the user-configured editor command with `path` appended as the final
-/// argument. Shells out via `sh -c` so PATH lookup (and aliases like `code`,
-/// `cursor`, `zed`) work without us having to teach the binary about every
-/// editor's install location.
+/// argument. The command is split on whitespace and spawned directly — no
+/// shell. PATH lookup via execvp behaves exactly as `sh -c` did (neither
+/// reads shell rc files), but shell metacharacters in a settings value are
+/// no longer interpreted, so a tampered or hand-edited `editor_command`
+/// can't smuggle extra commands. Flags still work: `"code --new-window"`
+/// becomes `code --new-window <repo-path>`.
 #[tauri::command]
 pub async fn run_editor(app: AppHandle, path: String) -> Result<(), String> {
     let settings = settings::load(&app)?;
     let cmd = settings.editor_command.unwrap_or_default();
-    let cmd = cmd.trim();
-    if cmd.is_empty() {
+    let mut parts = cmd.split_whitespace().map(str::to_owned);
+    let Some(program) = parts.next() else {
         return Err("No editor command configured. Set one in Settings.".into());
-    }
-
-    // Single-arg shell escape: wrap path in single quotes, escape any
-    // literal single quotes inside. Good enough for filesystem paths,
-    // which can't contain newlines on macOS in normal use.
-    let escaped_path = format!("'{}'", path.replace('\'', "'\\''"));
-    let full = format!("{cmd} {escaped_path}");
+    };
+    let args: Vec<String> = parts.collect();
 
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&full)
+        std::process::Command::new(&program)
+            .args(&args)
+            .arg(&path)
             .spawn()
             .map(|_| ())
-            .map_err(|e| format!("spawning editor failed: {e}"))
+            .map_err(|e| format!("spawning editor `{program}` failed: {e}"))
     })
     .await
     .map_err(|e| format!("editor task panicked: {e}"))?
