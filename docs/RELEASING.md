@@ -73,6 +73,14 @@ Keep these three in sync — the updater compares the version string:
 - `src-tauri/Cargo.toml` → `version`
 - `package.json` → `version` (cosmetic, but keep it aligned)
 
+Then refresh the lockfiles so they record the new version (v1.0.1's
+`package-lock.json` shipped still claiming `0.1.0`):
+
+```bash
+npm install --package-lock-only
+cd src-tauri && cargo check && cd ..   # updates Cargo.lock
+```
+
 ### 2. Verify the gate
 
 ```bash
@@ -104,38 +112,29 @@ codesign --verify --deep --strict --verbose=2 \
 spctl -a -vv "src-tauri/target/release/bundle/macos/gitBuddy.app"   # expect: accepted, source=Notarized Developer ID
 ```
 
-### 5. Write `latest.json`
+### 5. Generate `latest.json`
 
-Paste the **contents** of the `.app.tar.gz.sig` file into `signature`, and point
-`url` at the asset's download URL on the release you're about to publish:
-
-```json
-{
-  "version": "1.0.0",
-  "notes": "What changed in this release.",
-  "pub_date": "2026-06-03T12:00:00Z",
-  "platforms": {
-    "darwin-aarch64": {
-      "signature": "<contents of gitBuddy_1.0.0_aarch64.app.tar.gz.sig>",
-      "url": "https://github.com/Soron2038/gitBuddy/releases/download/v1.0.0/gitBuddy_1.0.0_aarch64.app.tar.gz"
-    },
-    "darwin-x86_64": {
-      "signature": "<contents of the x64 .sig>",
-      "url": "https://github.com/Soron2038/gitBuddy/releases/download/v1.0.0/gitBuddy_1.0.0_x64.app.tar.gz"
-    }
-  }
-}
+```bash
+scripts/generate-latest-json.sh --notes "What changed in this release."
 ```
 
-For a **universal** build, point both `darwin-aarch64` and `darwin-x86_64` at the
-same `…_universal.app.tar.gz` URL with its single signature.
+The script reads the version from `tauri.conf.json`, picks up every
+`release/*.app.tar.gz` + `.sig` pair from the build, derives the platform keys
+from the filename (`_aarch64` / `_x64`; a `_universal` artifact serves both),
+and writes `latest.json` to the repo root. It refuses to run on stale
+artifacts whose filename doesn't contain the current version.
+
+(This step used to be manual copy-paste of the `.sig` contents — a typo there
+bricks auto-update for the entire installed base, hence the script.)
 
 ### 6. Publish the GitHub release
 
-Tag `v<version>` (e.g. `v1.0.0`), then upload the `.dmg`, the `.app.tar.gz`, its
-`.sig`, and `latest.json`:
+Create an **annotated** tag `v<version>` and upload the `.dmg`, the
+`.app.tar.gz`, its `.sig`, and `latest.json`:
 
 ```bash
+git tag -a v1.0.0 -m "gitBuddy 1.0.0"
+git push origin v1.0.0
 gh release create v1.0.0 \
   release/gitBuddy_1.0.0_aarch64.dmg \
   release/gitBuddy_1.0.0_aarch64.app.tar.gz \
@@ -145,7 +144,8 @@ gh release create v1.0.0 \
 ```
 
 Because the endpoint uses `/releases/latest/download/latest.json`, the asset
-must be named exactly `latest.json`.
+must be named exactly `latest.json`. Mirror the release notes into
+`CHANGELOG.md`.
 
 ---
 
