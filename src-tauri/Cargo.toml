@@ -60,3 +60,14 @@ dirs = "6"
 # libgit2 diagnostics against them; tempfile handles creation + cleanup.
 tempfile = "3"
 
+[profile.release]
+# Smaller, faster distributable: whole-program LTO + one codegen unit cost
+# extra build time only on release bundles, and `strip` drops debug symbols
+# from the shipped binary (crash triage uses the .dSYM from the build, not
+# the user's copy). `panic = "abort"` is deliberately NOT set — libgit2
+# callbacks and the updater unwind across FFI, and abort would turn
+# recoverable errors into process kills.
+lto = true
+codegen-units = 1
+strip = true
+
