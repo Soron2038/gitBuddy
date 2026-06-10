@@ -319,6 +319,8 @@ async fn finalise_migration(
 /// Every account is restored — keyed by its id — so two GitLab instances or
 /// a personal-plus-work GitHub end up co-resident in their respective
 /// HashMaps. Each connect failure is logged but doesn't blank the rest.
+/// The registry is populated in one write-lock acquisition at the end, so
+/// concurrent readers never observe a half-restored registry.
 async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
     let file = match accounts::load(app) {
         Ok(f) => f,
@@ -328,6 +330,7 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
         }
     };
 
+    let mut restored: Vec<(String, Arc<dyn ProviderBackend>)> = Vec::new();
     for account in file.accounts {
         let raw = match keychain::load(&account.id).await {
             Ok(Some(t)) => t,
@@ -366,13 +369,7 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
         let id = account.id.clone();
         match account.provider {
             Provider::Github => match GitHubProvider::connect(token).await {
-                Ok(p) => {
-                    state
-                        .providers
-                        .write()
-                        .await
-                        .insert(id, Arc::new(p) as Arc<dyn ProviderBackend>);
-                }
+                Ok(p) => restored.push((id, Arc::new(p) as Arc<dyn ProviderBackend>)),
                 Err(e) => eprintln!("gitbuddy: restoring github session failed: {e}"),
             },
             Provider::Gitlab | Provider::MpsdGitlab => {
@@ -384,13 +381,7 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
                     continue;
                 };
                 match GitLabProvider::connect(token, base_url).await {
-                    Ok(p) => {
-                        state
-                            .providers
-                            .write()
-                            .await
-                            .insert(id, Arc::new(p) as Arc<dyn ProviderBackend>);
-                    }
+                    Ok(p) => restored.push((id, Arc::new(p) as Arc<dyn ProviderBackend>)),
                     Err(e) => eprintln!("gitbuddy: restoring gitlab session failed: {e}"),
                 }
             }
@@ -400,17 +391,16 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
                     .clone()
                     .unwrap_or_else(|| "https://codeberg.org".to_string());
                 match CodebergProvider::connect(token, base_url).await {
-                    Ok(p) => {
-                        state
-                            .providers
-                            .write()
-                            .await
-                            .insert(id, Arc::new(p) as Arc<dyn ProviderBackend>);
-                    }
+                    Ok(p) => restored.push((id, Arc::new(p) as Arc<dyn ProviderBackend>)),
                     Err(e) => eprintln!("gitbuddy: restoring codeberg session failed: {e}"),
                 }
             }
         }
+    }
+
+    if !restored.is_empty() {
+        let mut providers = state.providers.write().await;
+        providers.extend(restored);
     }
 }
 
@@ -722,6 +712,7 @@ async fn disconnect_all_for_provider(
         }
     }
     let mut errors = Vec::new();
+    let mut cleaned = Vec::new();
     for id in ids {
         if let Err(e) = keychain::delete(&id).await {
             errors.push(format!("keychain delete for {id}: {e}"));
@@ -731,7 +722,16 @@ async fn disconnect_all_for_provider(
             errors.push(format!("registry remove for {id}: {e}"));
             continue;
         }
-        state.providers.write().await.remove(&id);
+        cleaned.push(id);
+    }
+    // One write acquisition for the whole sweep — taking the lock once per
+    // id inside the loop could interleave with (and starve against) a
+    // concurrent tick holding the read lock.
+    if !cleaned.is_empty() {
+        let mut providers = state.providers.write().await;
+        for id in &cleaned {
+            providers.remove(id);
+        }
     }
     if errors.is_empty() {
         Ok(())
