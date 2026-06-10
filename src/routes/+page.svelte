@@ -15,6 +15,7 @@
   import Buddy from '$lib/Buddy.svelte';
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
   import DetailPane from '$lib/components/DetailPane.svelte';
+  import RepoCard, { type RepoEntry } from '$lib/components/RepoCard.svelte';
   import { humaniseSync, hostSuggestions, connectedHosts } from '$lib/format';
   import { deriveProviderHeads } from '$lib/data/auth';
   // Window-wide visual vocabulary shared with the extracted components
@@ -393,7 +394,6 @@
    *  dedup, one entry per unique html_url with a badge for each origin
    *  account. The aggregator in `list_repos` returns one row per
    *  (account, repo) pair; this is where we collapse them for display. */
-  type RepoEntry = Repo & { account_ids: string[] };
 
   let filteredRepos = $derived.by((): RepoEntry[] => {
     const filtered = repos.filter(
@@ -1483,83 +1483,6 @@
             </div>
           </div>
 
-          {#snippet repoCardEntry(r: RepoEntry)}
-            {@const local = localByKey.get(localKeyForRepo(r))}
-            {@const localDiag = local?.[0]}
-            {@const ci = ciByRepo.get(r.id) ?? 'none'}
-            <button
-              class="card"
-              class:selected={selectedRepo?.id === r.id}
-              onclick={() => (selectedRepo = selectedRepo?.id === r.id ? null : r)}
-              oncontextmenu={(e) => openRepoMenu(e, r)}
-            >
-              {#if showAccountBadges && r.account_ids.length > 0}
-                <span class="acct-badges">
-                  {#each r.account_ids as id (id)}
-                    {@const a = accountById.get(id)}
-                    {#if a}
-                      {@const aHost = a.base_url
-                        ? (() => {
-                            try {
-                              return new URL(a.base_url!).host;
-                            } catch {
-                              return a.base_url!;
-                            }
-                          })()
-                        : 'github.com'}
-                      <span
-                        class="pchip {providerCssClass(a.provider)}"
-                        title="{a.login}@{aHost}"
-                      >
-                        {providerChipText({ provider: a.provider, html_url: a.base_url ?? '' })}
-                      </span>
-                    {/if}
-                  {/each}
-                </span>
-              {:else}
-                <span class="pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
-              {/if}
-              <div class="rname">
-                <span class="owner">{r.owner}</span> / <b>{r.name}</b>
-                <div class="sub">
-                  {#if local}
-                    <span class="pin">
-                      <span
-                        class="d"
-                        class:off={localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged + localDiag.untracked > 0 || localDiag.ahead > 0)}
-                      ></span>
-                      {localDiag?.path ?? 'cloned'}
-                    </span>
-                  {:else}
-                    <span class="pin">
-                      <span class="d off"></span> not cloned
-                    </span>
-                  {/if}
-                  <span>{r.default_branch}</span>
-                  {#if r.is_private}<span>private</span>{/if}
-                  {#if r.is_fork}<span>fork</span>{/if}
-                  {#if localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged > 0)}
-                    <span class="warn">{localDiag.dirty_staged + localDiag.dirty_unstaged} uncommitted</span>
-                  {/if}
-                  {#if localDiag && localDiag.ahead > 0}
-                    <span class="warn">{localDiag.ahead} unpushed</span>
-                  {/if}
-                </div>
-              </div>
-              <div class="rmeta">
-                <span class="rci {ci}">
-                  <span class="b"></span>
-                  {#if ci === 'ok'}passing{:else if ci === 'fail'}failing{:else if ci === 'run'}running{:else if ci === 'cancelled'}cancelled{:else}no ci{/if}
-                </span>
-                {#if r.language}
-                  <span class="lang">{r.language}</span>
-                {/if}
-                {#if r.stars > 0}
-                  <span class="stars">★ {r.stars}</span>
-                {/if}
-              </div>
-            </button>
-          {/snippet}
 
           {#if status === 'all'}
             <h2 class="section-h">
@@ -1583,7 +1506,16 @@
             {:else}
               <div class="repo-grid">
                 {#each filteredRepos as r (r.id)}
-                  {@render repoCardEntry(r)}
+                  <RepoCard
+                    entry={r}
+                    local={localByKey.get(localKeyForRepo(r))}
+                    ci={ciByRepo.get(r.id) ?? 'none'}
+                    selected={selectedRepo?.id === r.id}
+                    {showAccountBadges}
+                    {accountById}
+                    onselect={() => (selectedRepo = selectedRepo?.id === r.id ? null : r)}
+                    oncontextmenu={(e) => openRepoMenu(e, r)}
+                  />
                 {/each}
               </div>
             {/if}
@@ -1704,7 +1636,16 @@
             {:else}
               <div class="repo-grid">
                 {#each filteredLocals as r (r.id)}
-                  {@render repoCardEntry(r)}
+                  <RepoCard
+                    entry={r}
+                    local={localByKey.get(localKeyForRepo(r))}
+                    ci={ciByRepo.get(r.id) ?? 'none'}
+                    selected={selectedRepo?.id === r.id}
+                    {showAccountBadges}
+                    {accountById}
+                    onselect={() => (selectedRepo = selectedRepo?.id === r.id ? null : r)}
+                    oncontextmenu={(e) => openRepoMenu(e, r)}
+                  />
                 {/each}
               </div>
             {/if}
@@ -2828,84 +2769,6 @@
     grid-template-columns: 1fr 1fr;
     gap: 12px;
   }
-  .card {
-    width: 100%;
-    background: var(--paper);
-    border: 1px solid var(--line);
-    border-radius: var(--r-lg);
-    padding: 14px 16px;
-    display: grid;
-    grid-template-columns: 32px 1fr auto;
-    gap: 12px;
-    align-items: start;
-    text-align: left;
-    transition: transform 0.15s, box-shadow 0.15s;
-    cursor: pointer;
-  }
-  .card:hover {
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-2);
-  }
-
-  /* Stack of provider/host chips on a repo card — appears in place of the
-     single .pchip when more than one account is connected, so the user can
-     see which of their accounts surface this repo. */
-  .acct-badges {
-    display: inline-flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 3px;
-  }
-
-  .rname { line-height: 1.25; min-width: 0; }
-  .rname .owner { color: var(--ink-3); font-weight: 400; font-size: 12.5px; }
-  .rname b { font-weight: 600; font-size: 14.5px; color: var(--ink); }
-  .rname .sub {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    margin-top: 5px;
-    font-size: 11.5px;
-    color: var(--ink-3);
-    font-family: var(--font-mono);
-    letter-spacing: 0.01em;
-  }
-  .rname .sub .pin {
-    display: inline-flex;
-    gap: 4px;
-    align-items: center;
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .rname .sub .pin .d {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--sage);
-    flex-shrink: 0;
-  }
-  .rname .sub .pin .d.off {
-    background: var(--ink-4);
-    opacity: 0.5;
-  }
-  .rname .sub .warn { color: var(--terracotta); }
-  .rmeta {
-    text-align: right;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 5px;
-    font-size: 12px;
-    color: var(--ink-2);
-    white-space: nowrap;
-  }
-  .lang, .stars {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--ink-3);
-  }
 
   /* Search clear button -------------------------------------------- */
   .search-clear {
@@ -3589,12 +3452,4 @@
     .repo-grid { grid-template-columns: 1fr; }
   }
 
-  .card.selected {
-    background: var(--terracotta-soft);
-    border-color: rgba(198, 98, 67, 0.22);
-    box-shadow: var(--shadow-2);
-  }
-  .card.selected:hover {
-    transform: none;
-  }
 </style>
