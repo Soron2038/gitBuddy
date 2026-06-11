@@ -72,3 +72,6 @@ Desktop.ini
 release/
 dist/
 __pycache__/
+# Updater manifest generated per release by scripts/generate-latest-json.sh
+# and uploaded as a GitHub release asset — regenerated each time, never committed.
+/latest.json
