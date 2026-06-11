@@ -7,6 +7,8 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-06-11
+
 ### Fixed
 
 - All forge HTTP requests now carry connect/request timeouts — a stalled
@@ -68,6 +70,7 @@ First signed and notarized release.
   config export/import.
 - In-app auto-update via signed `latest.json` on GitHub Releases.
 
-[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/Soron2038/gitBuddy/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Soron2038/gitBuddy/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Soron2038/gitBuddy/releases/tag/v1.0.0
