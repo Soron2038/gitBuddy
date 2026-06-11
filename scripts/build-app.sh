@@ -159,12 +159,20 @@ apply_dmg_icon "$OUT_DIR/$DMG_NAME" || echo "  note: icon step skipped (non-fata
 # Produced only when TAURI_SIGNING_PRIVATE_KEY was exported (the build emits
 # them next to the .app under bundle/macos/). Both go on the GitHub release and
 # are referenced from latest.json — see docs/RELEASING.md.
+#
+# Tauri names the tarball unversioned (gitBuddy.app.tar.gz), but
+# generate-latest-json.sh requires the version + arch in the filename (and
+# derives the platform key from a `_universal` / `_aarch64` / `_x64` tag). Rename
+# it to match the DMG's `_<version>_<arch>` scheme so the manifest step is
+# hands-off. The minisign .sig signs the tarball *bytes*, not its name, so
+# renaming is safe.
 UPDATER_TARBALL="$(find "$BUNDLE_ROOT" -type f -name '*.app.tar.gz' -path '*/bundle/macos/*' \
   -newer "$MARKER" -print 2>/dev/null | head -n 1 || true)"
 UPDATER_FOUND=0
 if [[ -n "$UPDATER_TARBALL" ]]; then
-  cp -f "$UPDATER_TARBALL" "$OUT_DIR/"
-  [[ -f "$UPDATER_TARBALL.sig" ]] && cp -f "$UPDATER_TARBALL.sig" "$OUT_DIR/"
+  UPDATER_NAME="${DMG_NAME%.dmg}.app.tar.gz"   # e.g. gitBuddy_1.0.2_universal.app.tar.gz
+  cp -f "$UPDATER_TARBALL" "$OUT_DIR/$UPDATER_NAME"
+  [[ -f "$UPDATER_TARBALL.sig" ]] && cp -f "$UPDATER_TARBALL.sig" "$OUT_DIR/$UPDATER_NAME.sig"
   UPDATER_FOUND=1
 fi
 
@@ -175,7 +183,7 @@ echo
 printf '  %-9s %s\n' "DMG:" "$OUT_DIR/$DMG_NAME  ($(du -h "$OUT_DIR/$DMG_NAME" | cut -f1))"
 [[ -n "$APP" ]] && printf '  %-9s %s\n' "App:" "$APP"
 if [[ "$UPDATER_FOUND" -eq 1 ]]; then
-  printf '  %-9s %s\n' "Updater:" "$OUT_DIR/$(basename "$UPDATER_TARBALL") (+ .sig)"
+  printf '  %-9s %s\n' "Updater:" "$OUT_DIR/$UPDATER_NAME (+ .sig)"
 fi
 echo
 if [[ "$UPDATER_FOUND" -eq 1 ]]; then
