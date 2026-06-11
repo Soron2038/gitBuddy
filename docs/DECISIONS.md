@@ -385,3 +385,34 @@ need chip/title/meta/trailing snippet props — the same props-explosion the
 The Settings view (~1k lines incl. the OAuth device-flow machine) is the
 remaining large block and would be the natural next extraction; it was out
 of scope here.
+
+## 2026-06-11 — HTTP-level provider conformance tests (wiremock)
+
+PRD §12 and CLAUDE.md had long flagged the same gap: the providers were only
+covered by fixture-*deserialization* tests, never exercised through the HTTP
+layer. The 1.0.2 release shipped behaviour changes (429 surfacing, per-page
+pagination, the graceful-404 paths) with no automated regression coverage of
+the request/response/error-mapping path.
+
+**Added a `wiremock` dev-dependency and a per-provider conformance suite.**
+Each provider is built via a new `#[cfg(test)] pub(crate) fn for_test` seam —
+which skips `connect`'s network round-trip and, for GitLab/Codeberg, the
+https-only base-URL normalisation — and pointed at a localhost mock server
+over plain HTTP. The suite drives `list_repos` pagination + the short-page
+stop condition, asserts the bearer header is sent, and checks the
+401/429/5xx/graceful-404 mappings; GitHub additionally covers `list_waiting`'s
+fail-soft tolerance (one search scope 500s, the rest succeed) and 401
+propagation. Shared helpers (a `Viewer` stub, a pagination-page generator)
+live in `provider_util::test_support`.
+
+**GitHub's API base became a struct field.** It was a hardcoded `const
+API_BASE`; the field (defaulting to that const, with `base` threaded through
+the four free request fns) is the only production change, purely so the test
+seam can redirect it to the mock server. `connect`'s signature is unchanged
+and `base_url()` still returns `None`, so the clone-host check (GitHub ⇒
+github.com, see the b7ffba6 fix) is untouched. GitLab/Codeberg already passed
+`base` into their request helpers, so they needed only the `for_test`
+constructor.
+
+This closes the PRD §12 "provider trait conformance tests" item; the trait
+itself landed 2026-06-01. Test count ~67 → ~87.

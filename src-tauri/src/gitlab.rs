@@ -43,6 +43,21 @@ impl GitLabProvider {
         })
     }
 
+    /// Construct a provider pointed at an arbitrary base URL (a mock server),
+    /// skipping `connect`'s base-URL normalisation and `/user` round-trip.
+    /// Tests only — drives the real request paths against a localhost
+    /// `wiremock` server. That server speaks plain HTTP, so normalisation's
+    /// https-only rule is intentionally bypassed here.
+    #[cfg(test)]
+    pub(crate) fn for_test(base_url: String, token: String, viewer: Viewer) -> Self {
+        Self {
+            client: http_client().expect("test http client"),
+            token,
+            base_url,
+            viewer,
+        }
+    }
+
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -656,6 +671,9 @@ fn collapse_pipeline_status(status: &str) -> CiStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_util::test_support::{json_array, viewer};
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn strip_iid_handles_issue_and_mr_refs() {
@@ -701,5 +719,130 @@ mod tests {
         let parsed: Vec<RawPipeline> = serde_json::from_str(raw).expect("parse");
         let p = parsed.into_iter().next().unwrap();
         assert!(p.user.is_none());
+    }
+
+    // ---- HTTP-conformance suite ------------------------------------------
+    // Real reqwest paths against a localhost wiremock server (via `for_test`):
+    // pagination, the bearer header, and the rate-limit/error/404 mappings.
+
+    /// A `/api/v4/projects` element with only the fields `RawProject` requires.
+    fn project_json(i: usize) -> String {
+        format!(
+            r#"{{"id":{i},"path_with_namespace":"o/r{i}","star_count":0,"web_url":"https://x/{i}","visibility":"public"}}"#
+        )
+    }
+
+    /// A test repo whose `gl:`-prefixed id yields project 42 in release URLs.
+    fn repo() -> Repo {
+        Repo {
+            id: "gl:42".into(),
+            owner: "o".into(),
+            name: "r".into(),
+            provider: Provider::Gitlab,
+            default_branch: "main".into(),
+            language: None,
+            description: None,
+            stars: 0,
+            html_url: "https://x".into(),
+            ssh_url: None,
+            clone_url: None,
+            is_fork: false,
+            is_private: false,
+            pushed_at: None,
+            account_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_repos_paginates_until_short_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json_array(100, project_json)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json_array(1, project_json)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let gl = GitLabProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert_eq!(gl.list_repos().await.expect("ok").len(), 101);
+    }
+
+    #[tokio::test]
+    async fn list_repos_sends_bearer_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects"))
+            .and(header("authorization", "Bearer testtoken"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gl = GitLabProvider::for_test(server.uri(), "testtoken".into(), viewer("tester"));
+        gl.list_repos().await.expect("authorised");
+    }
+
+    #[tokio::test]
+    async fn list_repos_maps_401_to_unauthorized() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let gl = GitLabProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            gl.list_repos().await.unwrap_err(),
+            ProviderError::Unauthorized(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_repos_maps_429_to_rate_limited() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+        let gl = GitLabProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            gl.list_repos().await.unwrap_err(),
+            ProviderError::RateLimited { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_repos_maps_5xx_to_http_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        let gl = GitLabProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            gl.list_repos().await.unwrap_err(),
+            ProviderError::HttpStatus { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_releases_treats_404_as_no_release() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/42/releases"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let gl = GitLabProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(gl.list_releases(&[repo()]).await.expect("ok").is_empty());
     }
 }

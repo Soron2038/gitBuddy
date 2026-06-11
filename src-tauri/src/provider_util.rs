@@ -189,6 +189,33 @@ pub(crate) fn collapse_ci_status(status: &str, conclusion: Option<&str>) -> CiSt
     }
 }
 
+/// Shared helpers for the per-provider HTTP-conformance suites. Lives here
+/// (rather than duplicated per module) because all three providers build the
+/// same kind of fixtures against a `wiremock` server. `pub(crate)` + `cfg(test)`
+/// so each provider's `#[cfg(test)] mod tests` can reach it crate-wide.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::types::Viewer;
+
+    /// A minimal viewer stub for `Provider::for_test` — providers only read
+    /// `viewer.login` (GitHub's `list_waiting` search queries), never the rest.
+    pub(crate) fn viewer(login: &str) -> Viewer {
+        Viewer {
+            login: login.to_string(),
+            avatar_url: None,
+            name: None,
+        }
+    }
+
+    /// Build a JSON array of `n` objects, each rendered by `make(index)`. Used
+    /// to synthesise a full pagination page (`PAGE_SIZE` items) without pasting
+    /// a hundred near-identical objects into the test.
+    pub(crate) fn json_array(n: usize, make: impl Fn(usize) -> String) -> String {
+        let items: Vec<String> = (0..n).map(make).collect();
+        format!("[{}]", items.join(","))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

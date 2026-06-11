@@ -28,6 +28,10 @@ pub type Result<T> = std::result::Result<T, ProviderError>;
 pub struct GitHubProvider {
     client: Client,
     token: String,
+    /// API base, normally [`API_BASE`]. Held as a field (rather than using the
+    /// const directly) so tests can point the provider at a mock server via
+    /// [`Self::for_test`]; production always passes `API_BASE`.
+    api_base: String,
     pub viewer: Viewer,
 }
 
@@ -37,12 +41,27 @@ impl GitHubProvider {
     /// callers can show a "connected as @login" confirmation.
     pub async fn connect(token: String) -> Result<Self> {
         let client = http_client()?;
-        let viewer = fetch_viewer(&client, &token).await?;
+        let viewer = fetch_viewer(&client, &token, API_BASE).await?;
         Ok(Self {
             client,
             token,
+            api_base: API_BASE.to_string(),
             viewer,
         })
+    }
+
+    /// Construct a provider pointed at an arbitrary API base (a mock server),
+    /// skipping the `/user` round-trip that [`Self::connect`] performs. Tests
+    /// only — the HTTP-conformance suite drives the real request paths against
+    /// a localhost `wiremock` server.
+    #[cfg(test)]
+    pub(crate) fn for_test(api_base: String, token: String, viewer: Viewer) -> Self {
+        Self {
+            client: http_client().expect("test http client"),
+            token,
+            api_base,
+            viewer,
+        }
     }
 
     /// Items where the user is assigned, review-requested, authored, or
@@ -73,8 +92,9 @@ impl GitHubProvider {
         for (reason, q) in queries {
             let client = self.client.clone();
             let token = self.token.clone();
+            let base = self.api_base.clone();
             handles.push(tokio::spawn(async move {
-                search_issues(&client, &token, &q, reason).await
+                search_issues(&client, &token, &base, &q, reason).await
             }));
         }
 
@@ -117,7 +137,7 @@ impl GitHubProvider {
         for page in 1..=MAX_PAGES {
             let resp = self
                 .client
-                .get(format!("{API_BASE}/user/repos"))
+                .get(format!("{}/user/repos", self.api_base))
                 .bearer_auth(&self.token)
                 .header("Accept", ACCEPT)
                 .query(&[
@@ -162,8 +182,9 @@ impl GitHubProvider {
         for repo in repos {
             let client = self.client.clone();
             let token = self.token.clone();
+            let base = self.api_base.clone();
             handles.push(tokio::spawn(async move {
-                fetch_latest_release(&client, &token, &repo).await
+                fetch_latest_release(&client, &token, &base, &repo).await
             }));
         }
 
@@ -196,8 +217,9 @@ impl GitHubProvider {
         for repo in repos {
             let client = self.client.clone();
             let token = self.token.clone();
+            let base = self.api_base.clone();
             handles.push(tokio::spawn(async move {
-                fetch_latest_ci_run(&client, &token, &repo).await
+                fetch_latest_ci_run(&client, &token, &base, &repo).await
             }));
         }
 
@@ -266,8 +288,13 @@ struct Actor {
     login: String,
 }
 
-async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Result<Option<CiRun>> {
-    let url = format!("{API_BASE}/repos/{}/{}/actions/runs", repo.owner, repo.name);
+async fn fetch_latest_ci_run(
+    client: &Client,
+    token: &str,
+    base: &str,
+    repo: &Repo,
+) -> Result<Option<CiRun>> {
+    let url = format!("{base}/repos/{}/{}/actions/runs", repo.owner, repo.name);
     let resp = client
         .get(&url)
         .bearer_auth(token)
@@ -328,12 +355,10 @@ async fn fetch_latest_ci_run(client: &Client, token: &str, repo: &Repo) -> Resul
 async fn fetch_latest_release(
     client: &Client,
     token: &str,
+    base: &str,
     repo: &Repo,
 ) -> Result<Option<Release>> {
-    let url = format!(
-        "{API_BASE}/repos/{}/{}/releases/latest",
-        repo.owner, repo.name
-    );
+    let url = format!("{base}/repos/{}/{}/releases/latest", repo.owner, repo.name);
     let resp = client
         .get(&url)
         .bearer_auth(token)
@@ -427,9 +452,9 @@ impl From<RawRepo> for Repo {
     }
 }
 
-async fn fetch_viewer(client: &Client, token: &str) -> Result<Viewer> {
+async fn fetch_viewer(client: &Client, token: &str, base: &str) -> Result<Viewer> {
     let resp = client
-        .get(format!("{API_BASE}/user"))
+        .get(format!("{base}/user"))
         .bearer_auth(token)
         .header("Accept", ACCEPT)
         .send()
@@ -458,11 +483,12 @@ async fn fetch_viewer(client: &Client, token: &str) -> Result<Viewer> {
 async fn search_issues(
     client: &Client,
     token: &str,
+    base: &str,
     q: &str,
     reason: ItemReason,
 ) -> Result<Vec<WaitingItem>> {
     let resp = client
-        .get(format!("{API_BASE}/search/issues"))
+        .get(format!("{base}/search/issues"))
         .bearer_auth(token)
         .header("Accept", ACCEPT)
         .query(&[("q", q), ("per_page", "50")])
@@ -527,6 +553,9 @@ fn parse_repo(api_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_util::test_support::{json_array, viewer};
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn parses_repo_from_api_url() {
@@ -573,5 +602,191 @@ mod tests {
         let resp: WorkflowRunsResp = serde_json::from_str(raw).expect("parse");
         let run = resp.workflow_runs.into_iter().next().unwrap();
         assert!(run.actor.is_none());
+    }
+
+    // ---- HTTP-conformance suite ------------------------------------------
+    // Drives the real reqwest request paths against a localhost wiremock
+    // server (via `for_test`), covering pagination, the bearer header, the
+    // rate-limit/error/404 mappings, and `list_waiting`'s fail-soft logic.
+
+    /// A `/user/repos` element carrying only the fields `RawRepo` requires.
+    fn repo_json(i: usize) -> String {
+        format!(
+            r#"{{"id":{i},"name":"r{i}","owner":{{"login":"o"}},"stargazers_count":0,"html_url":"https://x/{i}","fork":false,"private":false}}"#
+        )
+    }
+
+    fn repo(owner: &str, name: &str) -> Repo {
+        Repo {
+            id: "1".into(),
+            owner: owner.into(),
+            name: name.into(),
+            provider: Provider::Github,
+            default_branch: "main".into(),
+            language: None,
+            description: None,
+            stars: 0,
+            html_url: "https://x".into(),
+            ssh_url: None,
+            clone_url: None,
+            is_fork: false,
+            is_private: false,
+            pushed_at: None,
+            account_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_repos_paginates_until_short_page() {
+        let server = MockServer::start().await;
+        // Page 1 is full (PAGE_SIZE = 100) → the loop fetches page 2…
+        Mock::given(method("GET"))
+            .and(path("/user/repos"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json_array(100, repo_json)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // …page 2 is short (< 100) → it stops, so page 3 is never requested
+        // (an unmounted page 3 would 404 and surface as an error instead).
+        Mock::given(method("GET"))
+            .and(path("/user/repos"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json_array(1, repo_json)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let gh = GitHubProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert_eq!(gh.list_repos().await.expect("ok").len(), 101);
+    }
+
+    #[tokio::test]
+    async fn list_repos_sends_bearer_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/repos"))
+            .and(header("authorization", "Bearer testtoken"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let gh = GitHubProvider::for_test(server.uri(), "testtoken".into(), viewer("tester"));
+        // Succeeds only if the bearer header matched; otherwise no mock matches
+        // and the 404 would surface as an error.
+        gh.list_repos().await.expect("authorised");
+    }
+
+    #[tokio::test]
+    async fn list_repos_maps_401_to_unauthorized() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/repos"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let gh = GitHubProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            gh.list_repos().await.unwrap_err(),
+            ProviderError::Unauthorized(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_repos_maps_429_to_rate_limited() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/repos"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+        let gh = GitHubProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            gh.list_repos().await.unwrap_err(),
+            ProviderError::RateLimited { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_repos_maps_5xx_to_http_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/repos"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        let gh = GitHubProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            gh.list_repos().await.unwrap_err(),
+            ProviderError::HttpStatus { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_releases_treats_404_as_no_release() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/releases/latest"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let gh = GitHubProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(gh
+            .list_releases(&[repo("o", "r")])
+            .await
+            .expect("ok")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_waiting_tolerates_a_failing_scope() {
+        let server = MockServer::start().await;
+        // The four search scopes run concurrently; the "author" one 500s while
+        // the other three each return a distinct item.
+        let ok_scopes = [
+            ("is:open assignee:tester archived:false", 1, "o/r1"),
+            ("is:open review-requested:tester archived:false", 2, "o/r2"),
+            ("is:open mentions:tester archived:false", 3, "o/r3"),
+        ];
+        for (q, id, full) in ok_scopes {
+            let body = format!(
+                r#"{{"items":[{{"id":{id},"title":"t","html_url":"https://x/{id}","updated_at":"2026-06-01T00:00:00Z","repository_url":"https://api.github.com/repos/{full}"}}]}}"#
+            );
+            Mock::given(method("GET"))
+                .and(path("/search/issues"))
+                .and(query_param("q", q))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "is:open author:tester archived:false"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let gh = GitHubProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        let items = gh
+            .list_waiting()
+            .await
+            .expect("one failing scope must not blank the whole list");
+        assert_eq!(items.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn list_waiting_propagates_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let gh = GitHubProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            gh.list_waiting().await.unwrap_err(),
+            ProviderError::Unauthorized(_)
+        ));
     }
 }

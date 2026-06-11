@@ -59,6 +59,10 @@ dirs = "6"
 # Local-index tests build real git repos in a throwaway temp dir and run the
 # libgit2 diagnostics against them; tempfile handles creation + cleanup.
 tempfile = "3"
+# HTTP-level provider conformance tests: a localhost mock server the providers
+# are pointed at (via the per-provider `#[cfg(test)] for_test` seam) to exercise
+# pagination, auth headers, and the rate-limit/error/404 paths through reqwest.
+wiremock = "0.6"
 
 [profile.release]
 # Smaller, faster distributable: whole-program LTO + one codegen unit cost

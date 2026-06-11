@@ -40,6 +40,21 @@ impl CodebergProvider {
         })
     }
 
+    /// Construct a provider pointed at an arbitrary base URL (a mock server),
+    /// skipping `connect`'s base-URL normalisation and `/user` round-trip.
+    /// Tests only — drives the real request paths against a localhost
+    /// `wiremock` server. That server speaks plain HTTP, so normalisation's
+    /// https-only rule is intentionally bypassed here.
+    #[cfg(test)]
+    pub(crate) fn for_test(base_url: String, token: String, viewer: Viewer) -> Self {
+        Self {
+            client: http_client().expect("test http client"),
+            token,
+            base_url,
+            viewer,
+        }
+    }
+
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -557,6 +572,9 @@ async fn fetch_latest_ci_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_util::test_support::{json_array, viewer};
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn extracts_repo_from_codeberg_issue_url() {
@@ -655,5 +673,130 @@ mod tests {
         let resp: WorkflowRunsResp = serde_json::from_str(&raw).expect("parse");
         let run = resp.workflow_runs.into_iter().next().unwrap();
         assert!(run.actor.is_none());
+    }
+
+    // ---- HTTP-conformance suite ------------------------------------------
+    // Real reqwest paths against a localhost wiremock server (via `for_test`):
+    // pagination, the bearer header, and the rate-limit/error/404 mappings.
+
+    /// A `/api/v1/user/repos` element with only the fields `RawRepo` requires.
+    fn repo_json(i: usize) -> String {
+        format!(
+            r#"{{"id":{i},"name":"r{i}","full_name":"o/r{i}","stars_count":0,"html_url":"https://x/{i}","fork":false,"private":false}}"#
+        )
+    }
+
+    fn repo() -> Repo {
+        Repo {
+            id: "cb:1".into(),
+            owner: "o".into(),
+            name: "r".into(),
+            provider: Provider::Codeberg,
+            default_branch: "main".into(),
+            language: None,
+            description: None,
+            stars: 0,
+            html_url: "https://x".into(),
+            ssh_url: None,
+            clone_url: None,
+            is_fork: false,
+            is_private: false,
+            pushed_at: None,
+            account_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_repos_paginates_until_short_page() {
+        let server = MockServer::start().await;
+        // PAGE_SIZE is 50 here.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/user/repos"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json_array(50, repo_json)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/user/repos"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json_array(1, repo_json)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cb = CodebergProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert_eq!(cb.list_repos().await.expect("ok").len(), 51);
+    }
+
+    #[tokio::test]
+    async fn list_repos_sends_bearer_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/user/repos"))
+            .and(header("authorization", "Bearer testtoken"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let cb = CodebergProvider::for_test(server.uri(), "testtoken".into(), viewer("tester"));
+        cb.list_repos().await.expect("authorised");
+    }
+
+    #[tokio::test]
+    async fn list_repos_maps_401_to_unauthorized() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/user/repos"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let cb = CodebergProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            cb.list_repos().await.unwrap_err(),
+            ProviderError::Unauthorized(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_repos_maps_429_to_rate_limited() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/user/repos"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+        let cb = CodebergProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            cb.list_repos().await.unwrap_err(),
+            ProviderError::RateLimited { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_repos_maps_5xx_to_http_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/user/repos"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        let cb = CodebergProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(matches!(
+            cb.list_repos().await.unwrap_err(),
+            ProviderError::HttpStatus { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_releases_treats_404_as_no_release() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/releases"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let cb = CodebergProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert!(cb.list_releases(&[repo()]).await.expect("ok").is_empty());
     }
 }
