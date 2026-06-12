@@ -1072,30 +1072,98 @@ pub async fn import_config(
     settings::load(&app)
 }
 
+/// How a configured `editor_command` should be launched.
+#[derive(Debug, PartialEq, Eq)]
+enum EditorLaunch {
+    /// macOS app reference (name or bundle path) — launch via `open -a`
+    /// with the whole string as one argument, so spaces survive.
+    App(String),
+    /// CLI program plus flags — spawned directly, repo path appended.
+    Cli { program: String, args: Vec<String> },
+}
+
+/// Classify an `editor_command` value: `None` for empty/whitespace-only,
+/// `App` when the trimmed value ends in `.app` (case-insensitive — a bundle
+/// name or path is never a whitespace-splittable CLI invocation), `Cli`
+/// otherwise (split on whitespace so flags keep working).
+fn classify_editor_command(cmd: &str) -> Option<EditorLaunch> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.to_ascii_lowercase().ends_with(".app") {
+        return Some(EditorLaunch::App(trimmed.to_owned()));
+    }
+    let mut parts = trimmed.split_whitespace().map(str::to_owned);
+    let program = parts.next().expect("non-empty after trim");
+    Some(EditorLaunch::Cli {
+        program,
+        args: parts.collect(),
+    })
+}
+
+/// Open `path` with a macOS application via `open -a <app_name> <path>` —
+/// the same pattern `run_terminal` uses, so names with spaces survive as a
+/// single argument. Blocking (waits for `open` to exit; it returns right
+/// after dispatching to LaunchServices) — call only from `spawn_blocking`.
+/// `open` can warn on stderr while still succeeding, so failure is gated
+/// strictly on a non-zero exit status.
+fn open_app(app_name: &str, path: &str) -> Result<(), String> {
+    let output = std::process::Command::new("/usr/bin/open")
+        .arg("-a")
+        .arg(app_name)
+        .arg(path)
+        .output()
+        .map_err(|e| format!("running `open -a {app_name}` failed: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "opening `{app_name}` failed: {}",
+            stderr.trim().to_owned()
+        ))
+    }
+}
+
 /// Run the user-configured editor command with `path` appended as the final
-/// argument. The command is split on whitespace and spawned directly — no
-/// shell. PATH lookup via execvp behaves exactly as `sh -c` did (neither
-/// reads shell rc files), but shell metacharacters in a settings value are
-/// no longer interpreted, so a tampered or hand-edited `editor_command`
-/// can't smuggle extra commands. Flags still work: `"code --new-window"`
-/// becomes `code --new-window <repo-path>`.
+/// argument. Never goes through a shell, so shell metacharacters in a
+/// tampered or hand-edited `editor_command` can't smuggle extra commands.
+/// Three behaviours (see `classify_editor_command`):
+/// - value ends in `.app` → the whole string is an app name/bundle path,
+///   launched via `open -a` (spaces allowed, no flag splitting);
+/// - otherwise split on whitespace and spawned directly, so flags work:
+///   `"code --new-window"` becomes `code --new-window <repo-path>`;
+/// - if that program doesn't exist, the whole string is retried via
+///   `open -a`, which rescues spacey app names like "Visual Studio Code".
 #[tauri::command]
 pub async fn run_editor(app: AppHandle, path: String) -> Result<(), String> {
     let settings = settings::load(&app)?;
     let cmd = settings.editor_command.unwrap_or_default();
-    let mut parts = cmd.split_whitespace().map(str::to_owned);
-    let Some(program) = parts.next() else {
+    let Some(launch) = classify_editor_command(&cmd) else {
         return Err("No editor command configured. Set one in Settings.".into());
     };
-    let args: Vec<String> = parts.collect();
 
-    tokio::task::spawn_blocking(move || {
-        std::process::Command::new(&program)
-            .args(&args)
-            .arg(&path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("spawning editor `{program}` failed: {e}"))
+    tokio::task::spawn_blocking(move || match launch {
+        EditorLaunch::App(name) => open_app(&name, &path),
+        EditorLaunch::Cli { program, args } => {
+            match std::process::Command::new(&program)
+                .args(&args)
+                .arg(&path)
+                .spawn()
+            {
+                // Editors are long-running — don't wait on them.
+                Ok(_) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => open_app(cmd.trim(), &path)
+                    .map_err(|open_err| {
+                        format!(
+                            "spawning editor `{program}` failed: {e}; \
+                             retrying as app also failed: {open_err}"
+                        )
+                    }),
+                Err(e) => Err(format!("spawning editor `{program}` failed: {e}")),
+            }
+        }
     })
     .await
     .map_err(|e| format!("editor task panicked: {e}"))?
@@ -1180,5 +1248,65 @@ mod tests {
         assert_eq!(url_host("git://github.com/o/r"), None);
         assert_eq!(url_host("https:///path-only"), None);
         assert_eq!(url_host(""), None);
+    }
+
+    fn cli(program: &str, args: &[&str]) -> Option<EditorLaunch> {
+        Some(EditorLaunch::Cli {
+            program: program.to_owned(),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+        })
+    }
+
+    #[test]
+    fn classify_editor_cli_splits_flags() {
+        assert_eq!(classify_editor_command("code"), cli("code", &[]));
+        assert_eq!(
+            classify_editor_command("code --new-window"),
+            cli("code", &["--new-window"])
+        );
+        assert_eq!(
+            classify_editor_command("  code   --new-window  "),
+            cli("code", &["--new-window"])
+        );
+    }
+
+    #[test]
+    fn classify_editor_app_suffix_is_app_launch() {
+        assert_eq!(
+            classify_editor_command("antigravity ide.app"),
+            Some(EditorLaunch::App("antigravity ide.app".into()))
+        );
+        assert_eq!(
+            classify_editor_command("/Applications/antigravity ide.app"),
+            Some(EditorLaunch::App(
+                "/Applications/antigravity ide.app".into()
+            ))
+        );
+        // Suffix match is case-insensitive, original casing is preserved.
+        assert_eq!(
+            classify_editor_command("ANTIGRAVITY IDE.APP"),
+            Some(EditorLaunch::App("ANTIGRAVITY IDE.APP".into()))
+        );
+        assert_eq!(
+            classify_editor_command("  Zed.app  "),
+            Some(EditorLaunch::App("Zed.app".into()))
+        );
+    }
+
+    #[test]
+    fn classify_editor_empty_is_none() {
+        assert_eq!(classify_editor_command(""), None);
+        assert_eq!(classify_editor_command("   "), None);
+    }
+
+    #[test]
+    fn classify_editor_spacey_name_without_suffix_stays_cli() {
+        // Intentional: classification can't tell a spacey app name from a
+        // program with flags. The runtime NotFound-fallback in `run_editor`
+        // retries the whole string via `open -a` (IO path, untested here).
+        assert_eq!(
+            classify_editor_command("Visual Studio Code"),
+            cli("Visual", &["Studio", "Code"])
+        );
     }
 }

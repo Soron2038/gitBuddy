@@ -49,12 +49,15 @@ pub struct Settings {
     /// can be overridden for self-hosted Gitea/Forgejo.
     #[serde(default)]
     pub codeberg_base_url: Option<String>,
-    /// Command used by the "Open in editor" quick action: a program name (or
-    /// path) plus optional flags, split on whitespace and spawned without a
-    /// shell. The repo's local path is appended as the last argument (e.g.
-    /// `"code"` becomes `code /Users/.../repo`). Whitespace- or empty-string
-    /// disables the menu entry. Not adopted by `import_config` — see
-    /// `merge_imported`.
+    /// Command used by the "Open in editor" quick action: either a CLI
+    /// program plus optional flags (split on whitespace, spawned without a
+    /// shell, repo path appended — `"code"` becomes `code /Users/.../repo`),
+    /// or a macOS application reference launched via `open -a` with the
+    /// whole string as one argument so spaces survive — a name/path ending
+    /// in `.app`, or any app name whose first word isn't a findable
+    /// executable (e.g. `"Visual Studio Code"`); see
+    /// `commands::run_editor`. Whitespace- or empty-string disables the
+    /// menu entry. Not adopted by `import_config` — see `merge_imported`.
     #[serde(default)]
     pub editor_command: Option<String>,
     /// macOS application name used by the "Open in terminal" quick action,

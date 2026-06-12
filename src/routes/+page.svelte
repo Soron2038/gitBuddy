@@ -2043,7 +2043,9 @@
             Command run when you pick <em>Open in editor</em> from a repo's
             right-click menu. The repo's local path is appended. Common
             values: <code>code</code>, <code>cursor</code>, <code>zed</code>,
-            <code>idea</code>. Leave empty to hide that menu entry.
+            <code>idea</code>. A macOS application name works too, including
+            names with spaces — e.g. <code>Visual Studio Code</code> or an
+            <code>.app</code> name. Leave empty to hide that menu entry.
           </p>
           <input
             type="text"
