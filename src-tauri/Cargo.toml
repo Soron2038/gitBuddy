@@ -1,6 +1,6 @@
 [package]
 name = "gitbuddy"
-version = "1.0.2"
+version = "1.0.3"
 description = "Menu-bar companion for GitHub, GitLab and Codeberg repositories"
 authors = ["Björn Witt"]
 edition = "2021"

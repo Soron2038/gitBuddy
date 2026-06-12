@@ -7,6 +7,17 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-06-12
+
+### Fixed
+
+- "Open in editor" now works with macOS app names containing spaces
+  (e.g. `antigravity ide.app` or `Visual Studio Code`): a value ending
+  in `.app` is launched whole via `open -a`, and a command whose
+  program can't be found is retried as an app name instead of failing.
+- Failures to launch the editor via `open` now surface an error message
+  instead of failing silently.
+
 ## [1.0.2] — 2026-06-11
 
 ### Fixed
