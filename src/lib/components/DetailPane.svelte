@@ -45,6 +45,11 @@
     /** Called after a successful clone so the parent can rescan locals. */
     onCloned: () => Promise<void> | void;
     onItemContextMenu: (e: MouseEvent, item: WaitingItem) => void;
+    /** Report a failed quick action to the parent so it can show it. These
+     *  actions are all fire-and-forget IPC calls: `run_editor` fails when the
+     *  configured CLI shim isn't installed, `revealItemInDir` when the folder
+     *  moved. Unreported, the click just does nothing at all. */
+    onActionError: (message: string) => void;
   }
 
   let {
@@ -62,9 +67,16 @@
     onOpenSettings,
     onCloned,
     onItemContextMenu,
+    onActionError,
   }: Props = $props();
 
   let firstLocal = $derived(localDiag[0]);
+
+  /** Run a fire-and-forget action and surface its failure instead of letting
+   *  the rejection disappear into an unhandled promise. */
+  function act(run: () => Promise<unknown>): void {
+    void run().catch((e) => onActionError(String(e)));
+  }
 
   // ── Clone form (component-local: a fresh instance per repo via {#key}
   //    in the parent resets all of this on selection change) ─────────────
@@ -154,7 +166,7 @@
 
 <aside class="detail-pane" aria-label="Repo details">
   <header class="dp-header">
-    <span class="pchip dp-pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
+    <span class="pchip dp-pchip {providerCssClass(r)}">{providerChipText(r)}</span>
     <div class="dp-titles">
       <h2 class="dp-name">
         <span class="dp-owner">{r.owner}/</span><span class="dp-rname">{r.name}</span>
@@ -200,7 +212,7 @@
       <button
         type="button"
         class="dp-action"
-        onclick={() => revealItemInDir(firstLocal.path)}
+        onclick={() => act(() => revealItemInDir(firstLocal.path))}
         data-tip="Reveal in Finder"
       >
         Show in Finder
@@ -209,7 +221,7 @@
         <button
           type="button"
           class="dp-action"
-          onclick={() => runEditor(firstLocal.path)}
+          onclick={() => act(() => runEditor(firstLocal.path))}
           data-tip="Open with {editorCmd}"
         >
           Open in {editorCmd}
@@ -219,7 +231,7 @@
         <button
           type="button"
           class="dp-action"
-          onclick={() => runTerminal(firstLocal.path)}
+          onclick={() => act(() => runTerminal(firstLocal.path))}
           data-tip="Open with {terminalCmd}"
         >
           Open in {terminalCmd}
@@ -231,7 +243,7 @@
       <button
         type="button"
         class="dp-action"
-        onclick={() => writeText(cloneUrl)}
+        onclick={() => act(() => writeText(cloneUrl))}
         data-tip="Copy to clipboard"
       >
         Copy HTTPS
@@ -242,7 +254,7 @@
       <button
         type="button"
         class="dp-action"
-        onclick={() => writeText(sshUrl)}
+        onclick={() => act(() => writeText(sshUrl))}
         data-tip="Copy to clipboard"
       >
         Copy SSH
@@ -702,10 +714,12 @@
   font-size: 12px;
   color: var(--terracotta);
 }
+/* sage as 12px text on paper is 3.09:1. --sage stays the *fill* colour
+   (dots, bars); text uses the darker --sage-ink. */
 .dp-clone-ok {
   margin: 0;
   font-size: 12px;
-  color: var(--sage);
+  color: var(--sage-ink);
 }
 .dp-clone-ok code {
   font-family: var(--font-mono);
@@ -787,7 +801,7 @@
 .dp-clone-branch .d.off { background: var(--ink-4); }
 .dp-clone-stat { color: var(--ink-3); }
 .dp-clone-stat.warn { color: var(--terracotta); }
-.dp-clone-stat.clean { color: var(--sage); }
+.dp-clone-stat.clean { color: var(--sage-ink); }
 
 .dp-ci {
   display: flex;

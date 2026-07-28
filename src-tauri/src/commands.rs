@@ -70,9 +70,18 @@ pub struct AppState {
     /// Notified by `save_settings`. Same race as `refresh_trigger`: lets the
     /// loop re-read the poll interval mid-sleep.
     pub settings_reload: Arc<Notify>,
-    /// Gates the one-time keychain restore so commands can wait for the
-    /// initial auth attempt before reporting "no providers connected".
-    init_attempted: tokio::sync::Mutex<bool>,
+    /// Gates the one-time account migrations so commands can wait for them
+    /// before reporting "no providers connected". Restoring the providers
+    /// themselves is deliberately *not* gated by this — see
+    /// [`AppState::restore_missing`].
+    migrations_done: tokio::sync::Mutex<bool>,
+    /// Serialises every read-modify-write of `accounts.json`. Each of
+    /// `upsert` / `remove` / the v2 migration is its own load→mutate→save, and
+    /// the migration `await`s a Keychain round-trip (which can block on a user
+    /// permission dialog) in the middle of its sequence. Without this lock a
+    /// connect completed during that window is silently overwritten by the
+    /// migration's stale snapshot.
+    accounts_lock: tokio::sync::Mutex<()>,
 }
 
 impl Default for AppState {
@@ -82,7 +91,8 @@ impl Default for AppState {
             cache: RwLock::new(AggregatorCache::default()),
             refresh_trigger: Arc::new(Notify::new()),
             settings_reload: Arc::new(Notify::new()),
-            init_attempted: tokio::sync::Mutex::new(false),
+            migrations_done: tokio::sync::Mutex::new(false),
+            accounts_lock: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -97,16 +107,71 @@ impl AppState {
     ///      account records.
     ///   3. Restore providers from `accounts.json`. Each account is restored
     ///      independently — a failure for one doesn't blank the rest.
+    ///
+    /// Steps 1–2 run exactly once. Step 3 does *not*: see
+    /// [`AppState::restore_missing`].
     pub async fn ensure_initialized(&self, app: &AppHandle) {
-        let mut attempted = self.init_attempted.lock().await;
-        if *attempted {
+        {
+            let mut done = self.migrations_done.lock().await;
+            if !*done {
+                *done = true;
+                let _guard = self.accounts_lock.lock().await;
+                migrate_id_scheme_to_v2(app).await;
+                migrate_legacy_keychain(app).await;
+            }
+        }
+        self.restore_missing(app).await;
+    }
+
+    /// Connect every account in `accounts.json` that isn't in the registry yet.
+    ///
+    /// Restoring an account is a live network call, so it fails whenever the
+    /// machine is offline — which for a login-item menu-bar app is routinely
+    /// the case at launch (VPN not up yet, captive portal, waking on a train).
+    /// This used to be latched behind the same one-shot flag as the
+    /// migrations, so a launch without connectivity left the registry
+    /// permanently empty: every subsequent tick fanned out over nothing, all
+    /// lists read empty, and the only cure was quitting an app the user never
+    /// quits. Retrying is cheap — when everything is already connected this is
+    /// one file read and no network at all — so the aggregator calls it at the
+    /// top of each tick.
+    pub async fn restore_missing(&self, app: &AppHandle) {
+        let file = {
+            let _guard = self.accounts_lock.lock().await;
+            match accounts::load(app) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("gitbuddy: reading accounts.json failed: {e}");
+                    return;
+                }
+            }
+        };
+
+        let missing: Vec<Account> = {
+            let have = self.providers.read().await;
+            file.accounts
+                .into_iter()
+                .filter(|a| !have.contains_key(&a.id))
+                .collect()
+        };
+        if missing.is_empty() {
             return;
         }
-        *attempted = true;
+        restore_accounts(app, self, missing).await;
+    }
 
-        migrate_id_scheme_to_v2(app).await;
-        migrate_legacy_keychain(app).await;
-        restore_from_accounts(app, self).await;
+    /// `accounts::upsert` under the serialising lock. Every mutation of
+    /// `accounts.json` goes through here (or [`Self::remove_account`]) — each
+    /// is its own load→mutate→save, so two of them interleaving loses one.
+    async fn upsert_account(&self, app: &AppHandle, account: Account) -> Result<(), String> {
+        let _guard = self.accounts_lock.lock().await;
+        accounts::upsert(app, account)
+    }
+
+    /// `accounts::remove` under the serialising lock. See [`Self::upsert_account`].
+    async fn remove_account(&self, app: &AppHandle, id: &str) -> Result<(), String> {
+        let _guard = self.accounts_lock.lock().await;
+        accounts::remove(app, id)
     }
 }
 
@@ -315,23 +380,15 @@ async fn finalise_migration(
     }
 }
 
-/// Restore providers from `accounts.json` into the in-memory `AppState`.
+/// Connect the given accounts and insert them into the in-memory registry.
 /// Every account is restored — keyed by its id — so two GitLab instances or
-/// a personal-plus-work GitHub end up co-resident in their respective
-/// HashMaps. Each connect failure is logged but doesn't blank the rest.
-/// The registry is populated in one write-lock acquisition at the end, so
-/// concurrent readers never observe a half-restored registry.
-async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
-    let file = match accounts::load(app) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("gitbuddy: reading accounts.json failed: {e}");
-            return;
-        }
-    };
-
+/// a personal-plus-work GitHub end up co-resident. Each connect failure is
+/// logged but doesn't blank the rest. The registry is populated in one
+/// write-lock acquisition at the end, so concurrent readers never observe a
+/// half-restored registry.
+async fn restore_accounts(app: &AppHandle, state: &AppState, accounts_to_restore: Vec<Account>) {
     let mut restored: Vec<(String, Arc<dyn ProviderBackend>)> = Vec::new();
-    for account in file.accounts {
+    for account in accounts_to_restore {
         let raw = match keychain::load(&account.id).await {
             Ok(Some(t)) => t,
             Ok(None) => {
@@ -398,9 +455,34 @@ async fn restore_from_accounts(app: &AppHandle, state: &AppState) {
         }
     }
 
-    if !restored.is_empty() {
-        let mut providers = state.providers.write().await;
-        providers.extend(restored);
+    if restored.is_empty() {
+        return;
+    }
+    // Connecting the accounts above took N sequential network round-trips, and
+    // nothing stopped the user from disconnecting one (or re-connecting it
+    // with a fresh token) in the meantime. Inserting the pre-computed batch
+    // blindly would resurrect a disconnected account — live in the registry,
+    // polling with a token that is no longer in the Keychain and no longer in
+    // `accounts.json` — or clobber a newer provider with the stale one. So
+    // re-check membership while holding the write lock, and never overwrite an
+    // entry that appeared while we were connecting.
+    let still_wanted: std::collections::HashSet<String> = {
+        let _guard = state.accounts_lock.lock().await;
+        match accounts::load(app) {
+            Ok(f) => f.accounts.into_iter().map(|a| a.id).collect(),
+            // Can't verify what's still wanted → insert nothing. The next
+            // tick's `restore_missing` retries, so this is a delay, not a loss.
+            Err(e) => {
+                eprintln!("gitbuddy: re-reading accounts.json before restore failed: {e}");
+                return;
+            }
+        }
+    };
+    let mut providers = state.providers.write().await;
+    for (id, p) in restored {
+        if still_wanted.contains(&id) && !providers.contains_key(&id) {
+            providers.insert(id, p);
+        }
     }
 }
 
@@ -420,6 +502,12 @@ pub async fn provider_set_token(
     token: String,
     base_url: Option<String>,
 ) -> Result<Viewer, String> {
+    // Before touching the registry: let the one-shot migrations and the
+    // startup restore finish. Otherwise a connect that lands mid-restore is
+    // overwritten by the batch the restore assembled from the *old* Keychain
+    // contents when it finally takes the write lock.
+    state.ensure_initialized(&app).await;
+
     let (account, provider_box): (Account, Arc<dyn ProviderBackend>) = match provider {
         Provider::Github => {
             let p = GitHubProvider::connect(token.clone())
@@ -466,13 +554,19 @@ pub async fn provider_set_token(
     keychain::save(&account.id, &token)
         .await
         .map_err(|e| format!("keychain: {e}"))?;
-    accounts::upsert(&app, account)?;
+    state.upsert_account(&app, account).await?;
 
     // Keep the per-provider base-URL hint in settings fresh so the next
     // onboarding modal pre-fills the host. `ensure_initialized` no longer
     // reads it, but the add-provider flow does. GitHub has no base URL.
+    // `load(...)?` and not `unwrap_or_default()`: a load failure means the file
+    // is unreadable, unparseable, or from a newer version — and writing
+    // defaults back over it would silently destroy the user's scan roots,
+    // editor command and notification preferences with no error shown. Failing
+    // the connect is recoverable; a wiped config is not. (`import_config`
+    // below has always done it this way.)
     if let Some(base) = provider_box.base_url().map(str::to_string) {
-        let mut s = settings::load(&app).unwrap_or_default();
+        let mut s = settings::load(&app)?;
         match provider {
             Provider::Gitlab | Provider::MpsdGitlab => s.gitlab_base_url = Some(base),
             Provider::Codeberg => s.codeberg_base_url = Some(base),
@@ -485,45 +579,6 @@ pub async fn provider_set_token(
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     aggregator::refresh_now(&state);
     Ok(viewer)
-}
-
-/// First connected provider whose account id carries this provider's slug,
-/// or `None`. The per-provider status commands use it to pull "the GitHub
-/// account" / "the GitLab account" out of the unified registry.
-async fn first_provider(state: &AppState, provider: Provider) -> Option<Arc<dyn ProviderBackend>> {
-    let prefix = format!("{}:", accounts::provider_slug(provider));
-    state
-        .providers
-        .read()
-        .await
-        .iter()
-        .find(|(id, _)| id.starts_with(&prefix))
-        .map(|(_, p)| p.clone())
-}
-
-/// Legacy single-account status for one provider: the first connected
-/// account of that type, with its base URL (`None` for GitHub). Superseded by
-/// `accounts_list` for the multi-account UI; the current settings/onboarding
-/// screens still call this to show one row per provider.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct ProviderStatus {
-    pub viewer: Viewer,
-    pub base_url: Option<String>,
-}
-
-#[tauri::command]
-pub async fn provider_status(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-    provider: Provider,
-) -> Result<Option<ProviderStatus>, String> {
-    state.ensure_initialized(&app).await;
-    Ok(first_provider(&state, provider)
-        .await
-        .map(|p| ProviderStatus {
-            viewer: p.viewer().clone(),
-            base_url: p.base_url().map(str::to_string),
-        }))
 }
 
 /// Kick off the GitHub OAuth Device Flow. Returns the user_code (for the
@@ -591,7 +646,7 @@ pub async fn gh_oauth_poll(
                 .await
                 .map_err(|e| format!("keychain: {e}"))?;
             let id = account.id.clone();
-            accounts::upsert(&app, account)?;
+            state.upsert_account(&app, account).await?;
             state
                 .providers
                 .write()
@@ -606,41 +661,6 @@ pub async fn gh_oauth_poll(
 
 fn oauth_http_client() -> Result<reqwest::Client, String> {
     crate::provider_util::http_client().map_err(|e| format!("http client: {e}"))
-}
-
-/// Disconnect every account of one provider at once — the "disconnect from
-/// this provider entirely" action behind the settings screen. Per-account
-/// disconnect is `accounts_disconnect`. Beyond the registry sweep this also
-/// deletes the pre-migration single-account Keychain key and, for the
-/// self-hostable forges, clears the persisted base-URL hint so the next
-/// onboarding starts from the default host rather than the disconnected one.
-#[tauri::command]
-pub async fn provider_disconnect(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-    provider: Provider,
-) -> Result<(), String> {
-    let sweep = disconnect_all_for_provider(&state, &app, provider).await;
-    match provider {
-        Provider::Github => {
-            let _ = keychain::delete(GH_LEGACY_KEY).await;
-        }
-        Provider::Gitlab | Provider::MpsdGitlab => {
-            let _ = keychain::delete(GL_LEGACY_KEY).await;
-            let mut s = settings::load(&app).unwrap_or_default();
-            s.gitlab_base_url = None;
-            settings::save(&app, &s)?;
-        }
-        Provider::Codeberg => {
-            let _ = keychain::delete(CB_LEGACY_KEY).await;
-            let mut s = settings::load(&app).unwrap_or_default();
-            s.codeberg_base_url = None;
-            settings::save(&app, &s)?;
-        }
-    }
-    let _ = app.emit(EVT_PROVIDER_CHANGED, ());
-    aggregator::refresh_now(&state);
-    sweep
 }
 
 /// Per-account disconnect — the multi-account-aware primitive. The legacy
@@ -664,80 +684,13 @@ pub async fn accounts_disconnect(
     keychain::delete(&account_id)
         .await
         .map_err(|e| format!("removing token from keychain failed: {e}"))?;
-    accounts::remove(&app, &account_id)?;
+    state.remove_account(&app, &account_id).await?;
     // One registry now holds every provider, keyed by account id — a single
     // remove drops the right account regardless of which forge owns it.
     state.providers.write().await.remove(&account_id);
     let _ = app.emit(EVT_PROVIDER_CHANGED, ());
     aggregator::refresh_now(&state);
     Ok(())
-}
-
-/// Helper for the legacy per-provider disconnects: collect every id that
-/// belongs to this provider (from both the in-memory HashMap and the
-/// registry, in case they've drifted), then disconnect each. Doesn't emit
-/// `provider-changed` itself — the caller emits once after the sweep.
-///
-/// Per-account ordering matches `accounts_disconnect`: Keychain first,
-/// registry second, in-memory last. Unlike the single-account path, a
-/// Keychain failure on one id doesn't abort the whole sweep — the failing
-/// account is left intact and the other accounts still get cleaned. All
-/// errors are collected and surfaced together so the UI can show the user
-/// which accounts didn't disconnect cleanly.
-async fn disconnect_all_for_provider(
-    state: &AppState,
-    app: &AppHandle,
-    provider: Provider,
-) -> Result<(), String> {
-    // All provider ids share a `<slug>:` prefix (github:/gitlab:/codeberg:),
-    // so one prefix match selects every account of this provider out of the
-    // unified registry. `MpsdGitlab` collapses to the same `gitlab` slug.
-    let slug_prefix = format!("{}:", accounts::provider_slug(provider));
-    let mut ids = std::collections::HashSet::new();
-    ids.extend(
-        state
-            .providers
-            .read()
-            .await
-            .keys()
-            .filter(|k| k.starts_with(&slug_prefix))
-            .cloned(),
-    );
-    // And from accounts.json, in case the registry and the file have drifted.
-    if let Ok(file) = accounts::load(app) {
-        for a in file.accounts {
-            if accounts::provider_slug(a.provider) == accounts::provider_slug(provider) {
-                ids.insert(a.id);
-            }
-        }
-    }
-    let mut errors = Vec::new();
-    let mut cleaned = Vec::new();
-    for id in ids {
-        if let Err(e) = keychain::delete(&id).await {
-            errors.push(format!("keychain delete for {id}: {e}"));
-            continue;
-        }
-        if let Err(e) = accounts::remove(app, &id) {
-            errors.push(format!("registry remove for {id}: {e}"));
-            continue;
-        }
-        cleaned.push(id);
-    }
-    // One write acquisition for the whole sweep — taking the lock once per
-    // id inside the loop could interleave with (and starve against) a
-    // concurrent tick holding the read lock.
-    if !cleaned.is_empty() {
-        let mut providers = state.providers.write().await;
-        for id in &cleaned {
-            providers.remove(id);
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
 }
 
 /// Reveal the main window and switch the app's activation policy to Regular
@@ -998,12 +951,24 @@ pub fn save_settings(
     app: AppHandle,
     settings: Settings,
 ) -> Result<(), String> {
+    // Which scan roots are configured is the only setting that changes what a
+    // tick would *find*. Compare before writing so we can refresh for that
+    // one case and stay cheap for the rest — waking the loop no longer forces
+    // a tick (see `aggregator::run_loop`), so without this an added scan root
+    // wouldn't show up until the next poll interval elapsed.
+    let roots_changed = settings::load(&app)
+        .map(|old| old.scan_roots != settings.scan_roots || old.scan_ignore != settings.scan_ignore)
+        .unwrap_or(true);
+
     settings::save(&app, &settings)?;
     let _ = app.emit(EVT_SETTINGS_CHANGED, ());
-    // The aggregator loop reads poll-interval (and, in Phase 2, notification
-    // toggles) from settings — wake it so the new values take effect on the
-    // current sleep cycle, not after the next tick.
+    // The aggregator loop reads poll-interval and the notification toggles
+    // from settings — wake it so the new values take effect on the current
+    // sleep cycle rather than after the next tick.
     state.settings_reload.notify_one();
+    if roots_changed {
+        aggregator::refresh_now(&state);
+    }
     Ok(())
 }
 

@@ -70,7 +70,7 @@
               })()
             : 'github.com'}
           <span
-            class="pchip {providerCssClass(a.provider)}"
+            class="pchip {providerCssClass({ provider: a.provider, html_url: a.base_url ?? '' })}"
             title="{a.login}@{aHost}"
           >
             {providerChipText({ provider: a.provider, html_url: a.base_url ?? '' })}
@@ -79,13 +79,15 @@
       {/each}
     </span>
   {:else}
-    <span class="pchip {providerCssClass(r.provider)}">{providerChipText(r)}</span>
+    <span class="pchip {providerCssClass(r)}">{providerChipText(r)}</span>
   {/if}
   <div class="rname">
     <span class="owner">{r.owner}</span> / <b>{r.name}</b>
     <div class="sub">
       {#if local}
-        <span class="pin">
+        <!-- The path is ellipsised at 200px; without the title there is no
+             way to tell which of several clones this row means. -->
+        <span class="pin" title={firstLocal?.path ?? 'cloned'}>
           <span
             class="d"
             class:off={firstLocal && (firstLocal.dirty_staged + firstLocal.dirty_unstaged + firstLocal.untracked > 0 || firstLocal.ahead > 0)}
@@ -152,7 +154,7 @@
   gap: 3px;
 }
 
-.rname { line-height: 1.25; min-width: 0; }
+.rname { line-height: 1.25; min-width: 0; overflow-wrap: anywhere; }
 .rname .owner { color: var(--ink-3); font-weight: 400; font-size: 12.5px; }
 .rname b { font-weight: 600; font-size: 14.5px; color: var(--ink); }
 .rname .sub {

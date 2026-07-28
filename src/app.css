@@ -11,25 +11,39 @@
   --paper:        #FFFDF8;
   --paper-2:      #FDF7EA;
 
-  /* Ink */
+  /* Ink.
+     ink-3 is the workhorse for 11–12.5px meta text and now clears WCAG AA
+     (4.52:1 on --paper; it was 4.15:1). ink-4 is deliberately *not* pushed to
+     4.5 — at that point it is indistinguishable from ink-3 and the tier stops
+     meaning anything. It is a decorative tone only (separator dots, hairline
+     glyphs) at 3.35:1; anything that is actually read uses ink-3 or darker. */
   --ink:          #2E211B;
   --ink-2:        #5C4A3F;
-  --ink-3:        #8A786A;
-  --ink-4:        #B6A593;
+  --ink-3:        #847264;
+  --ink-4:        #9A8877;
 
   /* Lines */
   --line:         rgba(46, 33, 27, 0.08);
   --line-2:       rgba(46, 33, 27, 0.14);
 
-  /* Accents */
-  --terracotta:        #C66243;
+  /* Accents.
+     terracotta carries both roles — link/label text on paper and the fill
+     behind paper-coloured button text — and at #C66243 failed AA in both
+     directions (3.95:1 each way). #BB5738 clears 4.5:1 both ways with the
+     same hue, so nothing else has to change.
+     The *-ink tokens exist because an accent legible on paper is not legible
+     on its own soft tint: sage on sage-soft was 2.30:1. */
+  --terracotta:        #BB5738;
   --terracotta-soft:   #F4D9CC;
   --sage:              #80987B;
   --sage-soft:         #D6E0CF;
+  --sage-ink:          #50684B;
   --butter:            #E8B94B;
   --butter-soft:       #F6E2A8;
+  --butter-ink:        #875D00;
   --plum:              #A8456A;
   --plum-soft:         #F1D2DE;
+  --plum-ink:          #9F3C61;
 
   /* Shadows */
   --shadow-1: 0 1px 2px rgba(78, 50, 30, 0.05);

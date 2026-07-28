@@ -62,11 +62,32 @@ export interface Repo {
   account_id: string | null;
 }
 
+/** Resolve the provider tag actually worth displaying.
+ *
+ *  `Repo.provider` distinguishes gitlab.com (`gitlab`) from a self-hosted
+ *  instance (`mpsd-gitlab`), but `Account.provider` does not — the backend
+ *  collapses every GitLab account to `gitlab` when it writes the account
+ *  record. So the same self-hosted repo showed a plum "gw" chip when the
+ *  badge came from the repo and an orange gitlab.com "gl" chip when it came
+ *  from the account (which is what happens as soon as a second account
+ *  switches the per-account badges on). Deriving from the host makes both
+ *  paths agree. */
+function effectiveProvider(item: {
+  provider: Provider;
+  url?: string;
+  html_url?: string;
+}): Provider {
+  if (item.provider !== 'gitlab') return item.provider;
+  const host = extractHost(item.url ?? item.html_url ?? '');
+  if (!host || host === 'gitlab.com' || host.endsWith('.gitlab.com')) return 'gitlab';
+  return 'mpsd-gitlab';
+}
+
 /** Short display label for the provider, derived from the canonical URL on
  *  the item so self-hosted GitLab instances show their actual hostname
  *  (e.g. "gitlab.gwdg.de") rather than a stub "MPSD" placeholder. */
 export function providerLabel(item: { provider: Provider; url?: string; html_url?: string }): string {
-  switch (item.provider) {
+  switch (effectiveProvider(item)) {
     case 'github':
       return 'GitHub';
     case 'gitlab':
@@ -82,7 +103,7 @@ export function providerLabel(item: { provider: Provider; url?: string; html_url
  *  hostname (e.g. "gitlab.gwdg.de" → "gw", "gitlab.mpsd.mpg.de" → "mp") so
  *  the user can tell different instances apart at a glance. */
 export function providerChipText(item: { provider: Provider; url?: string; html_url?: string }): string {
-  switch (item.provider) {
+  switch (effectiveProvider(item)) {
     case 'github':
       return 'gh';
     case 'gitlab':
@@ -97,8 +118,18 @@ export function providerChipText(item: { provider: Provider; url?: string; html_
 }
 
 /** CSS class to colour the chip. Self-hosted GitLab keeps a plum tint so it
- *  reads as "GitLab, but not the .com one". */
-export function providerCssClass(provider: Provider): string {
+ *  reads as "GitLab, but not the .com one".
+ *
+ *  Accepts the whole item, not a bare `Provider`, so it can apply the same
+ *  host-derived resolution as {@link providerChipText} — otherwise the text
+ *  and the colour disagree for a self-hosted instance reached via an account
+ *  record. A bare provider string still works for call sites that genuinely
+ *  have nothing else. */
+export function providerCssClass(
+  item: Provider | { provider: Provider; url?: string; html_url?: string },
+): string {
+  const provider =
+    typeof item === 'string' ? item : effectiveProvider(item);
   switch (provider) {
     case 'github':
       return 'gh';
@@ -264,23 +295,15 @@ export interface CiRun {
 
 // ── Per-provider auth ──────────────────────────────────────────────────────
 
-/** Backend `commands::ProviderStatus`. One unified `provider_status` command
- *  replaced the gh_/gl_/cb_status trio; `base_url` is null for GitHub. */
-export interface ProviderStatus {
-  viewer: Viewer;
-  base_url: string | null;
-}
+// The legacy single-account status/disconnect trio (ghStatus / glStatus /
+// cbStatus and their gh/gl/cbDisconnect siblings) is gone. `accountsList`
+// below supersedes the status side, `accountsDisconnect` the disconnect side,
+// and both are per-account — the old provider-wide disconnect swept *every*
+// account sharing a slug, which for GitLab meant every self-hosted instance in
+// one call.
 
-const providerStatus = (provider: Provider): Promise<ProviderStatus | null> =>
-  invoke('provider_status', { provider });
-
-export const ghStatus = (): Promise<Viewer | null> =>
-  providerStatus('github').then((s) => s?.viewer ?? null);
 export const ghSetToken = (token: string): Promise<Viewer> =>
   invoke('provider_set_token', { provider: 'github', token, baseUrl: null });
-
-export const ghDisconnect = (): Promise<void> =>
-  invoke('provider_disconnect', { provider: 'github' });
 
 // ── GitHub OAuth Device Flow (M6.3) ────────────────────────────────────────
 
@@ -338,23 +361,11 @@ export const accountsList = (): Promise<Account[]> => invoke('accounts_list');
 export const accountsDisconnect = (accountId: string): Promise<void> =>
   invoke('accounts_disconnect', { accountId });
 
-export const glStatus = (): Promise<GitLabStatus | null> =>
-  providerStatus('gitlab').then((s) =>
-    s ? { viewer: s.viewer, base_url: s.base_url ?? '' } : null,
-  );
 export const glSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
   invoke('provider_set_token', { provider: 'gitlab', token, baseUrl });
-export const glDisconnect = (): Promise<void> =>
-  invoke('provider_disconnect', { provider: 'gitlab' });
 
-export const cbStatus = (): Promise<CodebergStatus | null> =>
-  providerStatus('codeberg').then((s) =>
-    s ? { viewer: s.viewer, base_url: s.base_url ?? '' } : null,
-  );
 export const cbSetToken = (token: string, baseUrl: string): Promise<Viewer> =>
   invoke('provider_set_token', { provider: 'codeberg', token, baseUrl });
-export const cbDisconnect = (): Promise<void> =>
-  invoke('provider_disconnect', { provider: 'codeberg' });
 
 /** Reveal the main window. */
 export const openMainWindow = (): Promise<void> => invoke('open_main');
@@ -405,8 +416,11 @@ export interface LastSyncInfo {
   /** RFC 3339 timestamp of the most recent successful aggregator tick, or
    *  `null` before the first tick completes. */
   synced_at: string | null;
-  /** Non-fatal error surfaced by the last tick (e.g. local-scan failure).
-   *  Per-provider failures are logged backend-side and not propagated here. */
+  /** What went wrong during the last tick, or `null` if it was clean.
+   *  Covers every per-account provider failure (dead token, rate limit,
+   *  5xx, network) as well as aggregate failures like a local-scan error,
+   *  joined with " · ". Surface this — a tick that fails silently looks
+   *  exactly like "you have nothing to do". */
   last_error: string | null;
 }
 

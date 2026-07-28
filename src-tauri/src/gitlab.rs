@@ -7,13 +7,13 @@
 //! newer project/group access tokens.
 
 use crate::provider_util::{
-    http_client, http_error, humanise_age, normalise_base_url, reason_priority, within_days,
-    ProviderBackend, ProviderError,
+    decode_error, http_client, humanise_age, is_rate_limited, normalise_base_url, reason_priority,
+    repo_call_budget, response_error, within_days, ProviderBackend, ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 
@@ -23,6 +23,9 @@ const AUTH_HINT: &str = "check that the token is valid and has the `api` scope";
 pub type Result<T> = std::result::Result<T, ProviderError>;
 
 pub struct GitLabProvider {
+    /// Shared budget for the per-repo release/CI fan-outs — see
+    /// `provider_util::MAX_CONCURRENT_REPO_CALLS`.
+    repo_budget: std::sync::Arc<tokio::sync::Semaphore>,
     client: Client,
     token: String,
     /// Normalised (no trailing slash) base URL, e.g. "https://gitlab.gwdg.de".
@@ -36,6 +39,7 @@ impl GitLabProvider {
         let client = http_client()?;
         let viewer = fetch_viewer(&client, &token, &base_url).await?;
         Ok(Self {
+            repo_budget: repo_call_budget(),
             client,
             token,
             base_url,
@@ -51,6 +55,7 @@ impl GitLabProvider {
     #[cfg(test)]
     pub(crate) fn for_test(base_url: String, token: String, viewer: Viewer) -> Self {
         Self {
+            repo_budget: repo_call_budget(),
             client: http_client().expect("test http client"),
             token,
             base_url,
@@ -171,15 +176,33 @@ impl GitLabProvider {
                 s if s.is_success() => {}
                 StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
                 s => {
-                    return Err(http_error("GitLab", Some(self.base_url.clone()), s));
+                    return Err(response_error(
+                        "GitLab",
+                        Some(self.base_url.clone()),
+                        AUTH_HINT,
+                        s,
+                        resp.headers(),
+                    ));
                 }
             }
 
-            let raw: Vec<RawProject> = resp.json().await?;
+            let raw: Vec<RawProject> = resp.json().await.map_err(decode_error("GitLab"))?;
             let len = raw.len();
-            all.extend(raw.into_iter().map(|p| p.into_repo(self.is_self_hosted())));
+            let last_page = page == MAX_PAGES;
+            all.extend(
+                raw.into_iter()
+                    .map(|p| p.into_repo(self.is_self_hosted(), &self.host())),
+            );
             if (len as u32) < PAGE_SIZE {
                 break;
+            }
+            if last_page {
+                // Hit the page cap with a full page still coming back: the
+                // list is truncated. Say so rather than silently presenting a
+                // partial list as complete.
+                eprintln!(
+                    "gitbuddy: GitLab repo list truncated at {MAX_PAGES} pages — some repos are not shown"
+                );
             }
         }
 
@@ -201,7 +224,14 @@ impl GitLabProvider {
             let client = self.client.clone();
             let token = self.token.clone();
             let base = self.base_url.clone();
+            let budget = self.repo_budget.clone();
             handles.push(tokio::spawn(async move {
+                // Bounded fan-out: releases and CI share one budget
+                // per account so a tick can't put 120 requests on the
+                // wire at once. A closed semaphore can't happen here
+                // (nothing closes it), so the permit is simply held
+                // for the duration of the call.
+                let _permit = budget.acquire().await;
                 fetch_latest_release(&client, &token, &base, &repo, self_hosted).await
             }));
         }
@@ -233,7 +263,14 @@ impl GitLabProvider {
             let client = self.client.clone();
             let token = self.token.clone();
             let base = self.base_url.clone();
+            let budget = self.repo_budget.clone();
             handles.push(tokio::spawn(async move {
+                // Bounded fan-out: releases and CI share one budget
+                // per account so a tick can't put 120 requests on the
+                // wire at once. A closed semaphore can't happen here
+                // (nothing closes it), so the permit is simply held
+                // for the duration of the call.
+                let _permit = budget.acquire().await;
                 fetch_latest_pipeline(&client, &token, &base, &repo).await
             }));
         }
@@ -247,19 +284,26 @@ impl GitLabProvider {
         Ok(runs)
     }
 
-    /// Heuristic — anything other than gitlab.com is treated as a "self-
-    /// hosted GitLab" for tagging purposes in the UI. This is purely cosmetic
-    /// at the moment; the per-instance distinction is in `provider` tag.
+    /// Host of the configured instance, e.g. `"gitlab.gwdg.de"`. Falls back
+    /// to the raw base URL, which `normalise_base_url` guarantees is a
+    /// well-formed `https://…`, so the fallback is defensive only.
+    fn host(&self) -> String {
+        crate::accounts::url_host(&self.base_url).unwrap_or_else(|| self.base_url.clone())
+    }
+
+    /// gitlab.com itself, or a self-hosted instance? Compared against the
+    /// *parsed host*, never by substring: `gitlab.company.com` contains
+    /// `gitlab.com` as its first ten characters, and so do
+    /// `gitlab.compute.internal` and (deliberately)
+    /// `gitlab.com.attacker.example`.
     fn is_self_hosted(&self) -> bool {
-        !self.base_url.contains("gitlab.com")
+        let host = self.host();
+        !(host == "gitlab.com" || host.ends_with(".gitlab.com"))
     }
 }
 
 #[async_trait::async_trait]
 impl ProviderBackend for GitLabProvider {
-    fn viewer(&self) -> &Viewer {
-        &self.viewer
-    }
     fn token(&self) -> &str {
         &self.token
     }
@@ -295,7 +339,7 @@ async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Vi
                 name: Option<String>,
                 avatar_url: Option<String>,
             }
-            let r: Raw = resp.json().await?;
+            let r: Raw = resp.json().await.map_err(decode_error("GitLab"))?;
             Ok(Viewer {
                 login: r.username,
                 avatar_url: r.avatar_url,
@@ -303,7 +347,13 @@ async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Vi
             })
         }
         StatusCode::UNAUTHORIZED => Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => Err(http_error("GitLab", Some(base_url.to_string()), s)),
+        s => Err(response_error(
+            "GitLab",
+            Some(base_url.to_string()),
+            AUTH_HINT,
+            s,
+            resp.headers(),
+        )),
     }
 }
 
@@ -321,6 +371,12 @@ async fn fetch_items(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     params.push(("per_page", "50"));
+    // GitLab defaults to `order_by=created_at`, so without these the 50 rows
+    // we keep are the 50 most recently *created* — which we then re-sort by
+    // updated_at and present as "most recent activity". Asking for the right
+    // order up front makes the cap cut off the genuinely stale items.
+    params.push(("order_by", "updated_at"));
+    params.push(("sort", "desc"));
 
     let resp = client
         .get(format!("{base_url}{path}"))
@@ -333,18 +389,34 @@ async fn fetch_items(
         s if s.is_success() => {}
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         s => {
-            return Err(http_error("GitLab", Some(base_url.to_string()), s));
+            return Err(response_error(
+                "GitLab",
+                Some(base_url.to_string()),
+                AUTH_HINT,
+                s,
+                resp.headers(),
+            ));
         }
     }
 
-    let raw: Vec<RawItem> = resp.json().await?;
+    let raw: Vec<RawItem> = resp.json().await.map_err(decode_error("GitLab"))?;
     let now = Utc::now();
     let provider = pick_provider(base_url);
 
     Ok(raw
         .into_iter()
         .map(|it| WaitingItem {
-            id: it.id.to_string(),
+            // Namespaced by kind: GitLab's issues and merge requests come
+            // from separate tables with independent global-id sequences, so
+            // an issue and an MR can genuinely share an id. Without the
+            // prefix the dedup below sees them as the same row and drops
+            // one — silently, and arbitrarily which. (GitHub and Gitea keep
+            // both in one id space and don't have this problem.)
+            id: format!(
+                "{}:{}",
+                if kind == ItemKind::Mr { "mr" } else { "is" },
+                it.id
+            ),
             kind,
             title: it.title,
             repo: it
@@ -417,7 +489,7 @@ struct RawProject {
 }
 
 impl RawProject {
-    fn into_repo(self, self_hosted: bool) -> Repo {
+    fn into_repo(self, self_hosted: bool, host: &str) -> Repo {
         // `path_with_namespace` is the URL-form: "group/sub/repo-slug". We
         // split off the last segment for `name` and use the rest as `owner`.
         // We deliberately ignore `self.name` (the human display name), which
@@ -429,7 +501,7 @@ impl RawProject {
             None => (String::new(), self.path_with_namespace.clone()),
         };
         Repo {
-            id: format!("gl:{}", self.id),
+            id: format!("gl:{host}:{}", self.id),
             owner,
             name,
             provider: if self_hosted {
@@ -462,11 +534,16 @@ fn pick_provider(base_url: &str) -> Provider {
     }
 }
 
-/// Repo.id from `into_repo` is shaped `"gl:<numeric>"` so the local-index
-/// join can tell GitLab and GitHub ids apart. The release/pipeline
-/// endpoints want the raw numeric id back; this peels the prefix.
+/// Repo.id from `into_repo` is shaped `"gl:<host>:<numeric>"` — the `gl:`
+/// prefix tells GitLab ids apart from GitHub's, and the host keeps two
+/// self-hosted instances from colliding (both have a project id 1, 2, 3…,
+/// and the frontend keys its repo grid on this string). The release/pipeline
+/// endpoints want the raw numeric id back; this peels prefix and host.
 fn project_id_from_repo(repo: &Repo) -> Option<&str> {
-    repo.id.strip_prefix("gl:")
+    repo.id
+        .strip_prefix("gl:")?
+        .rsplit_once(':')
+        .map(|(_host, id)| id)
 }
 
 async fn fetch_latest_release(
@@ -494,10 +571,19 @@ async fn fetch_latest_release(
         StatusCode::NOT_FOUND => return Ok(None),
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
         // 403 happens on archived projects under some visibility settings —
-        // graceful no-op rather than failing the whole batch.
-        StatusCode::FORBIDDEN => return Ok(None),
+        // graceful no-op rather than failing the whole batch. The guard keeps
+        // a *throttled* 403 out of this arm; that one has to surface.
+        StatusCode::FORBIDDEN if !is_rate_limited(StatusCode::FORBIDDEN, resp.headers()) => {
+            return Ok(None)
+        }
         s => {
-            return Err(http_error("GitLab", Some(base_url.to_string()), s));
+            return Err(response_error(
+                "GitLab",
+                Some(base_url.to_string()),
+                AUTH_HINT,
+                s,
+                resp.headers(),
+            ));
         }
     }
 
@@ -518,13 +604,27 @@ async fn fetch_latest_release(
         self_url: Option<String>,
     }
 
-    let raw: Vec<RawRelease> = resp.json().await?;
-    let Some(r) = raw.into_iter().next() else {
-        return Ok(None);
-    };
-    let Some(released_at) = r.released_at else {
-        // GitLab can list a release without `released_at` (drafts /
-        // upcoming) — skip those, the UI only shows published ones.
+    let raw: Vec<RawRelease> = resp.json().await.map_err(decode_error("GitLab"))?;
+    // GitLab orders by `released_at desc`, which puts a *scheduled* release
+    // (one dated in the future) first. Taking it meant the Releases tab
+    // showed next month's v4.0 — badged NEW, aged "now", because both
+    // `within_days` and `humanise_age` were reading a negative delta — while
+    // the actually-shipped v3.9 was hidden behind it. Skip anything that
+    // hasn't been released yet and take the newest that has.
+    let now = Utc::now();
+    let Some((r, released_at)) = raw
+        .into_iter()
+        .filter(|r| !r.upcoming_release)
+        .filter_map(|r| {
+            // A release without `released_at` is a draft — never shown.
+            let released_at = r.released_at.clone()?;
+            let shipped = DateTime::parse_from_rfc3339(&released_at)
+                .map(|t| t.with_timezone(&Utc) <= now)
+                .unwrap_or(true);
+            shipped.then_some((r, released_at))
+        })
+        .next()
+    else {
         return Ok(None);
     };
 
@@ -539,7 +639,15 @@ async fn fetch_latest_release(
         .links
         .and_then(|l| l.self_url)
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{}/-/releases/{}", repo.html_url, r.tag_name));
+        .unwrap_or_else(|| {
+            // Tags legitimately contain `/` (`release/1.0`) and `#`, both of
+            // which change the meaning of the path if pasted in raw.
+            format!(
+                "{}/-/releases/{}",
+                repo.html_url,
+                crate::oauth::urlencode(&r.tag_name)
+            )
+        });
 
     Ok(Some(Release {
         repo_id: repo.id.clone(),
@@ -553,7 +661,10 @@ async fn fetch_latest_release(
         name,
         published_at: released_at,
         html_url,
-        is_prerelease: r.upcoming_release,
+        // `upcoming_release` means "dated in the future", not "prerelease" —
+        // and those are filtered out above, so it is always false here.
+        // GitLab's REST releases endpoint exposes no prerelease flag.
+        is_prerelease: false,
         is_new: false, // filled in by list_releases against a consistent `now`
         age_human: String::new(),
         account_id: None,
@@ -618,13 +729,33 @@ async fn fetch_latest_pipeline(
             }));
         }
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-        StatusCode::FORBIDDEN => return Ok(None),
+        StatusCode::FORBIDDEN if !is_rate_limited(StatusCode::FORBIDDEN, resp.headers()) => {
+            // Not throttling — CI genuinely isn't available here. Emit the
+            // same marker row the 404 arm does so the repo keeps a "no ci"
+            // dot instead of dropping out of the list on alternating ticks.
+            return Ok(Some(CiRun {
+                repo_id: repo.id.clone(),
+                repo_full_name: format!("{}/{}", repo.owner, repo.name),
+                status: CiStatus::None,
+                html_url: None,
+                branch: Some(repo.default_branch.clone()),
+                workflow_name: None,
+                author_login: None,
+                account_id: None,
+            }));
+        }
         s => {
-            return Err(http_error("GitLab", Some(base_url.to_string()), s));
+            return Err(response_error(
+                "GitLab",
+                Some(base_url.to_string()),
+                AUTH_HINT,
+                s,
+                resp.headers(),
+            ));
         }
     }
 
-    let raw: Vec<RawPipeline> = resp.json().await?;
+    let raw: Vec<RawPipeline> = resp.json().await.map_err(decode_error("GitLab"))?;
     let Some(p) = raw.into_iter().next() else {
         return Ok(Some(CiRun {
             repo_id: repo.id.clone(),
@@ -674,6 +805,51 @@ mod tests {
     use crate::provider_util::test_support::{json_array, viewer};
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn self_hosted_detection_compares_the_parsed_host() {
+        let self_hosted = |base: &str| {
+            let host = crate::accounts::url_host(base).unwrap_or_else(|| base.to_string());
+            !(host == "gitlab.com" || host.ends_with(".gitlab.com"))
+        };
+        assert!(!self_hosted("https://gitlab.com"));
+        assert!(!self_hosted("https://gitlab.com/"));
+        // A substring match would call all four of these gitlab.com.
+        assert!(self_hosted("https://gitlab.company.com"));
+        assert!(self_hosted("https://gitlab.compute.internal"));
+        assert!(self_hosted("https://gitlab.commerz.de"));
+        assert!(self_hosted("https://gitlab.com.attacker.example"));
+        assert!(self_hosted("https://gitlab.gwdg.de"));
+    }
+
+    #[test]
+    fn repo_ids_are_host_qualified_and_peel_back() {
+        let raw: RawProject = serde_json::from_str(
+            r#"{"id": 7, "path_with_namespace": "g/p", "default_branch": "main",
+                "description": null, "star_count": 0, "web_url": "https://gitlab.gwdg.de/g/p",
+                "ssh_url_to_repo": null, "http_url_to_repo": null,
+                "visibility": "private", "last_activity_at": "2026-06-01T00:00:00Z"}"#,
+        )
+        .expect("parse");
+        let repo = raw.into_repo(true, "gitlab.gwdg.de");
+        assert_eq!(repo.id, "gl:gitlab.gwdg.de:7");
+        // Two instances, same project id, distinct keys — this is what stops
+        // the frontend's keyed {#each} from throwing on a duplicate key.
+        assert_ne!(repo.id, "gl:gitlab.mpsd.mpg.de:7");
+        // …and the API calls still get the bare numeric id back.
+        assert_eq!(project_id_from_repo(&repo), Some("7"));
+    }
+
+    #[test]
+    fn waiting_ids_namespace_issues_apart_from_merge_requests() {
+        // GitLab's issues and merge_requests tables have independent id
+        // sequences, so a collision on the raw global id is entirely normal.
+        let id_for = |kind: ItemKind, id: u64| {
+            format!("{}:{}", if kind == ItemKind::Mr { "mr" } else { "is" }, id)
+        };
+        assert_ne!(id_for(ItemKind::Is, 5001), id_for(ItemKind::Mr, 5001));
+        assert_eq!(id_for(ItemKind::Mr, 5001), "mr:5001");
+    }
 
     #[test]
     fn strip_iid_handles_issue_and_mr_refs() {

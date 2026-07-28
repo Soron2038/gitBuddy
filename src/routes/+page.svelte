@@ -1,7 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
-  import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
+  import {
+    open as openDialog,
+    save as saveDialog,
+    ask as askDialog,
+  } from '@tauri-apps/plugin-dialog';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import {
     enable as enableAutostart,
@@ -16,7 +20,14 @@
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
   import DetailPane from '$lib/components/DetailPane.svelte';
   import RepoCard, { type RepoEntry } from '$lib/components/RepoCard.svelte';
-  import { humaniseSync, hostSuggestions, connectedHosts } from '$lib/format';
+  import {
+    humaniseSync,
+    hostSuggestions,
+    connectedHosts,
+    repoKey,
+    releaseKey,
+    dedupeBy,
+  } from '$lib/format';
   import { deriveProviderHeads } from '$lib/data/auth';
   // Window-wide visual vocabulary shared with the extracted components
   // (.row family, chips, badges) — see the note at the top of the file.
@@ -85,6 +96,15 @@
   let releases: Release[] = $state([]);
   let ciRuns: CiRun[] = $state([]);
   let settings: Settings = $state(defaultSettings());
+  /** Live value of the sync-frequency slider while it's being dragged.
+   *  Follows `settings` whenever the persisted value changes from elsewhere
+   *  (initial load, `settings-changed` from the other window, config import),
+   *  but during a drag it's the slider that leads — so the label tracks the
+   *  thumb without a disk write per pixel. */
+  let pollIntervalDraft = $state(defaultSettings().poll_interval_minutes);
+  $effect(() => {
+    pollIntervalDraft = settings.poll_interval_minutes;
+  });
 
   // ── UI state ──────────────────────────────────────────────────────────
   let view: View = $state('overview');
@@ -92,6 +112,11 @@
   let refreshing = $state(false);
   let error: string | null = $state(null);
   let lastSyncedAt: Date | null = $state(null);
+  /** What the last aggregator tick failed at, straight from `last_error`.
+   *  Separate from `error` (this window's own action failures): a backend
+   *  sync failure is a standing condition. Unsurfaced, a revoked token looks
+   *  exactly like "you have nothing to do". */
+  let syncError: string | null = $state(null);
 
   // Settings-form state (editable mirrors of `settings`). Deliberately NOT
   // kept in sync via $effect: an effect tracking `settings` re-fires on
@@ -183,6 +208,8 @@
   let oauthErrorMsg = $state('');
   let oauthCopied = $state(false);
   let oauthPollHandle: ReturnType<typeof setTimeout> | null = null;
+  /** Handle for the transient "Copied" label reset, so teardown can cancel it. */
+  let oauthCopyHandle: ReturnType<typeof setTimeout> | null = null;
   let oauthCountdownHandle: ReturnType<typeof setInterval> | null = null;
 
   // Context menu (right-click on repo cards).
@@ -198,7 +225,11 @@
   let selectedRepo = $state<Repo | null>(null);
 
   // ── Filters / Search ─────────────────────────────────────────────────
-  let status = $state<Status>('all');
+  // 'on-you' rather than 'all': "what needs me" is the one view gitBuddy
+  // offers that a forge's own website doesn't, and the sidebar heading above
+  // it literally reads "What's waiting". Landing on the generic repo list
+  // buried the app's actual purpose one click deep.
+  let status = $state<Status>('on-you');
   let searchQuery = $state('');
   let reasonFilter = $state<Set<ItemReason>>(
     new Set<ItemReason>(['assigned', 'review', 'authored', 'mentioned']),
@@ -418,6 +449,18 @@
   let filteredLocals = $derived(
     filteredRepos.filter((r) => localByKey.has(localKeyForRepo(r))),
   );
+  /** Clones this view can actually render: a local checkout only appears here
+   *  if it joins to a remote repo one of the connected accounts surfaced.
+   *  The denominator used to be `localCount` (every clone found on disk),
+   *  which read as "17 shown · of 57" with no way to reach the other 40 and
+   *  no explanation. */
+  let linkedLocalCount = $derived(
+    repos.filter((r) => localByKey.has(localKeyForRepo(r))).length,
+  );
+  /** Clones with no matching remote — scratch checkouts, forks of forges that
+   *  aren't connected, repos with an unparseable origin. The popover lists
+   *  these under "Local orphans"; here we only report how many there are. */
+  let orphanLocalCount = $derived(Math.max(0, localCount - linkedLocalCount));
   let filteredItems = $derived(
     items.filter(
       (it) =>
@@ -426,12 +469,18 @@
         matchesSearchItem(it, normalisedQuery),
     ),
   );
+  /** Deduped for the same reason `filteredRepos` is: two accounts that can
+   *  both see a repo each report its latest release, so the row appears
+   *  twice with an identical key and the keyed {#each} throws. */
   let filteredReleases = $derived(
-    releases.filter(
-      (rel) =>
-        rel.is_new &&
-        isAccountSelected(rel) &&
-        matchesSearchRelease(rel, normalisedQuery),
+    dedupeBy(
+      releases.filter(
+        (rel) =>
+          rel.is_new &&
+          isAccountSelected(rel) &&
+          matchesSearchRelease(rel, normalisedQuery),
+      ),
+      releaseKey,
     ),
   );
 
@@ -548,7 +597,10 @@
     // back to `null` covers the cold-start window before the first tick.
     try {
       const info = await lastSyncInfo();
-      if (!cancelled) lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
+      if (!cancelled) {
+        lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
+        syncError = info.last_error;
+      }
     } catch {
       if (!cancelled) lastSyncedAt = null;
     }
@@ -763,6 +815,18 @@
     }
   }
 
+  /** Run a fire-and-forget action and surface its failure in the page's error
+   *  banner. `run_editor` / `run_terminal` return Err when the configured
+   *  command doesn't exist, and `revealItemInDir` rejects for a folder that
+   *  moved — but nothing awaited these, so the rejection went nowhere and the
+   *  menu item looked simply inert. (The popover already did this; the main
+   *  window had drifted.) `ContextMenu` dispatches via `queueMicrotask`, which
+   *  detaches the rejection entirely, so wrapping at the call site is the only
+   *  place this can be caught. */
+  function act(run: () => Promise<unknown>): void {
+    void run().catch((e) => (error = String(e)));
+  }
+
   function openRepoMenu(e: MouseEvent, r: Repo) {
     e.preventDefault();
     const local = localByKey.get(localKeyForRepo(r));
@@ -770,24 +834,24 @@
     const m: MenuItem[] = [{ label: 'Open in browser', onclick: () => openExternal(r.html_url) }];
     if (localDiag) {
       m.push({ separator: true });
-      m.push({ label: 'Show in Finder', onclick: () => revealItemInDir(localDiag.path) });
+      m.push({ label: 'Show in Finder', onclick: () => act(() => revealItemInDir(localDiag.path)) });
       const editorCmd = settings.editor_command?.trim() ?? '';
       if (editorCmd.length > 0) {
-        m.push({ label: `Open in ${editorCmd}`, onclick: () => runEditor(localDiag.path) });
+        m.push({ label: `Open in ${editorCmd}`, onclick: () => act(() => runEditor(localDiag.path)) });
       }
       const terminalCmd = settings.terminal_command?.trim() ?? '';
       if (terminalCmd.length > 0) {
-        m.push({ label: `Open in ${terminalCmd}`, onclick: () => runTerminal(localDiag.path) });
+        m.push({ label: `Open in ${terminalCmd}`, onclick: () => act(() => runTerminal(localDiag.path)) });
       }
     }
     if (r.clone_url || r.ssh_url) m.push({ separator: true });
     if (r.clone_url) {
       const url = r.clone_url;
-      m.push({ label: 'Copy HTTPS clone URL', onclick: () => writeText(url) });
+      m.push({ label: 'Copy HTTPS clone URL', onclick: () => act(() => writeText(url)) });
     }
     if (r.ssh_url) {
       const url = r.ssh_url;
-      m.push({ label: 'Copy SSH clone URL', onclick: () => writeText(url) });
+      m.push({ label: 'Copy SSH clone URL', onclick: () => act(() => writeText(url)) });
     }
     menuItems = m;
     menuX = e.clientX;
@@ -806,14 +870,14 @@
   function openItemMenu(e: MouseEvent, it: WaitingItem) {
     showMenu(e, [
       { label: 'Open in browser', onclick: () => openExternal(it.url) },
-      { label: 'Copy URL', onclick: () => writeText(it.url) },
+      { label: 'Copy URL', onclick: () => act(() => writeText(it.url)) },
     ]);
   }
 
   function openReleaseMenu(e: MouseEvent, rel: Release) {
     showMenu(e, [
       { label: 'Open release', onclick: () => openExternal(rel.html_url) },
-      { label: 'Copy release URL', onclick: () => writeText(rel.html_url) },
+      { label: 'Copy release URL', onclick: () => act(() => writeText(rel.html_url)) },
     ]);
   }
 
@@ -993,13 +1057,19 @@
           }
         })()
       : 'github.com';
-    if (
-      !confirm(
-        `Disconnect ${account.login} (${where})? The stored token will be removed from your Keychain.`,
-      )
-    ) {
-      return;
-    }
+    // `ask` from the dialog plugin (already a dependency, imported above)
+    // rather than `window.confirm`: the latter is a blocking WebKit panel
+    // that looks nothing like the rest of the app.
+    const confirmed = await askDialog(
+      `The stored token will be removed from your Keychain.`,
+      {
+        title: `Disconnect ${account.login} (${where})?`,
+        kind: 'warning',
+        okLabel: 'Disconnect',
+        cancelLabel: 'Cancel',
+      },
+    );
+    if (!confirmed) return;
     error = null;
     try {
       await accountsDisconnect(account.id);
@@ -1039,6 +1109,10 @@
     if (oauthPollHandle) {
       clearTimeout(oauthPollHandle);
       oauthPollHandle = null;
+    }
+    if (oauthCopyHandle) {
+      clearTimeout(oauthCopyHandle);
+      oauthCopyHandle = null;
     }
     if (oauthCountdownHandle) {
       clearInterval(oauthCountdownHandle);
@@ -1153,7 +1227,13 @@
     try {
       await writeText(oauthUserCode);
       oauthCopied = true;
-      setTimeout(() => (oauthCopied = false), 1600);
+      // Tracked so teardown can cancel it — an untracked timer writes state
+      // up to 1.6 s after the component is gone.
+      if (oauthCopyHandle) clearTimeout(oauthCopyHandle);
+      oauthCopyHandle = setTimeout(() => {
+        oauthCopied = false;
+        oauthCopyHandle = null;
+      }, 1600);
     } catch {
       // Ignore — the code is still visible in the UI.
     }
@@ -1214,9 +1294,19 @@
       <span class="crumb">/ <b>Overview</b></span>
     {/if}
     <span class="tb-flex"></span>
-    <span class="sync">
+    <!-- The one status region per window. Refresh state, sync recency and
+         connection state all change asynchronously and were previously
+         announced by nothing at all — the only feedback was a spinning SVG.
+         `polite` so it waits for a pause rather than interrupting. -->
+    <span class="sync" role="status" aria-live="polite">
       <span class="dot" aria-hidden="true"></span>
-      {connected ? `Synced ${syncText}` : 'Not connected'}
+      {#if !connected}
+        Not connected
+      {:else if refreshing}
+        Refreshing…
+      {:else}
+        Synced {syncText}
+      {/if}
     </span>
   </header>
 
@@ -1332,6 +1422,7 @@
             class="pill pill-btn"
             class:on={status === 'on-you'}
             onclick={() => (status = 'on-you')}
+            aria-pressed={status === 'on-you'}
           >
             <span class="sw t"></span> On you <span class="c">{waitingCount}</span>
           </button>
@@ -1340,6 +1431,7 @@
             class="pill pill-btn"
             class:on={status === 'all'}
             onclick={() => (status = 'all')}
+            aria-pressed={status === 'all'}
           >
             <span class="sw s"></span> All repos <span class="c">{repoTotalCount}</span>
           </button>
@@ -1348,6 +1440,7 @@
             class="pill pill-btn"
             class:on={status === 'releases'}
             onclick={() => (status = 'releases')}
+            aria-pressed={status === 'releases'}
           >
             <span class="sw b"></span> New releases <span class="c">{newReleasesCount}</span>
           </button>
@@ -1356,6 +1449,7 @@
             class="pill pill-btn"
             class:on={status === 'local'}
             onclick={() => (status = 'local')}
+            aria-pressed={status === 'local'}
           >
             <span class="sw p"></span> Local clones <span class="c">{localCount}</span>
           </button>
@@ -1388,7 +1482,7 @@
                 >
                   <span class="ava {avatarClass(p)}">{avatarText(p)}</span>
                   <span class="acct-name">
-                    {p.viewer.login}
+                    <span class="acct-login">{p.viewer.login}</span>
                     <span class="acct-host">{p.host}</span>
                   </span>
                 </button>
@@ -1425,6 +1519,22 @@
       </aside>
 
       <main class="content">
+        <!-- Errors render in *all* three states below, not just the connected
+             one. They used to live inside the final {:else}, which is exactly
+             the branch that can't be reached when startup fails: a broken
+             accounts.json or a locked Keychain leaves `connected` false, so
+             the user got the friendly "Connect a provider" hero and no hint
+             that anything had gone wrong. `role="alert"` announces them. -->
+        {#if error}
+          <div class="page-err" role="alert">{error}</div>
+        {/if}
+        {#if syncError}
+          <div class="page-err sync-err" role="alert">
+            <strong>Last sync failed.</strong>
+            {syncError}
+          </div>
+        {/if}
+
         {#if loading}
           <div class="empty-hero">
             <p class="empty-loading">Loading…</p>
@@ -1505,7 +1615,7 @@
               </p>
             {:else}
               <div class="repo-grid">
-                {#each filteredRepos as r (r.id)}
+                {#each filteredRepos as r (repoKey(r))}
                   <RepoCard
                     entry={r}
                     local={localByKey.get(localKeyForRepo(r))}
@@ -1582,7 +1692,7 @@
               </p>
             {:else}
               <div class="row-list">
-                {#each filteredReleases as rel (rel.repo_id + ':' + rel.tag)}
+                {#each filteredReleases as rel (releaseKey(rel))}
                   <button
                     type="button"
                     class="row release-row"
@@ -1619,15 +1729,28 @@
             <h2 class="section-h">
               Local <em>clones</em>
               <span class="count">
-                {filteredLocals.length} shown{#if filteredLocals.length !== localCount}
-                  <span class="muted-count"> · of {localCount}</span>
+                {filteredLocals.length} shown{#if filteredLocals.length !== linkedLocalCount}
+                  <span class="muted-count"> · of {linkedLocalCount}</span>
                 {/if}
               </span>
             </h2>
+            {#if orphanLocalCount > 0}
+              <p class="section-note">
+                {orphanLocalCount}
+                {orphanLocalCount === 1 ? 'clone isn\'t' : 'clones aren\'t'} linked to a
+                connected account — the menu-bar popover lists
+                {orphanLocalCount === 1 ? 'it' : 'them'} under <em>Local orphans</em>.
+              </p>
+            {/if}
 
-            {#if localCount === 0}
+            {#if linkedLocalCount === 0}
               <p class="content-empty">
-                No local clones found in your scan roots. Add a folder in Settings.
+                {#if localCount === 0}
+                  No local clones found in your scan roots. Add a folder in Settings.
+                {:else}
+                  None of your {localCount} local clones match a repo from a connected
+                  account. The menu-bar popover lists them under <em>Local orphans</em>.
+                {/if}
               </p>
             {:else if filteredLocals.length === 0}
               <p class="content-empty">
@@ -1635,7 +1758,7 @@
               </p>
             {:else}
               <div class="repo-grid">
-                {#each filteredLocals as r (r.id)}
+                {#each filteredLocals as r (repoKey(r))}
                   <RepoCard
                     entry={r}
                     local={localByKey.get(localKeyForRepo(r))}
@@ -1651,9 +1774,6 @@
             {/if}
           {/if}
 
-          {#if error}
-            <p class="err-banner">{error}</p>
-          {/if}
         {/if}
       </main>
 
@@ -1674,6 +1794,7 @@
             onOpenSettings={() => (view = 'settings')}
             onCloned={rescanLocals}
             onItemContextMenu={openItemMenu}
+            onActionError={(msg) => (error = msg)}
           />
         {/key}
       {/if}
@@ -1705,7 +1826,10 @@
                   provider: account.provider,
                   html_url: account.base_url ?? '',
                 })}
-                {@const chipClass = providerCssClass(account.provider)}
+                {@const chipClass = providerCssClass({
+                  provider: account.provider,
+                  html_url: account.base_url ?? '',
+                })}
                 <li class="prov-row">
                   <span class="pchip {chipClass}">{chipText}</span>
                   <div class="prov-meta">
@@ -2168,18 +2292,24 @@
             effect immediately — no restart needed.
           </p>
           <div class="set-slider-row">
+            <!-- `oninput` drives the *label* only; the save happens on
+                 `change` (mouse-up / keyboard commit). Persisting on every
+                 input event wrote the settings file ~40 times for one drag,
+                 re-broadcast `settings-changed` to both windows each time,
+                 and fought the user by reassigning `settings` mid-drag. -->
             <input
               type="range"
               min="1"
               max="60"
               step="1"
-              value={settings.poll_interval_minutes}
-              oninput={(e) => setPollInterval(Number((e.target as HTMLInputElement).value))}
+              value={pollIntervalDraft}
+              oninput={(e) => (pollIntervalDraft = Number((e.target as HTMLInputElement).value))}
+              onchange={(e) => setPollInterval(Number((e.target as HTMLInputElement).value))}
               class="set-slider"
               aria-label="Sync interval in minutes"
             />
             <span class="set-slider-value">
-              every {settings.poll_interval_minutes}&nbsp;min
+              every {pollIntervalDraft}&nbsp;min
             </span>
           </div>
         </section>
@@ -2350,6 +2480,12 @@
     color: var(--ink);
   }
   .search input::placeholder { color: var(--ink-3); }
+  /* The input clears its own outline, so the wrapper carries the focus cue —
+     otherwise ⌘K moves focus with no visible confirmation at all. */
+  .search:focus-within {
+    border-color: var(--terracotta);
+    box-shadow: 0 0 0 3px var(--terracotta-soft);
+  }
   .search .sho {
     font-family: var(--font-mono);
     font-size: 11px;
@@ -2557,6 +2693,15 @@
     line-height: 1.2;
     min-width: 0;
   }
+  /* A host like gitlab.internal.example-corp.com overruns the ~150px this
+     gets in the 240px sidebar; without the ellipsis it either spilled over
+     the toggle or forced .side to grow a horizontal scrollbar. */
+  .acct-login,
+  .acct-host {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .acct-host {
     font-family: var(--font-mono);
     font-size: 10px;
@@ -2633,11 +2778,41 @@
   }
   .err-banner {
     margin-top: 20px;
-    color: var(--plum);
+    color: var(--plum-ink);
     font-size: 12.5px;
     background: var(--plum-soft);
     padding: 8px 12px;
     border-radius: var(--r-sm);
+  }
+
+  /* Page-level errors. Unlike `.err-banner` (scoped to a form) these render
+     above the content in every state, including the disconnected hero — a
+     startup failure has to be visible there or it's invisible entirely. */
+  /* Explanatory line under a section heading — quieter than body copy, but
+     it has to stay legible, so ink-2 rather than the faint ink-3/4. */
+  .section-note {
+    margin: -6px 0 14px;
+    font-size: 12.5px;
+    color: var(--ink-2);
+  }
+  .section-note em {
+    font-style: normal;
+    font-weight: 600;
+  }
+
+  .page-err {
+    margin: 0 0 16px;
+    color: var(--plum-ink);
+    font-size: 12.5px;
+    background: var(--plum-soft);
+    padding: 9px 13px;
+    border-radius: var(--r-sm);
+    overflow-wrap: anywhere;
+    line-height: 1.5;
+  }
+  .page-err.sync-err strong {
+    display: block;
+    font-weight: 600;
   }
 
   /* Update banner — sits under the title bar in both views. */
@@ -2742,7 +2917,8 @@
     background: linear-gradient(135deg, #FBEED1 0%, #F4E0AE 100%);
     border-color: rgba(232, 185, 75, 0.2);
   }
-  .stat.b .num { color: #B68C2C; }
+  /* On the butter gradient behind it, #B68C2C measured ~2.4:1. */
+  .stat.b .num { color: var(--butter-ink); }
 
   .section-h {
     font-family: var(--font-display);
@@ -3022,6 +3198,13 @@
     background: var(--cream-3);
     outline: none;
   }
+  /* `outline: none` above with no replacement meant tabbing onto the slider
+     gave no indication — and then the arrow keys changed a setting the user
+     couldn't see they were on. */
+  .set-slider:focus-visible {
+    outline: 2px solid var(--terracotta);
+    outline-offset: 4px;
+  }
   .set-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
@@ -3072,7 +3255,9 @@
     font-size: 10px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: var(--sage);
+    /* sage on sage-soft is 2.30:1 — an accent legible on paper is not
+       automatically legible on its own tint. */
+    color: var(--sage-ink);
     background: var(--sage-soft);
     padding: 1px 6px;
     border-radius: 4px;
@@ -3431,7 +3616,7 @@
   .secondary:disabled { opacity: 0.5; cursor: default; }
   .err {
     margin: 0;
-    color: var(--plum);
+    color: var(--plum-ink);
     font-size: 12.5px;
     background: var(--plum-soft);
     padding: 8px 10px;

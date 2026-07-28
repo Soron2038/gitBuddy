@@ -3,7 +3,7 @@
 // drift (a substring host check that false-matched, two different "no sync
 // yet" placeholders). Centralised here so both surfaces format identically.
 
-import type { LocalRepo } from '$lib/data/api';
+import type { LocalRepo, Release, Repo } from '$lib/data/api';
 
 /** Relative "synced X ago" label. `nowMs` is passed in (rather than read via
  *  `Date.now()`) so a once-per-second `$state` tick re-derives the text while
@@ -40,6 +40,41 @@ export function shortenPath(p: string): string {
   const parts = p.split('/').filter(Boolean);
   if (parts.length <= 2) return p;
   return `…/${parts.slice(-2).join('/')}`;
+}
+
+/** Stable, collision-free key for a repo row.
+ *
+ *  The aggregator deliberately returns one row per *(account, repo)* pair —
+ *  two accounts that can both see `acme/api` produce two rows carrying the
+ *  same forge id. Keying a `{#each}` on `repo.id` therefore throws
+ *  `each_key_duplicate`, which kills the render effect and blanks the whole
+ *  list (Svelte 5 throws in production builds too, not just dev). `html_url`
+ *  is the identity the dedup below already uses and is unique per repo across
+ *  every forge and instance. */
+export function repoKey(r: Pick<Repo, 'html_url' | 'id'>): string {
+  return r.html_url || r.id;
+}
+
+/** Same contract as {@link repoKey}, for release rows: two accounts seeing the
+ *  same repo both report its latest release. */
+export function releaseKey(r: Pick<Release, 'html_url' | 'repo_id' | 'tag'>): string {
+  return r.html_url || `${r.repo_id}:${r.tag}`;
+}
+
+/** Collapse duplicate rows, keeping the first occurrence of each key.
+ *  Used for the lists that are rendered as-is (the popover's repo and release
+ *  tabs); the main window's repo grid runs its own dedup because it also
+ *  merges the per-account badges. */
+export function dedupeBy<T>(items: T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    const k = key(item);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(item);
+  }
+  return out;
 }
 
 /** Build the set of already-connected hosts from a list of account base URLs.
@@ -79,9 +114,14 @@ export function hostSuggestions(
     // is offered for Codeberg/Gitea. We don't gatekeep too strictly — the
     // user might know better.
     const isGitlabLike = h.includes('gitlab');
-    if (target === 'gitlab' && !isGitlabLike && out.size > 0) continue;
+    if (target === 'gitlab' && !isGitlabLike) continue;
     if (target === 'codeberg' && isGitlabLike) continue;
     out.add(h);
   }
+  // The GitLab filter used to carry an `out.size > 0` escape hatch, which let
+  // whichever host happened to be scanned *first* through unconditionally —
+  // so a `bitbucket.org` clone would be offered as a GitLab instance, and
+  // reordering the scan changed the suggestions. If nothing looks GitLab-y we
+  // now say so by suggesting nothing, rather than guessing wrong.
   return Array.from(out).sort();
 }

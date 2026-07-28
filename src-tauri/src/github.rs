@@ -7,8 +7,8 @@
 //! milestone one of the providers.
 
 use crate::provider_util::{
-    collapse_ci_status, http_client, http_error, humanise_age, reason_priority, within_days,
-    ProviderBackend, ProviderError,
+    collapse_ci_status, decode_error, http_client, humanise_age, reason_priority, repo_call_budget,
+    response_error, within_days, ProviderBackend, ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
@@ -26,6 +26,9 @@ const AUTH_HINT: &str = "check that the token is valid and has `repo` scope";
 pub type Result<T> = std::result::Result<T, ProviderError>;
 
 pub struct GitHubProvider {
+    /// Shared budget for the per-repo release/CI fan-outs — see
+    /// `provider_util::MAX_CONCURRENT_REPO_CALLS`.
+    repo_budget: std::sync::Arc<tokio::sync::Semaphore>,
     client: Client,
     token: String,
     /// API base, normally [`API_BASE`]. Held as a field (rather than using the
@@ -43,6 +46,7 @@ impl GitHubProvider {
         let client = http_client()?;
         let viewer = fetch_viewer(&client, &token, API_BASE).await?;
         Ok(Self {
+            repo_budget: repo_call_budget(),
             client,
             token,
             api_base: API_BASE.to_string(),
@@ -57,6 +61,7 @@ impl GitHubProvider {
     #[cfg(test)]
     pub(crate) fn for_test(api_base: String, token: String, viewer: Viewer) -> Self {
         Self {
+            repo_budget: repo_call_budget(),
             client: http_client().expect("test http client"),
             token,
             api_base,
@@ -155,14 +160,23 @@ impl GitHubProvider {
             match resp.status() {
                 s if s.is_success() => {}
                 StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-                s => return Err(http_error("GitHub", None, s)),
+                s => return Err(response_error("GitHub", None, AUTH_HINT, s, resp.headers())),
             }
 
-            let raw: Vec<RawRepo> = resp.json().await?;
+            let raw: Vec<RawRepo> = resp.json().await.map_err(decode_error("GitHub"))?;
             let len = raw.len();
+            let last_page = page == MAX_PAGES;
             all.extend(raw.into_iter().map(Into::into));
             if (len as u32) < PAGE_SIZE {
                 break;
+            }
+            if last_page {
+                // Hit the page cap with a full page still coming back: the
+                // list is truncated. Say so rather than silently presenting a
+                // partial list as complete.
+                eprintln!(
+                    "gitbuddy: GitHub repo list truncated at {MAX_PAGES} pages — some repos are not shown"
+                );
             }
         }
 
@@ -183,7 +197,14 @@ impl GitHubProvider {
             let client = self.client.clone();
             let token = self.token.clone();
             let base = self.api_base.clone();
+            let budget = self.repo_budget.clone();
             handles.push(tokio::spawn(async move {
+                // Bounded fan-out: releases and CI share one budget
+                // per account so a tick can't put 120 requests on the
+                // wire at once. A closed semaphore can't happen here
+                // (nothing closes it), so the permit is simply held
+                // for the duration of the call.
+                let _permit = budget.acquire().await;
                 fetch_latest_release(&client, &token, &base, &repo).await
             }));
         }
@@ -218,7 +239,14 @@ impl GitHubProvider {
             let client = self.client.clone();
             let token = self.token.clone();
             let base = self.api_base.clone();
+            let budget = self.repo_budget.clone();
             handles.push(tokio::spawn(async move {
+                // Bounded fan-out: releases and CI share one budget
+                // per account so a tick can't put 120 requests on the
+                // wire at once. A closed semaphore can't happen here
+                // (nothing closes it), so the permit is simply held
+                // for the duration of the call.
+                let _permit = budget.acquire().await;
                 fetch_latest_ci_run(&client, &token, &base, &repo).await
             }));
         }
@@ -235,9 +263,6 @@ impl GitHubProvider {
 
 #[async_trait::async_trait]
 impl ProviderBackend for GitHubProvider {
-    fn viewer(&self) -> &Viewer {
-        &self.viewer
-    }
     fn token(&self) -> &str {
         &self.token
     }
@@ -319,14 +344,33 @@ async fn fetch_latest_ci_run(
                 account_id: None,
             }));
         }
-        StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-        // 403 can happen when the repo's owner has disabled actions for
-        // forks; treat it the same as "no CI" to keep the batch flowing.
-        StatusCode::FORBIDDEN => return Ok(None),
-        s => return Err(http_error("GitHub", None, s)),
+        // 403 is overloaded here: it's what GitHub sends when the owner has
+        // disabled Actions for forks *and* what it sends for primary/secondary
+        // rate-limit exhaustion. Classify first — swallowing a throttled 403
+        // as "no CI" is how a rate-limited account silently loses every CI
+        // dot with nothing in `last_error` to explain it.
+        s => {
+            let e = response_error("GitHub", None, AUTH_HINT, s, resp.headers());
+            if s == StatusCode::FORBIDDEN && !matches!(e, ProviderError::RateLimited { .. }) {
+                // Genuinely "Actions disabled" — emit the same marker row the
+                // 404 arm does, so the repo keeps a coloured dot instead of
+                // vanishing from the list on alternating ticks.
+                return Ok(Some(CiRun {
+                    repo_id: repo.id.clone(),
+                    repo_full_name: format!("{}/{}", repo.owner, repo.name),
+                    status: CiStatus::None,
+                    html_url: None,
+                    branch: Some(repo.default_branch.clone()),
+                    workflow_name: None,
+                    author_login: None,
+                    account_id: None,
+                }));
+            }
+            return Err(e);
+        }
     }
 
-    let body: WorkflowRunsResp = resp.json().await?;
+    let body: WorkflowRunsResp = resp.json().await.map_err(decode_error("GitHub"))?;
     let Some(run) = body.workflow_runs.into_iter().next() else {
         return Ok(Some(CiRun {
             repo_id: repo.id.clone(),
@@ -358,11 +402,17 @@ async fn fetch_latest_release(
     base: &str,
     repo: &Repo,
 ) -> Result<Option<Release>> {
-    let url = format!("{base}/repos/{}/{}/releases/latest", repo.owner, repo.name);
+    // `/releases/latest` excludes drafts *and* prereleases by definition, so
+    // `is_prerelease` could never be true for GitHub while GitLab and Gitea
+    // both surfaced them — the same project mirrored on two forges showed two
+    // different "latest" versions. Listing instead and picking the newest
+    // non-draft makes all three agree.
+    let url = format!("{base}/repos/{}/{}/releases", repo.owner, repo.name);
     let resp = client
         .get(&url)
         .bearer_auth(token)
         .header("Accept", ACCEPT)
+        .query(&[("per_page", "5")])
         .send()
         .await?;
 
@@ -371,7 +421,7 @@ async fn fetch_latest_release(
         // 404 just means "no releases yet" — not an error.
         StatusCode::NOT_FOUND => return Ok(None),
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => return Err(http_error("GitHub", None, s)),
+        s => return Err(response_error("GitHub", None, AUTH_HINT, s, resp.headers())),
     }
 
     #[derive(Deserialize)]
@@ -381,10 +431,22 @@ async fn fetch_latest_release(
         html_url: String,
         published_at: Option<String>,
         prerelease: bool,
+        #[serde(default)]
+        draft: bool,
     }
 
-    let raw: RawRelease = resp.json().await?;
-    let Some(published_at) = raw.published_at else {
+    let raw: Vec<RawRelease> = resp.json().await.map_err(decode_error("GitHub"))?;
+    // Newest first is GitHub's order; a draft has no meaningful publication
+    // and never belongs in the Releases tab.
+    let Some((raw, published_at)) = raw
+        .into_iter()
+        .filter(|r| !r.draft)
+        .filter_map(|r| {
+            let published_at = r.published_at.clone()?;
+            Some((r, published_at))
+        })
+        .next()
+    else {
         return Ok(None);
     };
 
@@ -468,7 +530,7 @@ async fn fetch_viewer(client: &Client, token: &str, base: &str) -> Result<Viewer
                 avatar_url: Option<String>,
                 name: Option<String>,
             }
-            let r: Raw = resp.json().await?;
+            let r: Raw = resp.json().await.map_err(decode_error("GitHub"))?;
             Ok(Viewer {
                 login: r.login,
                 avatar_url: r.avatar_url,
@@ -476,7 +538,7 @@ async fn fetch_viewer(client: &Client, token: &str, base: &str) -> Result<Viewer
             })
         }
         StatusCode::UNAUTHORIZED => Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => Err(http_error("GitHub", None, s)),
+        s => Err(response_error("GitHub", None, AUTH_HINT, s, resp.headers())),
     }
 }
 
@@ -491,14 +553,25 @@ async fn search_issues(
         .get(format!("{base}/search/issues"))
         .bearer_auth(token)
         .header("Accept", ACCEPT)
-        .query(&[("q", q), ("per_page", "50")])
+        // Without an explicit sort, /search/issues ranks by *relevance*
+        // ("best match") and there is no pagination past this cap — so the
+        // list below, which we then re-sort by updated_at and present as
+        // "most recent", was an arbitrary relevance-picked subset. A PR
+        // updated ten minutes ago could be missing while one from March sat
+        // at the top.
+        .query(&[
+            ("q", q),
+            ("per_page", "50"),
+            ("sort", "updated"),
+            ("order", "desc"),
+        ])
         .send()
         .await?;
 
     match resp.status() {
         s if s.is_success() => {}
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => return Err(http_error("GitHub", None, s)),
+        s => return Err(response_error("GitHub", None, AUTH_HINT, s, resp.headers())),
     }
 
     #[derive(Deserialize)]
@@ -515,7 +588,7 @@ async fn search_issues(
         pull_request: Option<serde_json::Value>,
     }
 
-    let body: SearchResp = resp.json().await?;
+    let body: SearchResp = resp.json().await.map_err(decode_error("GitHub"))?;
     let now = Utc::now();
 
     Ok(body

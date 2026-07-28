@@ -75,3 +75,7 @@ __pycache__/
 # Updater manifest generated per release by scripts/generate-latest-json.sh
 # and uploaded as a GitHub release asset — regenerated each time, never committed.
 /latest.json
+
+# Ad-hoc UI screenshots taken during review passes — regenerate rather than
+# tracking them; the ones worth keeping live under docs/.
+/[0-9][0-9]-*.png

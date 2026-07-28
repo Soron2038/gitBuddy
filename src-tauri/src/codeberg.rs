@@ -3,8 +3,9 @@
 //! REST API at `/api/v1/`, so this module mirrors github.rs closely.
 
 use crate::provider_util::{
-    collapse_ci_status, http_client, http_error, humanise_age, normalise_base_url, reason_priority,
-    within_days, ProviderBackend, ProviderError,
+    collapse_ci_status, decode_error, http_client, humanise_age, is_rate_limited,
+    normalise_base_url, reason_priority, repo_call_budget, response_error, within_days,
+    ProviderBackend, ProviderError,
 };
 use crate::types::{
     CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
@@ -21,6 +22,9 @@ const AUTH_HINT: &str = "check the token has at least the `read:repository` and 
 pub type Result<T> = std::result::Result<T, ProviderError>;
 
 pub struct CodebergProvider {
+    /// Shared budget for the per-repo release/CI fan-outs — see
+    /// `provider_util::MAX_CONCURRENT_REPO_CALLS`.
+    repo_budget: std::sync::Arc<tokio::sync::Semaphore>,
     client: Client,
     token: String,
     base_url: String,
@@ -28,11 +32,18 @@ pub struct CodebergProvider {
 }
 
 impl CodebergProvider {
+    /// Host of the configured instance, e.g. `"codeberg.org"`. Used to
+    /// qualify repo ids so two self-hosted instances can't collide.
+    fn host(&self) -> String {
+        crate::accounts::url_host(&self.base_url).unwrap_or_else(|| self.base_url.clone())
+    }
+
     pub async fn connect(token: String, base_url: String) -> Result<Self> {
         let base_url = normalise_base_url(&base_url)?;
         let client = http_client()?;
         let viewer = fetch_viewer(&client, &token, &base_url).await?;
         Ok(Self {
+            repo_budget: repo_call_budget(),
             client,
             token,
             base_url,
@@ -48,6 +59,7 @@ impl CodebergProvider {
     #[cfg(test)]
     pub(crate) fn for_test(base_url: String, token: String, viewer: Viewer) -> Self {
         Self {
+            repo_budget: repo_call_budget(),
             client: http_client().expect("test http client"),
             token,
             base_url,
@@ -114,7 +126,17 @@ impl CodebergProvider {
                 .get(format!("{}/api/v1/user/repos", self.base_url))
                 .bearer_auth(&self.token)
                 .header("Accept", ACCEPT)
-                .query(&[("limit", PAGE_SIZE.to_string()), ("page", page.to_string())])
+                .query(&[
+                    ("limit", PAGE_SIZE.to_string()),
+                    ("page", page.to_string()),
+                    // GitHub sorts by `pushed` and GitLab by
+                    // `last_activity_at`; Gitea sent nothing, so it returned
+                    // its natural (id) order and the `take(60)` in
+                    // list_releases/list_ci picked the *oldest* repos —
+                    // despite the doc comment there promising the most
+                    // recently updated ones.
+                    ("sort", "updated".to_string()),
+                ])
                 .send()
                 .await?;
 
@@ -122,15 +144,32 @@ impl CodebergProvider {
                 s if s.is_success() => {}
                 StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
                 s => {
-                    return Err(http_error("Gitea", Some(self.base_url.clone()), s));
+                    return Err(response_error(
+                        "Gitea",
+                        Some(self.base_url.clone()),
+                        AUTH_HINT,
+                        s,
+                        resp.headers(),
+                    ));
                 }
             }
 
-            let raw: Vec<RawRepo> = resp.json().await?;
+            let raw: Vec<RawRepo> = resp.json().await.map_err(decode_error("Gitea"))?;
             let len = raw.len();
-            all.extend(raw.into_iter().map(Into::into));
-            if (len as u32) < PAGE_SIZE {
+            all.extend(raw.into_iter().map(|r| r.into_repo(&self.host())));
+            // Stop on an *empty* page, not on a short one. Gitea/Forgejo clamp
+            // `limit` to the instance's `api.MAX_RESPONSE_ITEMS` (default 50,
+            // freely lowered by admins), so "short page ⇒ last page" silently
+            // truncated the list the moment the server's cap was below
+            // PAGE_SIZE — a user with 200 repos would see 30 of them with no
+            // indication anything was missing. MAX_PAGES remains the bound.
+            if len == 0 {
                 break;
+            }
+            if page == MAX_PAGES {
+                eprintln!(
+                    "gitbuddy: Gitea repo list truncated at {MAX_PAGES} pages — some repos are not shown"
+                );
             }
         }
 
@@ -150,7 +189,14 @@ impl CodebergProvider {
             let client = self.client.clone();
             let token = self.token.clone();
             let base = self.base_url.clone();
+            let budget = self.repo_budget.clone();
             handles.push(tokio::spawn(async move {
+                // Bounded fan-out: releases and CI share one budget
+                // per account so a tick can't put 120 requests on the
+                // wire at once. A closed semaphore can't happen here
+                // (nothing closes it), so the permit is simply held
+                // for the duration of the call.
+                let _permit = budget.acquire().await;
                 fetch_latest_release(&client, &token, &base, &repo).await
             }));
         }
@@ -182,7 +228,14 @@ impl CodebergProvider {
             let client = self.client.clone();
             let token = self.token.clone();
             let base = self.base_url.clone();
+            let budget = self.repo_budget.clone();
             handles.push(tokio::spawn(async move {
+                // Bounded fan-out: releases and CI share one budget
+                // per account so a tick can't put 120 requests on the
+                // wire at once. A closed semaphore can't happen here
+                // (nothing closes it), so the permit is simply held
+                // for the duration of the call.
+                let _permit = budget.acquire().await;
                 fetch_latest_ci_run(&client, &token, &base, &repo).await
             }));
         }
@@ -199,9 +252,6 @@ impl CodebergProvider {
 
 #[async_trait::async_trait]
 impl ProviderBackend for CodebergProvider {
-    fn viewer(&self) -> &Viewer {
-        &self.viewer
-    }
     fn token(&self) -> &str {
         &self.token
     }
@@ -238,7 +288,7 @@ async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Vi
                 full_name: Option<String>,
                 avatar_url: Option<String>,
             }
-            let r: Raw = resp.json().await?;
+            let r: Raw = resp.json().await.map_err(decode_error("Gitea"))?;
             Ok(Viewer {
                 login: r.login,
                 avatar_url: r.avatar_url,
@@ -246,7 +296,13 @@ async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Vi
             })
         }
         StatusCode::UNAUTHORIZED => Err(ProviderError::Unauthorized(AUTH_HINT)),
-        s => Err(http_error("Gitea", Some(base_url.to_string()), s)),
+        s => Err(response_error(
+            "Gitea",
+            Some(base_url.to_string()),
+            AUTH_HINT,
+            s,
+            resp.headers(),
+        )),
     }
 }
 
@@ -261,8 +317,13 @@ async fn search_issues(
     // mentioned/review_requested set to true. We run a second pass for
     // pull requests right after, fanning them through one query each.
     let mut out = Vec::new();
+    // Each kind is accumulated independently and only a total failure
+    // propagates. Returning early used to throw away the `issues` rows this
+    // vec had already collected when the `pulls` pass hit a transient 5xx —
+    // so one flaky request made the user's assigned *issues* vanish too.
+    let mut last_error: Option<ProviderError> = None;
     for kind in ["issues", "pulls"] {
-        let resp = client
+        let resp = match client
             .get(format!("{base_url}/api/v1/repos/issues/search"))
             .bearer_auth(token)
             .header("Accept", ACCEPT)
@@ -273,17 +334,43 @@ async fn search_issues(
                 ("limit", "50"),
             ])
             .send()
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = Some(e.into());
+                continue;
+            }
+        };
 
         match resp.status() {
             s if s.is_success() => {}
+            // A rejected token is not per-kind — fail fast so the caller can
+            // surface the auth hint instead of silently showing half a list.
             StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
             s => {
-                return Err(http_error("Gitea", Some(base_url.to_string()), s));
+                let e = response_error(
+                    "Gitea",
+                    Some(base_url.to_string()),
+                    AUTH_HINT,
+                    s,
+                    resp.headers(),
+                );
+                if matches!(e, ProviderError::Unauthorized(_)) {
+                    return Err(e);
+                }
+                last_error = Some(e);
+                continue;
             }
         }
 
-        let raw: Vec<RawIssue> = resp.json().await?;
+        let raw: Vec<RawIssue> = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                last_error = Some(e.into());
+                continue;
+            }
+        };
         let now = Utc::now();
         let item_kind = if kind == "pulls" {
             ItemKind::Pr
@@ -310,7 +397,11 @@ async fn search_issues(
             });
         }
     }
-    Ok(out)
+    // Only propagate when *both* kinds failed — a partial result beats none.
+    match last_error {
+        Some(e) if out.is_empty() => Err(e),
+        _ => Ok(out),
+    }
 }
 
 #[derive(Deserialize)]
@@ -365,15 +456,19 @@ struct RawRepo {
     pushed_at: Option<String>,
 }
 
-impl From<RawRepo> for Repo {
-    fn from(r: RawRepo) -> Self {
+impl RawRepo {
+    /// `host` qualifies the repo id — two self-hosted Gitea/Forgejo
+    /// instances both number their repos from 1, and the frontend keys its
+    /// repo grid (and its CI lookup) on this string.
+    fn into_repo(self, host: &str) -> Repo {
+        let r = self;
         let (owner, name) = r
             .full_name
             .rsplit_once('/')
             .map(|(o, n)| (o.to_string(), n.to_string()))
             .unwrap_or_else(|| (String::new(), r.name.clone()));
-        Self {
-            id: format!("cb:{}", r.id),
+        Repo {
+            id: format!("cb:{host}:{}", r.id),
             owner,
             name,
             provider: Provider::Codeberg,
@@ -406,7 +501,11 @@ async fn fetch_latest_release(
         .get(&url)
         .bearer_auth(token)
         .header("Accept", ACCEPT)
-        .query(&[("limit", "1")])
+        // Ask for a handful, not one. Gitea returns drafts to anyone with
+        // write access, and the draft filter below runs *after* this — with
+        // `limit=1` an in-progress draft would hide the actually-published
+        // release entirely until it was published or deleted.
+        .query(&[("limit", "5")])
         .send()
         .await?;
 
@@ -415,9 +514,18 @@ async fn fetch_latest_release(
         // 404 = no releases yet, not an error.
         StatusCode::NOT_FOUND => return Ok(None),
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-        StatusCode::FORBIDDEN => return Ok(None),
+        // Guarded so a throttled 403 doesn't masquerade as "no releases".
+        StatusCode::FORBIDDEN if !is_rate_limited(StatusCode::FORBIDDEN, resp.headers()) => {
+            return Ok(None)
+        }
         s => {
-            return Err(http_error("Gitea", Some(base_url.to_string()), s));
+            return Err(response_error(
+                "Gitea",
+                Some(base_url.to_string()),
+                AUTH_HINT,
+                s,
+                resp.headers(),
+            ));
         }
     }
 
@@ -433,7 +541,7 @@ async fn fetch_latest_release(
         draft: bool,
     }
 
-    let raw: Vec<RawRelease> = resp.json().await?;
+    let raw: Vec<RawRelease> = resp.json().await.map_err(decode_error("Gitea"))?;
     // Drafts shouldn't surface in the Releases tab — only published.
     let Some(r) = raw.into_iter().find(|r| !r.draft) else {
         return Ok(None);
@@ -537,13 +645,33 @@ async fn fetch_latest_ci_run(
             }));
         }
         StatusCode::UNAUTHORIZED => return Err(ProviderError::Unauthorized(AUTH_HINT)),
-        StatusCode::FORBIDDEN => return Ok(None),
+        StatusCode::FORBIDDEN if !is_rate_limited(StatusCode::FORBIDDEN, resp.headers()) => {
+            // Not throttling — CI genuinely isn't available here. Emit the
+            // same marker row the 404 arm does so the repo keeps a "no ci"
+            // dot instead of dropping out of the list on alternating ticks.
+            return Ok(Some(CiRun {
+                repo_id: repo.id.clone(),
+                repo_full_name: format!("{}/{}", repo.owner, repo.name),
+                status: CiStatus::None,
+                html_url: None,
+                branch: Some(repo.default_branch.clone()),
+                workflow_name: None,
+                author_login: None,
+                account_id: None,
+            }));
+        }
         s => {
-            return Err(http_error("Gitea", Some(base_url.to_string()), s));
+            return Err(response_error(
+                "Gitea",
+                Some(base_url.to_string()),
+                AUTH_HINT,
+                s,
+                resp.headers(),
+            ));
         }
     }
 
-    let body: WorkflowRunsResp = resp.json().await?;
+    let body: WorkflowRunsResp = resp.json().await.map_err(decode_error("Gitea"))?;
     let Some(run) = body.workflow_runs.into_iter().next() else {
         return Ok(Some(CiRun {
             repo_id: repo.id.clone(),
@@ -602,7 +730,7 @@ mod tests {
             }"#,
         )
         .expect("parse");
-        let repo: Repo = raw.into();
+        let repo: Repo = raw.into_repo("codeberg.org");
         assert_eq!(repo.pushed_at.as_deref(), Some("2026-01-01T00:00:00Z"));
     }
 
@@ -620,7 +748,7 @@ mod tests {
             }"#,
         )
         .expect("parse");
-        let repo: Repo = raw.into();
+        let repo: Repo = raw.into_repo("codeberg.org");
         assert_eq!(repo.pushed_at.as_deref(), Some("2026-06-01T00:00:00Z"));
     }
 
@@ -707,7 +835,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_repos_paginates_until_short_page() {
+    async fn list_repos_paginates_until_an_empty_page() {
         let server = MockServer::start().await;
         // PAGE_SIZE is 50 here.
         Mock::given(method("GET"))
@@ -724,9 +852,71 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/user/repos"))
+            .and(query_param("page", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .expect(1)
+            .mount(&server)
+            .await;
 
         let cb = CodebergProvider::for_test(server.uri(), "t".into(), viewer("tester"));
         assert_eq!(cb.list_repos().await.expect("ok").len(), 51);
+    }
+
+    #[tokio::test]
+    async fn list_repos_survives_a_server_that_clamps_the_page_size() {
+        // Gitea/Forgejo clamp `limit` to `api.MAX_RESPONSE_ITEMS`, which
+        // admins routinely lower. Terminating on a *short* page meant every
+        // such instance silently returned only its first page — 30 of 200
+        // repos, with no error and no hint anything was missing.
+        let server = MockServer::start().await;
+        for page in 1..=3 {
+            Mock::given(method("GET"))
+                .and(path("/api/v1/user/repos"))
+                .and(query_param("page", page.to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_string(json_array(30, repo_json)))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/api/v1/user/repos"))
+            .and(query_param("page", "4"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cb = CodebergProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+        assert_eq!(cb.list_repos().await.expect("ok").len(), 90);
+    }
+
+    #[tokio::test]
+    async fn latest_release_ignores_a_draft_sitting_on_top() {
+        // Gitea serves drafts to users with write access, newest first. With
+        // `limit=1` the draft was the only row fetched and the published
+        // release it shadowed disappeared from the Releases tab entirely.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[
+                    {"tag_name":"v2.1","name":"v2.1","html_url":"https://x/v2.1",
+                     "published_at":"2026-06-02T00:00:00Z","draft":true,"prerelease":false},
+                    {"tag_name":"v2.0","name":"v2.0","html_url":"https://x/v2.0",
+                     "published_at":"2026-06-01T00:00:00Z","draft":false,"prerelease":false}
+                ]"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let release =
+            fetch_latest_release(&http_client().expect("client"), "t", &server.uri(), &repo())
+                .await
+                .expect("ok")
+                .expect("a published release");
+        assert_eq!(release.tag, "v2.0");
     }
 
     #[tokio::test]

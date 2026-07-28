@@ -63,6 +63,18 @@ pub struct RemoteRef {
     pub raw_url: String,
 }
 
+/// How deep below a scan root a checkout can sit before we stop looking.
+/// Nobody nests working copies eight levels down, but plenty of people point
+/// a scan root at `$HOME`, where an unbounded walk means re-reading
+/// `Documents`, `Downloads` and every mounted volume on every poll.
+const MAX_SCAN_DEPTH: usize = 6;
+
+/// Upper bound on repos reported from one scan. `diagnose` runs a full
+/// `statuses()` (untracked included) per repo on a single blocking thread, so
+/// an accidental root over a huge tree would otherwise pin that thread for the
+/// whole poll interval.
+const MAX_REPOS: usize = 500;
+
 pub fn scan(settings: &Settings) -> Vec<LocalRepo> {
     let mut extra_skips: Vec<&str> = SKIP_DIRS.to_vec();
     for s in &settings.scan_ignore {
@@ -75,16 +87,40 @@ pub fn scan(settings: &Settings) -> Vec<LocalRepo> {
             continue;
         }
         find_repos_in(root, &extra_skips, &mut found);
+        if found.len() >= MAX_REPOS {
+            eprintln!(
+                "gitbuddy: local scan hit the {MAX_REPOS}-repo cap — narrow your scan roots to see the rest"
+            );
+            found.truncate(MAX_REPOS);
+            break;
+        }
     }
 
-    found
+    let total = found.len();
+    let repos: Vec<LocalRepo> = found
         .into_iter()
         .filter_map(|repo_dir| diagnose(&repo_dir).ok())
-        .collect()
+        .collect();
+    // A clone on an unmounted volume, with a corrupt index, or whose real
+    // gitdir was deleted simply disappeared from "Local clones" with no
+    // diagnostic at all.
+    if repos.len() < total {
+        eprintln!(
+            "gitbuddy: {} of {total} local repos could not be read and are not shown",
+            total - repos.len()
+        );
+    }
+    repos
 }
 
 fn find_repos_in(root: &Path, skip: &[&str], out: &mut Vec<PathBuf>) {
-    let walker = WalkDir::new(root).follow_links(false).into_iter();
+    let walker = WalkDir::new(root)
+        .follow_links(false)
+        // Don't cross into mounted volumes: a network share under a scan root
+        // turns every tick into minutes of blocking I/O.
+        .same_file_system(true)
+        .max_depth(MAX_SCAN_DEPTH)
+        .into_iter();
     let mut iter = walker.filter_entry(|e| should_descend(e, skip));
 
     while let Some(entry) = iter.next() {
@@ -132,7 +168,16 @@ fn is_repo_root(p: &Path) -> bool {
     let git = p.join(".git");
     // A regular repo has a `.git` directory; a worktree has a `.git` file
     // that points to its real gitdir. Either is a checkout we care about.
-    git.is_dir() || git.is_file()
+    if git.is_dir() || git.is_file() {
+        return true;
+    }
+    // A bare/mirror clone (`foo.git/`) has HEAD, objects/ and refs/ at the top
+    // level and no `.git` at all. Recognising it matters twice over: it used
+    // to be invisible in "Local clones", *and* — because none of `objects`,
+    // `refs`, `hooks` is dot-prefixed or in SKIP_DIRS — the walker descended
+    // its entire loose-object store (up to 256 fan-out directories) on every
+    // tick. Returning true here makes `skip_current_dir` prune that too.
+    p.join("HEAD").is_file() && p.join("objects").is_dir()
 }
 
 fn diagnose(path: &Path) -> Result<LocalRepo, git2::Error> {
@@ -233,12 +278,14 @@ fn ahead_behind(repo: &Repository) -> (u32, u32) {
 fn origin_remote(repo: &Repository) -> Option<RemoteRef> {
     let remote = repo.find_remote("origin").ok()?;
     let url = remote.url()?.to_string();
-    parse_remote_url(&url).or(Some(RemoteRef {
-        host: String::new(),
-        owner: String::new(),
-        name: String::new(),
-        raw_url: url,
-    }))
+    // `None` when the URL doesn't yield all three parts — an `insteadOf` alias
+    // (`gh:owner/repo`) or a local path remote (`/srv/git/foo.git`). This used
+    // to fall back to a `RemoteRef` with three empty strings, which is worse
+    // than nothing: `(host, owner, name)` is the key the frontend joins local
+    // clones to remote repos on, so every unparseable remote collided with
+    // every other one under `("", "", "")`. The UI falls back to `raw_url`,
+    // which is what the doc comment on `LocalRepo::remote` already promises.
+    parse_remote_url(&url)
 }
 
 /// Best-effort parse of a Git clone URL into `(host, owner, name)`. Covers:
@@ -454,6 +501,25 @@ mod tests {
 
         let diag = diagnose(tmp.path()).unwrap();
         assert!(diag.detached, "HEAD pinned to a commit is detached");
+    }
+
+    #[test]
+    fn bare_repos_are_recognised() {
+        // A mirror clone has HEAD + objects/ + refs/ at the top level and no
+        // `.git`. Before this it was invisible in "Local clones" *and* its
+        // whole object store got walked on every tick.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("mirror.git");
+        std::fs::create_dir_all(bare.join("objects")).expect("objects");
+        std::fs::create_dir_all(bare.join("refs")).expect("refs");
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+        assert!(is_repo_root(&bare));
+
+        // A plain directory that merely contains a file named HEAD is not.
+        let decoy = tmp.path().join("notarepo");
+        std::fs::create_dir_all(&decoy).expect("decoy");
+        std::fs::write(decoy.join("HEAD"), "x").expect("decoy HEAD");
+        assert!(!is_repo_root(&decoy));
     }
 
     #[test]

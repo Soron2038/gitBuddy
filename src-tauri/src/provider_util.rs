@@ -10,8 +10,9 @@
 //! pipeline status vocabulary differs from GitHub Actions, so it keeps its
 //! own `collapse_pipeline_status` in `gitlab.rs`.
 
-use crate::types::{CiRun, CiStatus, ItemReason, Release, Repo, Viewer, WaitingItem};
+use crate::types::{CiRun, CiStatus, ItemReason, Release, Repo, WaitingItem};
 use chrono::{DateTime, Utc};
+use reqwest::header::HeaderMap;
 use reqwest::{Client, StatusCode};
 use std::time::Duration;
 use thiserror::Error;
@@ -40,6 +41,16 @@ pub(crate) fn http_client() -> reqwest::Result<Client> {
 pub enum ProviderError {
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
+    /// The request succeeded but the body wasn't what we expected. Split out
+    /// from `Network` because `reqwest`'s decode errors funnel through the
+    /// same type: a self-hosted instance behind an SSO proxy answers 200 with
+    /// an HTML login page, and reporting that as "network error: error
+    /// decoding response body" sends the user off to debug their Wi-Fi.
+    #[error("{provider} returned an unexpected response body — is the base URL pointing at the API? ({source})")]
+    Decode {
+        provider: &'static str,
+        source: reqwest::Error,
+    },
     /// `.0` is a provider-specific hint naming the token scopes to check.
     #[error("authentication failed — {0}")]
     Unauthorized(&'static str),
@@ -54,31 +65,142 @@ pub enum ProviderError {
     },
     #[error("invalid base URL: {0}")]
     InvalidBaseUrl(String),
-    /// HTTP 429 — the forge is throttling us. Distinct from `HttpStatus` so
-    /// the aggregator can name the condition in `last_error` (instead of a
-    /// bare status code) and a future backoff can key on it.
-    #[error("{provider} is rate-limiting requests (HTTP 429) — waiting for the next tick")]
-    RateLimited { provider: &'static str },
+    /// The forge is throttling us. Distinct from `HttpStatus` so the
+    /// aggregator can name the condition in `last_error` (instead of a bare
+    /// status code) and a backoff can key on it. `retry_after_secs` carries
+    /// the server's own hint when it sent one.
+    #[error("{provider} is rate-limiting requests{} — backing off", retry_after_secs.map(|s| format!(" (retry in ~{s}s)")).unwrap_or_default())]
+    RateLimited {
+        provider: &'static str,
+        retry_after_secs: Option<u64>,
+    },
 }
 
-/// Map a non-success HTTP status to the right `ProviderError`. Factored so
-/// every provider's fallback arm classifies 429 as [`ProviderError::RateLimited`]
-/// instead of a generic `HttpStatus`. (GitHub's *secondary* limit — 403 with
-/// `x-ratelimit-remaining: 0` — is not detected here because several call
-/// sites legitimately treat 403 as "feature disabled".)
-pub(crate) fn http_error(
+/// Is this response a rate-limit rejection?
+///
+/// A plain 429 is the easy case. The hard one is GitHub, which answers **403**
+/// for both primary-limit exhaustion and secondary/abuse limits — the same
+/// status several endpoints legitimately use for "this feature is disabled for
+/// this repo". The headers disambiguate: `x-ratelimit-remaining: 0` or a
+/// `retry-after` means throttling, anything else means the feature reading.
+/// Getting this wrong is not cosmetic — a throttled 403 read as "no CI" makes
+/// the app quietly show empty lists while it is being told to slow down.
+fn rate_limit_hint(status: StatusCode, headers: &HeaderMap) -> Option<Option<u64>> {
+    let retry_after = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return Some(retry_after);
+    }
+    if status == StatusCode::FORBIDDEN {
+        let exhausted = headers
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim() == "0");
+        if exhausted || retry_after.is_some() {
+            // Prefer the explicit retry-after; otherwise derive the wait from
+            // the reset epoch if the forge sent one.
+            let secs = retry_after.or_else(|| {
+                let reset = headers
+                    .get("x-ratelimit-reset")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<i64>().ok())?;
+                let now = Utc::now().timestamp();
+                (reset > now).then(|| (reset - now) as u64)
+            });
+            return Some(secs);
+        }
+    }
+    None
+}
+
+/// How many per-repo HTTP calls one account may have in flight at once.
+///
+/// The release and CI lookups each fan out over up to `MAX_REPOS_TO_CHECK`
+/// repos, and the aggregator runs both concurrently — so an unthrottled
+/// provider put 120 simultaneous requests on the wire per account, times the
+/// number of connected accounts. GitHub's own guidance is to stay at or below
+/// 100 concurrent requests; past that it answers 403 (secondary rate limit).
+/// Against a small self-hosted Forgejo, a burst that size every poll interval
+/// is a self-inflicted DoS. Both fan-outs share one budget per account, which
+/// is why the semaphore lives on the provider rather than in each call.
+pub(crate) const MAX_CONCURRENT_REPO_CALLS: usize = 6;
+
+/// A fresh per-repo call budget. One per provider instance.
+pub(crate) fn repo_call_budget() -> std::sync::Arc<tokio::sync::Semaphore> {
+    std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REPO_CALLS))
+}
+
+/// Wrap a body-decode failure with the provider that produced it.
+pub(crate) fn decode_error(provider: &'static str) -> impl Fn(reqwest::Error) -> ProviderError {
+    move |source| ProviderError::Decode { provider, source }
+}
+
+/// True when this response is a throttle rejection rather than a genuine
+/// per-endpoint permission answer. Call sites that treat 403 as a graceful
+/// "feature disabled / nothing visible here" must guard on this first,
+/// otherwise a throttled account degrades into empty lists with no error.
+pub(crate) fn is_rate_limited(status: StatusCode, headers: &HeaderMap) -> bool {
+    rate_limit_hint(status, headers).is_some()
+}
+
+/// Classify a non-success response into the right `ProviderError`.
+///
+/// Takes the whole response rather than a bare status because both
+/// interesting cases need the headers: rate limiting (see
+/// [`rate_limit_hint`]) and 403-as-auth-failure. 403 is what GitHub returns
+/// for a PAT that hasn't been SSO-authorised for an org and what GitLab
+/// returns for `insufficient_scope` — mapping it to `Unauthorized` is what
+/// gets the provider's scope hint in front of the user instead of a bare
+/// "HTTP 403".
+pub(crate) fn response_error(
     provider: &'static str,
     base_url: Option<String>,
+    auth_hint: &'static str,
     status: StatusCode,
+    headers: &HeaderMap,
 ) -> ProviderError {
-    if status == StatusCode::TOO_MANY_REQUESTS {
-        ProviderError::RateLimited { provider }
-    } else {
-        ProviderError::HttpStatus {
+    if let Some(retry_after_secs) = rate_limit_hint(status, headers) {
+        return ProviderError::RateLimited {
             provider,
-            base_url,
-            status,
-        }
+            retry_after_secs,
+        };
+    }
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return ProviderError::Unauthorized(auth_hint);
+    }
+    ProviderError::HttpStatus {
+        provider,
+        base_url,
+        status,
+    }
+}
+
+/// Compare two provider timestamps newest-first.
+///
+/// The three forges do not agree on a wire format: GitHub emits
+/// `2026-06-01T12:00:00Z`, GitLab appends milliseconds (`…:00.000Z`), and
+/// Gitea/Forgejo render RFC 3339 in the *instance's* configured timezone
+/// (`…T14:00:00+02:00`). A lexicographic `String::cmp` is only correct for a
+/// single normalised format, so a Codeberg item at `14:00:00+02:00` (= 12:00
+/// UTC) would sort above a GitHub item at `13:00:00Z` an hour later in real
+/// time. Parsing to `DateTime<Utc>` first fixes both the offset and the
+/// millisecond case (`'.' < 'Z'`).
+///
+/// Unparseable values sort last rather than poisoning the order, and two
+/// unparseable values fall back to a string comparison so the sort stays
+/// total (a non-total comparator would make `sort_by` misbehave).
+pub(crate) fn cmp_newest_first(a: &str, b: &str) -> std::cmp::Ordering {
+    match (
+        DateTime::parse_from_rfc3339(a),
+        DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(a), Ok(b)) => b.with_timezone(&Utc).cmp(&a.with_timezone(&Utc)),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => b.cmp(a),
     }
 }
 
@@ -112,8 +234,6 @@ pub(crate) fn normalise_base_url(raw: &str) -> Result<String, ProviderError> {
 /// concrete provider maps.
 #[async_trait::async_trait]
 pub trait ProviderBackend: Send + Sync {
-    /// The authenticated account behind this provider.
-    fn viewer(&self) -> &Viewer;
     /// The bearer token, needed for outbound git operations (clone).
     fn token(&self) -> &str;
     /// The forge base URL, or `None` for GitHub (always api.github.com).
@@ -256,17 +376,80 @@ mod tests {
         assert!(normalise_base_url("   ").is_err());
     }
 
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()).expect("header name"),
+                v.parse().expect("header value"),
+            );
+        }
+        h
+    }
+
+    fn classify(status: StatusCode, hdrs: &[(&str, &str)]) -> ProviderError {
+        response_error("GitHub", None, "hint", status, &headers(hdrs))
+    }
+
     #[test]
-    fn http_error_maps_429_to_rate_limited() {
+    fn plain_429_is_rate_limited_and_carries_retry_after() {
         assert!(matches!(
-            http_error("GitHub", None, StatusCode::TOO_MANY_REQUESTS),
+            classify(StatusCode::TOO_MANY_REQUESTS, &[]),
+            ProviderError::RateLimited {
+                retry_after_secs: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify(StatusCode::TOO_MANY_REQUESTS, &[("retry-after", "60")]),
+            ProviderError::RateLimited {
+                retry_after_secs: Some(60),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exhausted_403_is_rate_limited_not_a_disabled_feature() {
+        // GitHub answers 403 for primary-limit exhaustion. Reading that as
+        // "Actions disabled for this repo" is what made the app show empty
+        // CI/release lists while it was being throttled.
+        assert!(matches!(
+            classify(StatusCode::FORBIDDEN, &[("x-ratelimit-remaining", "0")]),
             ProviderError::RateLimited { .. }
         ));
         assert!(matches!(
-            http_error(
+            classify(StatusCode::FORBIDDEN, &[("retry-after", "30")]),
+            ProviderError::RateLimited {
+                retry_after_secs: Some(30),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn plain_403_is_an_auth_problem_and_surfaces_the_scope_hint() {
+        // A PAT that hasn't been SSO-authorised for an org, or one missing a
+        // scope — the user needs the hint, not "HTTP 403".
+        let e = classify(StatusCode::FORBIDDEN, &[("x-ratelimit-remaining", "4999")]);
+        assert!(matches!(e, ProviderError::Unauthorized("hint")));
+        assert!(e.to_string().contains("hint"));
+
+        assert!(matches!(
+            classify(StatusCode::UNAUTHORIZED, &[]),
+            ProviderError::Unauthorized(_)
+        ));
+    }
+
+    #[test]
+    fn other_statuses_stay_generic() {
+        assert!(matches!(
+            response_error(
                 "GitLab",
                 Some("https://gitlab.com".into()),
-                StatusCode::BAD_GATEWAY
+                "hint",
+                StatusCode::BAD_GATEWAY,
+                &HeaderMap::new(),
             ),
             ProviderError::HttpStatus { .. }
         ));

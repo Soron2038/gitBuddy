@@ -21,6 +21,9 @@
     connectedHosts,
     repoAge,
     shortenPath,
+    repoKey,
+    releaseKey,
+    dedupeBy,
   } from '$lib/format';
   import { deriveProviderHeads } from '$lib/data/auth';
   import {
@@ -66,10 +69,22 @@
   let cb: CodebergStatus | null = $state(null);
   let items: WaitingItem[] = $state([]);
   let repos: Repo[] = $state([]);
+  /** One row per repo, not one per (account, repo). Two connected accounts
+   *  that can both see the same repo make the aggregator emit it twice; the
+   *  keyed {#each} below would then throw `each_key_duplicate` and blank the
+   *  whole tab. */
+  let uniqueRepos = $derived(dedupeBy(repos, repoKey));
   let reposLoaded = $state(false);
   let reposLoading = $state(false);
   let locals: LocalRepo[] = $state([]);
   let releases: Release[] = $state([]);
+  /** Same dedup as `uniqueRepos`. Deliberately *not* filtered to `is_new`:
+   *  this tab is the "latest release per repo" browse view and badges the
+   *  recent ones with NEW, whereas the main window has a view explicitly
+   *  named "New releases" that filters. Same underlying set, different
+   *  framing — the label carries the difference, so neither window hides
+   *  rows the other shows. */
+  let uniqueReleases = $derived(dedupeBy(releases, releaseKey));
   let releasesLoaded = $state(false);
   let releasesLoading = $state(false);
   let ciRuns: CiRun[] = $state([]);
@@ -142,6 +157,12 @@
   );
 
   let lastSyncedAt: Date | null = $state(null);
+  /** What the last aggregator tick failed at, straight from `last_error`.
+   *  Kept apart from `error` (which holds *this window's* action failures)
+   *  because a backend sync failure is a persistent condition, not a
+   *  one-off. Without surfacing it, a revoked token is indistinguishable
+   *  from "you have nothing to do". */
+  let syncError: string | null = $state(null);
 
   // ── Notifications ─────────────────────────────────────────────────────
   // Diffing + firing now lives in the Rust aggregator (`notifications.rs`),
@@ -174,6 +195,7 @@
     try {
       const info = await lastSyncInfo();
       lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
+      syncError = info.last_error;
     } catch {
       lastSyncedAt = null;
     }
@@ -225,6 +247,7 @@
         try {
           const info = await lastSyncInfo();
           lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
+          syncError = info.last_error;
         } catch {
           lastSyncedAt = null;
         }
@@ -302,7 +325,12 @@
         });
       }
     }
-    items.push({ separator: true });
+    // Guarded: an unconditional separator renders as a divider with nothing
+    // under it when the API returned neither clone URL (the main window has
+    // always guarded this).
+    if (r.clone_url || r.ssh_url) {
+      items.push({ separator: true });
+    }
     if (r.clone_url) {
       items.push({
         label: 'Copy clone URL (HTTPS)',
@@ -319,8 +347,23 @@
     showMenu(e, items);
   }
 
+  /** Open the orphan-row menu from a keyboard activation, anchored to the
+   *  row itself. macOS has no context-menu key and WebKit doesn't synthesise
+   *  `contextmenu` from the keyboard, so without this the row's only actions
+   *  were unreachable for anyone not using a mouse. */
+  function openLocalRepoMenuFromKeyboard(e: KeyboardEvent, l: LocalRepo) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    buildLocalRepoMenu(l, rect.left + 12, rect.bottom - 4);
+  }
+
   function openLocalRepoMenu(e: MouseEvent, l: LocalRepo) {
     e.preventDefault();
+    buildLocalRepoMenu(l, e.clientX, e.clientY);
+  }
+
+  function buildLocalRepoMenu(l: LocalRepo, x: number, y: number) {
     const hasEditor = !!(settings.editor_command && settings.editor_command.trim());
     const hasTerminal = !!(settings.terminal_command && settings.terminal_command.trim());
     const items: MenuItem[] = [
@@ -357,7 +400,7 @@
         onclick: () => void writeText(l.remote?.raw_url ?? ''),
       });
     }
-    showMenu(e, items);
+    showMenuAt(x, y, items);
   }
 
   function openItemMenu(e: MouseEvent, item: WaitingItem) {
@@ -377,9 +420,13 @@
   }
 
   function showMenu(e: MouseEvent, items: MenuItem[]) {
+    showMenuAt(e.clientX, e.clientY, items);
+  }
+
+  function showMenuAt(x: number, y: number, items: MenuItem[]) {
     menuItems = items;
-    menuX = e.clientX;
-    menuY = e.clientY;
+    menuX = x;
+    menuY = y;
     menuOpen = true;
   }
 
@@ -404,6 +451,7 @@
       await Promise.all(promises);
       const info = await lastSyncInfo();
       lastSyncedAt = info.synced_at ? new Date(info.synced_at) : null;
+      syncError = info.last_error;
     } catch (e) {
       error = String(e);
     }
@@ -563,7 +611,7 @@
         data-tip="Refresh now"
         aria-label="Refresh"
         onclick={refresh}
-        disabled={!viewer || refreshing}
+        disabled={!connected || refreshing}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
           <path d="M21 12a9 9 0 1 1-3-6.7" /><path d="M21 4v5h-5" />
@@ -839,8 +887,26 @@
       </div>
 
       <div class="list" id="panel-main" role="tabpanel" aria-labelledby={'tab-' + activeTab}>
+        <!-- `role="alert"` so a screen reader announces failures that appear
+             asynchronously; without it these swap in silently. -->
         {#if error}
-          <div class="err-banner">{error}</div>
+          <div class="err-banner" role="alert">{error}</div>
+        {/if}
+        {#if syncError}
+          <div class="err-banner sync-err" role="alert">
+            <strong>Last sync failed.</strong>
+            {syncError}
+          </div>
+        {/if}
+        <!-- The permission result was tracked but never shown, so a user who
+             had denied (or auto-denied) the macOS prompt saw notifications
+             configured and enabled in Settings while none ever arrived, with
+             nothing anywhere explaining why. -->
+        {#if notificationPermission === 'denied' && settings.notifications.enabled}
+          <div class="err-banner notif-hint">
+            Notifications are blocked for gitBuddy. Turn them on in
+            <em>System Settings → Notifications → gitBuddy</em>.
+          </div>
         {/if}
 
         {#if activeTab === 'waiting'}
@@ -887,10 +953,19 @@
                 <span class="section-h-count">{orphans.length}</span>
               </div>
               {#each orphans as o (o.path)}
-                <div
+                <!-- A real button: this was role="button" + tabindex="0"
+                     with no onclick and no keydown, so it announced itself as
+                     a button, took focus, and then did nothing on Enter. -->
+                <button
+                  type="button"
                   class="row repo-row orphan"
-                  role="button"
-                  tabindex="0"
+                  onclick={(e) =>
+                    buildLocalRepoMenu(
+                      o,
+                      e.currentTarget.getBoundingClientRect().left + 12,
+                      e.currentTarget.getBoundingClientRect().bottom - 4,
+                    )}
+                  onkeydown={(e) => openLocalRepoMenuFromKeyboard(e, o)}
                   oncontextmenu={(e) => openLocalRepoMenu(e, o)}
                 >
                   <span class="pchip orphan-chip" data-tip="No matching remote account">?</span>
@@ -911,14 +986,14 @@
                       {/if}
                     </span>
                   </span>
-                </div>
+                </button>
               {/each}
               <div class="section-h">
                 Remote <em>repos</em>
-                <span class="section-h-count">{repos.length}</span>
+                <span class="section-h-count">{uniqueRepos.length}</span>
               </div>
             {/if}
-            {#each repos as r (r.id)}
+            {#each uniqueRepos as r (repoKey(r))}
               {@const local = localByKey.get(localKeyForRepo(r))}
               {@const localDiag = local?.[0]}
               {@const ci = ciByRepo.get(r.id) ?? 'none'}
@@ -932,16 +1007,35 @@
                 <span class="body">
                   <span class="title">
                     {#if local}
+                      <!-- `data-tip` is a CSS ::after on hover, so it never
+                           reaches the accessibility tree and is mouse-only.
+                           The aria-label is what makes the state readable at
+                           all without sight — colour is otherwise the sole
+                           carrier of meaning here. -->
                       <span
                         class="local-flag"
                         class:dirty={localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged + localDiag.untracked > 0 || localDiag.ahead > 0)}
                         data-tip={local.length === 1 ? `Cloned at ${localDiag?.path}` : `Cloned ${local.length}× — first at ${localDiag?.path}`}
+                        role="img"
+                        aria-label={localDiag && (localDiag.dirty_staged + localDiag.dirty_unstaged + localDiag.untracked > 0 || localDiag.ahead > 0)
+                          ? 'Cloned locally, uncommitted or unpushed changes'
+                          : 'Cloned locally, clean'}
                       ></span>
                     {/if}
                     {#if ci !== 'none'}
+                      {@const ciLabel =
+                        ci === 'ok'
+                          ? 'CI passing on default branch'
+                          : ci === 'fail'
+                            ? 'CI failing on default branch'
+                            : ci === 'run'
+                              ? 'CI running'
+                              : 'CI cancelled'}
                       <span
                         class="ci-dot ci-{ci}"
-                        data-tip={ci === 'ok' ? 'CI passing on default branch' : ci === 'fail' ? 'CI failing on default branch' : ci === 'run' ? 'CI running' : 'CI cancelled'}
+                        data-tip={ciLabel}
+                        role="img"
+                        aria-label={ciLabel}
                       ></span>
                     {/if}
                     <span class="rowner">{r.owner}</span><span class="rslash">/</span>{r.name}
@@ -968,14 +1062,14 @@
         {:else}
           {#if releasesLoading && !releasesLoaded}
             <div class="empty"><p class="loading-text">Loading releases…</p></div>
-          {:else if releases.length === 0}
+          {:else if uniqueReleases.length === 0}
             <div class="empty">
               <Buddy size={48} />
               <p>No releases found.</p>
               <small>None of your most-recent repos have published a release.</small>
             </div>
           {:else}
-            {#each releases as r (r.repo_id + ':' + r.tag)}
+            {#each uniqueReleases as r (releaseKey(r))}
               <button
                 class="row release-row"
                 type="button"
@@ -1012,12 +1106,19 @@
     {/if}
 
     <footer class="pop-foot">
-      <span class="pulse" aria-hidden="true" class:idle={!viewer}></span>
-      {#if viewer}
-        Synced {syncText}
-      {:else}
-        Not connected
-      {/if}
+      <!-- `connected`, not `viewer`: the latter is only the GitHub head, so a
+           GitLab-only user used to read "Not connected" above a full list of
+           their own merge requests. -->
+      <span class="pulse" aria-hidden="true" class:idle={!connected}></span>
+      <span role="status" aria-live="polite">
+        {#if !connected}
+          Not connected
+        {:else if refreshing}
+          Refreshing…
+        {:else}
+          Synced {syncText}
+        {/if}
+      </span>
       <span class="spc"></span>
       <span class="kbd">⌘⇧G</span>
     </footer>
@@ -1253,7 +1354,7 @@
 
   .err {
     margin: 0;
-    color: var(--plum);
+    color: var(--plum-ink);
     font-size: 12.5px;
     background: var(--plum-soft);
     padding: 8px 10px;
@@ -1261,11 +1362,32 @@
   }
   .err-banner {
     margin: 8px 10px 0;
-    color: var(--plum);
+    color: var(--plum-ink);
     font-size: 12px;
     background: var(--plum-soft);
     padding: 7px 10px;
     border-radius: var(--r-sm);
+  }
+  /* A standing hint, not a failure — keep it calmer than the error banners. */
+  .err-banner.notif-hint {
+    color: var(--ink-2);
+    background: var(--butter-soft);
+    line-height: 1.45;
+  }
+  .err-banner.notif-hint em {
+    font-style: normal;
+    font-weight: 600;
+  }
+
+  /* Sync failures wrap — they carry the account id and the provider's own
+     wording, which is longer than the one-line action errors above. */
+  .err-banner.sync-err {
+    overflow-wrap: anywhere;
+    line-height: 1.45;
+  }
+  .err-banner.sync-err strong {
+    display: block;
+    font-weight: 600;
   }
 
   /* Greeting & tabs ---------------------------------------------- */
@@ -1519,8 +1641,9 @@
   }
   .meta .prov-tag {
     margin-left: auto;
+    /* ink-3 is already the muted tone; the extra 0.7 opacity took it to
+       2.50:1. Muted has to stay readable. */
     color: var(--ink-3);
-    opacity: 0.7;
     font-size: 10px;
   }
   .age {

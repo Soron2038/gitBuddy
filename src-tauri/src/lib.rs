@@ -55,8 +55,6 @@ pub fn run() {
         .manage(Arc::new(AppState::default()))
         .invoke_handler(tauri::generate_handler![
             commands::provider_set_token,
-            commands::provider_status,
-            commands::provider_disconnect,
             commands::gh_oauth_begin,
             commands::gh_oauth_poll,
             commands::accounts_list,

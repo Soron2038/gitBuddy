@@ -109,7 +109,7 @@ fn parse_host(base_url: Option<&str>, fallback: &str) -> String {
 /// Minimal host extractor. Avoids pulling in the `url` crate just for this —
 /// base URLs are user-entered strings shaped like `https://gitlab.gwdg.de`
 /// or `https://gitlab.gwdg.de/api/v4/`, both trivial to dissect by hand.
-fn url_host(u: &str) -> Option<String> {
+pub(crate) fn url_host(u: &str) -> Option<String> {
     let after_scheme = u.split_once("://").map(|(_, rest)| rest).unwrap_or(u);
     let host = after_scheme
         .split(['/', '?', '#'])

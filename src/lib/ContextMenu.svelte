@@ -56,11 +56,78 @@
     }
   }
 
+  /** Indices of the items that can actually be focused — separators and
+   *  disabled entries are skipped by arrow navigation. */
+  let focusableIndices = $derived(
+    items
+      .map((item, i) => (!('separator' in item) && !item.disabled ? i : -1))
+      .filter((i) => i >= 0),
+  );
+
+  /** Buttons keyed by their index in `items`, so arrow keys can move focus. */
+  let itemEls: Record<number, HTMLButtonElement> = {};
+
+  /** Element that had focus when the menu opened, restored on close. Without
+   *  this, dismissing the menu drops focus to the document and the keyboard
+   *  user loses their place in the list. */
+  let previouslyFocused: HTMLElement | null = null;
+
+  function focusItemAt(position: number) {
+    const idx = focusableIndices.at(position);
+    if (idx === undefined) return;
+    itemEls[idx]?.focus();
+  }
+
+  /** Where the currently focused item sits within `focusableIndices`. */
+  function currentPosition(): number {
+    const active = document.activeElement;
+    return focusableIndices.findIndex((i) => itemEls[i] === active);
+  }
+
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && open) {
-      open = false;
+    if (!open) return;
+    switch (e.key) {
+      case 'Escape':
+        open = false;
+        break;
+      case 'ArrowDown': {
+        e.preventDefault();
+        const next = currentPosition() + 1;
+        focusItemAt(next >= focusableIndices.length ? 0 : next);
+        break;
+      }
+      case 'ArrowUp': {
+        e.preventDefault();
+        const prev = currentPosition() - 1;
+        focusItemAt(prev < 0 ? focusableIndices.length - 1 : prev);
+        break;
+      }
+      case 'Home':
+        e.preventDefault();
+        focusItemAt(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        focusItemAt(focusableIndices.length - 1);
+        break;
     }
   }
+
+  // Move focus into the menu when it opens and hand it back when it closes.
+  // The markup already claimed `role="menu"`, which tells assistive tech this
+  // is a focus-managed widget — but nothing ever moved focus, so Tab walked
+  // straight past the menu into the page behind it and VoiceOver announced
+  // nothing at all when it appeared.
+  $effect(() => {
+    if (!open) return;
+    previouslyFocused = document.activeElement as HTMLElement | null;
+    // After the {#if} block has rendered the buttons.
+    queueMicrotask(() => focusItemAt(0));
+    return () => {
+      previouslyFocused?.focus?.();
+      previouslyFocused = null;
+    };
+  });
 
   onMount(() => {
     document.addEventListener('mousedown', handleClickOutside, true);
@@ -95,6 +162,7 @@
         <div class="ctx-sep" role="separator"></div>
       {:else}
         <button
+          bind:this={itemEls[i]}
           type="button"
           class="ctx-item"
           class:danger={item.danger}
@@ -136,6 +204,13 @@
   }
   .ctx-item:hover:not(:disabled) {
     background: var(--cream-2);
+  }
+  /* Arrow-key navigation moves focus, so the focused item has to look
+     selected — hover alone leaves keyboard users with no cursor. */
+  .ctx-item:focus-visible {
+    background: var(--cream-2);
+    outline: 2px solid var(--terracotta);
+    outline-offset: -2px;
   }
   .ctx-item:disabled {
     color: var(--ink-4);

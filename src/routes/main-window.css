@@ -61,7 +61,10 @@
   background: var(--butter);
   animation: rci 1.4s ease-in-out infinite;
 }
-.rci.none { color: var(--ink-3); opacity: 0.5; }
+/* No `opacity` here: stacking 0.5 on ink-3 landed at 1.90:1, which made the
+   "no ci" label effectively invisible — the row's whole point is telling you
+   CI status is unknown. ink-3 alone is the muted tone and passes AA. */
+.rci.none { color: var(--ink-3); }
 .rci.none .b { background: var(--ink-4); }
 .rci.cancelled { color: var(--ink-3); }
 .rci.cancelled .b { background: var(--ink-4); }

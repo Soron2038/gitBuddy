@@ -7,6 +7,96 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-28
+
+A correctness and accessibility pass over the whole app, from a full code and
+usability review (`docs/REVIEW-2026-07-27.md`). No new features — but several
+of these were silently costing you data you thought you were seeing.
+
+### Fixed
+
+- **Sync failures are no longer invisible.** A revoked token, an expired PAT, a
+  rate limit or a network outage used to blank every list while the footer kept
+  reporting "Synced just now" — indistinguishable from "you have nothing to do".
+  Every provider error now reaches the UI, the last known rows for a failing
+  account stay on screen instead of disappearing, and the sync timestamp only
+  advances when a poll actually reached a forge.
+- **An account that fails to connect at launch now recovers by itself.** If the
+  machine was offline, on a VPN that wasn't up yet, or behind a captive portal
+  when gitBuddy started, that account stayed dead until the app was restarted —
+  which for a menu-bar app is approximately never. It is now retried each poll.
+- **Connecting an account can no longer wipe your settings.** If `settings.json`
+  was unreadable, the connect flow silently overwrote it with defaults, losing
+  scan roots, editor/terminal commands and every notification preference.
+- **Two accounts that can see the same repo no longer break the view.** The
+  duplicate row crashed the render of the Repos and Releases lists outright.
+  Two self-hosted GitLab or Gitea instances could collide the same way, and
+  additionally showed each other's CI status.
+- **No more notification storm on a fresh install.** The "don't replay the
+  backlog" baseline was being recorded before any account was connected, so the
+  first poll that did reach the network announced every open item at once.
+- **Rate limiting is detected properly.** GitHub answers HTTP 403 both for
+  "Actions disabled here" and for exhausting your rate limit; the second was
+  being read as the first, so a throttled account quietly lost its CI status and
+  releases. Per-account request fan-out is now capped (it could put 120
+  simultaneous requests on the wire per account), and a forge's `Retry-After` is
+  respected.
+- **HTTP 403 from an SSO-enforced org now explains itself** instead of showing a
+  bare status code.
+- **Long-open items stop being re-announced.** An item open longer than the
+  60-day retention window was being treated as brand new, and then again every
+  60 days after that.
+- Items sort by their real timestamp across forges. GitHub, GitLab and
+  Gitea/Forgejo emit three different time formats, and comparing them as plain
+  strings put a Codeberg item up to an instance's UTC offset out of place.
+  Releases from different accounts are now interleaved by date instead of
+  grouped by account.
+- Changing a setting no longer triggers a full network refetch and disk walk.
+  Dragging the sync-frequency slider fired one per pixel.
+- Editor, terminal and "Show in Finder" actions report failures instead of
+  doing nothing visible when the configured command isn't installed.
+- GitLab issues and merge requests can no longer hide each other — they have
+  independent ID sequences, and one of a colliding pair was being dropped.
+- Codeberg/Gitea: a draft release no longer hides the published one; repo
+  pagination survives an instance that caps page size; CI and releases are
+  fetched for the most recently updated repos rather than the oldest.
+- GitLab: a release scheduled for the future no longer displaces the shipped
+  one (badged "NEW", aged "now"); release links with `/` in the tag work.
+- GitHub: "waiting on me" is sorted by recency rather than relevance, so recent
+  items can't fall off the end of the list.
+- Self-hosted GitLab instances are labelled consistently instead of flipping to
+  the gitlab.com badge as soon as a second account was connected.
+- The local scan is bounded in depth, stays on one filesystem, and recognises
+  bare/mirror clones (which it previously walked into but never reported).
+- The popover no longer reports "Not connected" to GitLab-only users, and its
+  Refresh button works for them.
+- Settings written by a newer version of gitBuddy are refused rather than
+  silently stripped, and config writes are flushed to disk before being swapped
+  into place.
+- The main window opens on "On you" — the view the app exists for.
+
+### Accessibility
+
+- Text, accents and status colours now meet WCAG AA contrast. The "no CI" label
+  in particular was effectively invisible.
+- CI and local-clone indicators carry text labels instead of conveying their
+  meaning through colour alone.
+- The context menu takes keyboard focus, navigates with arrow keys, and returns
+  focus where it came from. Orphan clone rows are reachable without a mouse.
+- Sync and refresh state is announced to screen readers; error banners are
+  announced as alerts.
+- Focus is visible again on the search field and the sync-frequency slider.
+- View switchers report which view is selected.
+
+### Changed
+
+- The per-provider `provider_status` and `provider_disconnect` commands were
+  removed. Neither was reachable from the UI, and the latter would have
+  disconnected every account sharing a provider — for GitLab, every self-hosted
+  instance — in a single unconfirmed call. Per-account disconnect is unchanged.
+- If macOS has blocked notifications, the popover now says so instead of
+  leaving you to wonder why nothing arrives.
+
 ## [1.0.3] — 2026-06-12
 
 ### Fixed

@@ -29,12 +29,16 @@ use crate::{
     commands::AppState,
     local_index::{self, LocalRepo},
     notifications::{self, Kind, SeenStore},
-    provider_util::{ProviderBackend, ProviderError},
+    provider_util::{cmp_newest_first, ProviderBackend, ProviderError},
     settings::{self, NotificationSettings, Settings},
     types::{CiRun, CiStatus, ItemReason, Release, Repo, WaitingItem},
 };
 use chrono::Utc;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tauri::{AppHandle, Emitter};
 
 /// Snapshot of every aggregated list as of the most recent successful tick.
@@ -68,24 +72,37 @@ pub fn spawn_loop(app: AppHandle, state: Arc<AppState>) {
 /// The polling task body. Loops forever, alternating ticks and sleeps,
 /// breaking out only if the runtime shuts down.
 async fn run_loop(app: &AppHandle, state: &AppState) {
+    let (mut settings, mut backoff) = tick(app, state).await;
     loop {
-        // The tick hands back the settings it ran with, so the sleep below
-        // needs no second disk read. A save_settings *during* the tick still
-        // takes effect immediately: it fires `settings_reload`, whose stored
-        // permit makes the select! return at once, and the next iteration
-        // re-reads the file.
-        let settings = tick(app, state).await;
-
-        let sleep_for = poll_interval(&settings);
+        // When a forge told us how long to wait, respect it — polling the same
+        // endpoints again on the user's normal cadence while being throttled
+        // just deepens the hole. Never *shorter* than the configured interval.
+        let sleep_for = poll_interval(&settings)
+            .max(backoff.map(Duration::from_secs).unwrap_or(Duration::ZERO));
         tokio::select! {
             _ = tokio::time::sleep(sleep_for) => {}
             _ = state.refresh_trigger.notified() => {
                 // Manual refresh or auth change — tick immediately.
             }
             _ = state.settings_reload.notified() => {
-                // Settings changed; the next iteration's tick reloads them.
+                // Settings changed. Re-read them so a new poll interval takes
+                // effect on the *current* sleep, then go straight back to
+                // sleeping — deliberately without ticking.
+                //
+                // This arm used to fall through into the tick, which meant
+                // every settings mutation triggered a full provider fan-out
+                // across every account plus a complete scan-root disk walk.
+                // Since the UI persists on each change (and the poll-interval
+                // slider fires on `input`), dragging that slider from 5 to 45
+                // burned dozens of full syncs — the exact rate-limit spend the
+                // setting exists to control. Changes that alter the *data*
+                // still refresh explicitly: `import_config` calls
+                // `refresh_now`, as do the auth commands.
+                settings = settings::load(app).unwrap_or_default();
+                continue;
             }
         }
+        (settings, backoff) = tick(app, state).await;
     }
 }
 
@@ -96,25 +113,74 @@ pub fn refresh_now(state: &AppState) {
     state.refresh_trigger.notify_one();
 }
 
-/// Run a single fetch + cache write + diff + notify + event emit. Returns
-/// the settings the tick ran with so `run_loop` can derive its sleep without
-/// a second disk read. Public so `commands.rs` can invoke it during tests;
-/// production drives it from `run_loop`.
-pub async fn tick(app: &AppHandle, state: &AppState) -> Settings {
+/// Run a single fetch + cache write + diff + notify + event emit.
+/// Returns the settings the tick ran with (so `run_loop` needs no second disk
+/// read) plus any backoff a provider asked for.
+async fn tick(app: &AppHandle, state: &AppState) -> (Settings, Option<u64>) {
     // One settings read per tick: the fetch (scan roots), the notification
     // gates and the caller's sleep interval all see the same values. A load
     // failure falls back to defaults for the gates — the worst case is a
     // one-tick over-notify, which is preferable to skipping notifications
     // altogether on a transient disk hiccup.
+    // Reconnect anything that isn't in the registry yet. Normally a no-op
+    // (one file read), but it's what recovers an account whose restore failed
+    // at launch because the machine was offline — without it that account
+    // stays dead until the app is restarted.
+    state.restore_missing(app).await;
+
     let loaded = settings::load(app);
-    let snapshot = fetch_all(state, &loaded).await;
+    let mut snapshot = fetch_all(state, &loaded).await;
     let settings = loaded.unwrap_or_default();
 
     let synced_at = Utc::now().to_rfc3339();
     let now_ts = synced_at.clone();
 
+    // Carry the previous tick's rows over for every account whose fetch
+    // failed, then sort — the merge order is task-completion order, and the
+    // carried-over rows are appended after the fresh ones, so both need the
+    // sort below to produce a stable, chronological list.
+    {
+        let cache = state.cache.read().await;
+        carry_over(
+            &mut snapshot.waiting,
+            &cache.waiting,
+            &snapshot.failed,
+            "list_waiting",
+        );
+        carry_over(
+            &mut snapshot.repos,
+            &cache.repos,
+            &snapshot.failed,
+            "list_repos",
+        );
+        carry_over(
+            &mut snapshot.releases,
+            &cache.releases,
+            &snapshot.failed,
+            "list_releases",
+        );
+        carry_over(&mut snapshot.ci, &cache.ci, &snapshot.failed, "list_ci");
+    }
+
+    // Waiting items and releases most-recent first (the popover's
+    // expectation); repos by last push. Timestamps are compared as parsed
+    // instants, not strings — see `cmp_newest_first`.
+    snapshot
+        .waiting
+        .sort_by(|a, b| cmp_newest_first(&a.updated_at, &b.updated_at));
+    // `pushed_at` is optional (a repo with no commits has none); the empty
+    // string is unparseable and therefore sorts last, which is what we want.
+    snapshot.repos.sort_by(|a, b| {
+        cmp_newest_first(
+            a.pushed_at.as_deref().unwrap_or(""),
+            b.pushed_at.as_deref().unwrap_or(""),
+        )
+    });
+    snapshot
+        .releases
+        .sort_by(|a, b| cmp_newest_first(&a.published_at, &b.published_at));
+
     let mut store = notifications::load(app);
-    notifications::prune(&mut store);
 
     // Map account-id → viewer-login (lowercased). The CI-failure diff
     // needs this to decide whether the user *triggered* a failing run
@@ -131,6 +197,16 @@ pub async fn tick(app: &AppHandle, state: &AppState) -> Settings {
         })
         .unwrap_or_default();
 
+    // A tick that reached no provider successfully has learned nothing: it
+    // must not seed the cold-start baseline (or a fresh install would seed an
+    // empty world and then notify about the user's entire backlog on the first
+    // tick that does reach the network), and it must not refresh
+    // `last_synced_at` (or the footer would claim a sync that never happened).
+    // "No providers connected at all" is not a failure — that tick is
+    // authoritative and correctly says "nothing to sync".
+    let authoritative = snapshot.ok_count > 0 || snapshot.failed.is_empty();
+    let backoff = snapshot.backoff_secs;
+
     diff_and_notify(
         app,
         &settings.notifications,
@@ -138,7 +214,16 @@ pub async fn tick(app: &AppHandle, state: &AppState) -> Settings {
         &viewer_logins,
         &mut store,
         &now_ts,
+        authoritative,
     );
+
+    // Prune *after* the diff, never before. Pruning first drops any entry past
+    // the TTL and the very same tick re-inserts it as unseen, so a review
+    // request that has been open longer than the TTL gets re-notified as
+    // "new" — and again every TTL thereafter. Running the diff first means an
+    // item that is still visible was just refreshed and can never be pruned;
+    // only genuinely gone items age out.
+    notifications::prune(&mut store);
 
     if let Err(e) = notifications::save(app, &store) {
         eprintln!("gitbuddy: persisting notifications.json failed: {e}");
@@ -150,16 +235,25 @@ pub async fn tick(app: &AppHandle, state: &AppState) -> Settings {
         cache.repos = snapshot.repos;
         cache.releases = snapshot.releases;
         cache.ci = snapshot.ci;
-        cache.locals = snapshot.locals;
-        cache.last_synced_at = Some(synced_at.clone());
-        cache.last_error = snapshot.error;
+        // `None` = the scan didn't run; keep whatever the last good tick found.
+        if let Some(locals) = snapshot.locals {
+            cache.locals = locals;
+        }
+        if authoritative {
+            cache.last_synced_at = Some(synced_at.clone());
+        }
+        cache.last_error = if snapshot.errors.is_empty() {
+            None
+        } else {
+            Some(snapshot.errors.join(" · "))
+        };
     }
 
     if let Err(e) = app.emit("data-updated", DataUpdatedPayload { synced_at }) {
         eprintln!("gitbuddy: emitting data-updated failed: {e}");
     }
 
-    settings
+    (settings, backoff)
 }
 
 /// Settings-gated wrapper around [`compute_new_events`]: compute the genuinely
@@ -174,8 +268,9 @@ fn diff_and_notify(
     viewer_logins: &HashMap<String, String>,
     store: &mut SeenStore,
     now_ts: &str,
+    seed_ready: bool,
 ) {
-    for kind in compute_new_events(snapshot, viewer_logins, store, now_ts) {
+    for kind in compute_new_events(snapshot, viewer_logins, store, now_ts, seed_ready) {
         notifications::fire(app, settings, kind);
     }
 }
@@ -191,27 +286,29 @@ fn diff_and_notify(
 ///
 /// On a cold start (`!store.initialised`) every visible item is seeded as
 /// already-seen and the flag flips, so the returned vec is empty — a fresh
-/// install / upgrade never replays a backlog.
+/// install / upgrade never replays a backlog. `seed_ready` gates that flip: a
+/// tick that reached no provider has nothing to seed *from*, and flipping the
+/// flag anyway would make the first tick that does reach the network replay
+/// the user's whole backlog as "new".
 fn compute_new_events(
     snapshot: &FetchSnapshot,
     viewer_logins: &HashMap<String, String>,
     store: &mut SeenStore,
     now_ts: &str,
+    seed_ready: bool,
 ) -> Vec<Kind> {
     let cold_start = !store.initialised;
     let mut events = Vec::new();
 
-    // Each item is recorded as seen exactly once (the first-sight timestamp is
-    // preserved across ticks so the TTL prune can expire it), and an event is
-    // emitted only on a genuinely new sighting: past the cold-start seed and
-    // not already in the store.
+    // Every sighting refreshes the stored timestamp, so it means "last seen"
+    // rather than "first seen". The TTL prune that runs after this diff can
+    // then only expire items that have genuinely disappeared — with a
+    // first-seen stamp, an item open longer than the TTL would be pruned and
+    // immediately re-notified as new, over and over.
     for item in &snapshot.waiting {
         let key = waiting_key(item);
         let already_seen = store.waiting.contains_key(&key);
-        store
-            .waiting
-            .entry(key)
-            .or_insert_with(|| now_ts.to_string());
+        store.waiting.insert(key, now_ts.to_string());
         if !cold_start && !already_seen {
             events.push(Kind::Waiting {
                 reason_label: waiting_reason_label(item.reason).to_string(),
@@ -224,10 +321,7 @@ fn compute_new_events(
     for release in &snapshot.releases {
         let key = release_key(release);
         let already_seen = store.releases.contains_key(&key);
-        store
-            .releases
-            .entry(key)
-            .or_insert_with(|| now_ts.to_string());
+        store.releases.insert(key, now_ts.to_string());
         // `is_new` = published within the last 7 days. Older releases are
         // backfill (the user just connected a long-lived account) — seed them
         // silently so we don't spam on first sight of an old changelog.
@@ -270,10 +364,7 @@ fn compute_new_events(
 
         let key = ci_failure_key(run);
         let already_seen = store.ci_failures.contains_key(&key);
-        store
-            .ci_failures
-            .entry(key)
-            .or_insert_with(|| now_ts.to_string());
+        store.ci_failures.insert(key, now_ts.to_string());
         if !cold_start && !already_seen {
             events.push(Kind::CiFailure {
                 repo: run.repo_full_name.clone(),
@@ -282,7 +373,7 @@ fn compute_new_events(
         }
     }
 
-    if cold_start {
+    if cold_start && seed_ready {
         store.initialised = true;
     }
 
@@ -342,11 +433,28 @@ struct FetchSnapshot {
     repos: Vec<Repo>,
     releases: Vec<Release>,
     ci: Vec<CiRun>,
-    locals: Vec<LocalRepo>,
-    /// Last non-fatal aggregate-level error to surface in the UI (e.g. "local
-    /// scan failed"). Per-provider failures are logged but not propagated
-    /// here so one bad provider doesn't paint the whole status as broken.
-    error: Option<String>,
+    /// `None` when the local scan didn't run (settings unreadable) or panicked,
+    /// so `tick` can leave the previous local list in the cache instead of
+    /// blanking the "Local clones" view on a momentary glitch.
+    locals: Option<Vec<LocalRepo>>,
+    /// Every `(account id, list name)` pair whose fetch failed this tick.
+    /// `tick` carries the previous tick's rows over for each of these, so a
+    /// broken account keeps showing its last-known data instead of silently
+    /// emptying — and so a still-working account is unaffected.
+    failed: HashSet<(String, &'static str)>,
+    /// Human-readable failures to surface in `cache.last_error`, deduplicated
+    /// by `(account, message)` — all four list calls for one dead token
+    /// produce the same message and would otherwise be repeated four times.
+    errors: Vec<String>,
+    /// Count of provider list calls that returned `Ok` this tick. Zero with a
+    /// non-empty `failed` means the tick learned nothing and must not be
+    /// treated as authoritative (no fresh `last_synced_at`, no cold-start
+    /// seed).
+    ok_count: usize,
+    /// Longest `Retry-After` any provider asked for this tick, in seconds.
+    /// The loop waits at least this long before the next tick instead of
+    /// hammering the same endpoints on the user's normal cadence.
+    backoff_secs: Option<u64>,
 }
 
 /// Run every provider's fetches plus the local scan for one tick. Providers
@@ -392,104 +500,153 @@ async fn fetch_all(state: &AppState, settings: &Result<Settings, String>) -> Fet
                 continue;
             }
         };
-        merge_result(
-            &mut snapshot.waiting,
-            waiting,
-            &id,
-            "list_waiting",
-            &mut snapshot.error,
-        );
-        merge_result(
-            &mut snapshot.repos,
-            repos,
-            &id,
-            "list_repos",
-            &mut snapshot.error,
-        );
-        merge_result(
-            &mut snapshot.releases,
-            releases,
-            &id,
-            "list_releases",
-            &mut snapshot.error,
-        );
-        merge_result(&mut snapshot.ci, ci, &id, "list_ci", &mut snapshot.error);
+        // Four near-identical calls rather than a loop: the element types
+        // differ, so there is no array that holds all four.
+        let w = merge_result(&mut snapshot.waiting, waiting, &id);
+        snapshot.record(w, &id, "list_waiting");
+        let r = merge_result(&mut snapshot.repos, repos, &id);
+        snapshot.record(r, &id, "list_repos");
+        let rel = merge_result(&mut snapshot.releases, releases, &id);
+        snapshot.record(rel, &id, "list_releases");
+        let c = merge_result(&mut snapshot.ci, ci, &id);
+        snapshot.record(c, &id, "list_ci");
     }
 
-    // Waiting items most-recent first (the popover's expectation); repos by
-    // last push. Sorting after the merge keeps multi-account output stable
-    // regardless of which provider's task finished first.
-    snapshot
-        .waiting
-        .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    snapshot.repos.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
-
     // Local index scan — runs on a blocking thread because libgit2 is
-    // synchronous. We try, and on failure record the error for the UI but
-    // leave the cache's prior local list intact (the caller decides via
-    // `cache.last_error`) so a momentary scan glitch doesn't blank the
-    // "Local clones" view. When settings failed to load we skip the scan
-    // rather than scanning default roots the user may have removed.
+    // synchronous. On failure `locals` stays `None` so `tick` leaves the
+    // cache's prior local list intact and a momentary scan glitch doesn't
+    // blank the "Local clones" view. When settings failed to load we skip the
+    // scan rather than scanning default roots the user may have removed.
     match settings {
         Ok(s) => {
             let s = s.clone();
             match tokio::task::spawn_blocking(move || local_index::scan(&s)).await {
-                Ok(v) => snapshot.locals = v,
-                Err(e) => snapshot.error = Some(format!("Local scan task panicked: {e}")),
+                Ok(v) => snapshot.locals = Some(v),
+                Err(e) => snapshot
+                    .errors
+                    .push(format!("Local scan task panicked: {e}")),
             }
         }
-        Err(e) => snapshot.error = Some(format!("Loading settings failed: {e}")),
+        Err(e) => snapshot
+            .errors
+            .push(format!("Loading settings failed: {e}")),
     }
 
     snapshot
 }
 
 /// Fold one provider list result into the snapshot: `Ok` extends the list
-/// (stamping the account id), `Err` is logged without aborting the tick.
-/// Rate limiting additionally lands in the snapshot error so the UI shows
-/// it — the user can act on that (lower the poll cadence) in a way they
-/// can't for a transient 5xx.
+/// (stamping the account id), `Err` is recorded without aborting the tick.
+///
+/// Every error is surfaced, not just rate limiting. The pre-2026-07 version
+/// only propagated `RateLimited` and logged the rest to stderr — which a
+/// bundled `.app` discards — so a revoked token or an SSO-enforced 401 blanked
+/// every list while the UI kept reporting "Synced just now". An error the user
+/// cannot act on is still better than a silent lie about having no work.
+/// Splitting the fold from the bookkeeping keeps the generic part free of the
+/// snapshot's four accumulators — passing all of them alongside `out` made for
+/// an eight-argument function.
 fn merge_result<T: Tagged>(
     out: &mut Vec<T>,
     res: Result<Vec<T>, ProviderError>,
     id: &str,
-    what: &str,
-    error_slot: &mut Option<String>,
-) {
+) -> Result<(), ProviderError> {
     match res {
-        Ok(v) => tag_extend(out, v, id),
-        Err(e) => {
-            eprintln!("gitbuddy: {what}[{id}] failed: {e}");
-            if matches!(e, ProviderError::RateLimited { .. }) {
-                *error_slot = Some(e.to_string());
-            }
+        Ok(v) => {
+            tag_extend(out, v, id);
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+impl FetchSnapshot {
+    /// Record the outcome of one provider list call.
+    fn record(&mut self, outcome: Result<(), ProviderError>, id: &str, what: &'static str) {
+        let Err(e) = outcome else {
+            self.ok_count += 1;
+            return;
+        };
+        eprintln!("gitbuddy: {what}[{id}] failed: {e}");
+        if let ProviderError::RateLimited {
+            retry_after_secs: Some(secs),
+            ..
+        } = e
+        {
+            self.backoff_secs = Some(self.backoff_secs.unwrap_or(0).max(secs));
+        }
+        self.failed.insert((id.to_string(), what));
+        // One dead token fails all four list calls with the same message;
+        // repeating it four times in the UI banner helps nobody.
+        let msg = format!("{id}: {e}");
+        if !self.errors.contains(&msg) {
+            self.errors.push(msg);
         }
     }
+}
+
+/// Re-attach the previous tick's rows for every `(account, list)` pair whose
+/// fetch failed this tick. Without this a single failing account empties its
+/// own section of every list; with it, the last-known rows stay visible and
+/// `cache.last_error` explains why they aren't advancing.
+fn carry_over<T: Tagged + Clone>(
+    fresh: &mut Vec<T>,
+    previous: &[T],
+    failed: &HashSet<(String, &'static str)>,
+    what: &'static str,
+) {
+    if failed.is_empty() {
+        return;
+    }
+    fresh.extend(
+        previous
+            .iter()
+            .filter(|it| {
+                it.account_id()
+                    .is_some_and(|id| failed.contains(&(id.to_string(), what)))
+            })
+            .cloned(),
+    );
 }
 
 /// Items the aggregator stamps with the account id that surfaced them, so the
 /// UI can show per-account badges and the diff/notify pass can key by account.
 trait Tagged {
     fn set_account_id(&mut self, id: &str);
+    /// Reading it back is what lets [`carry_over`] pick out exactly the rows
+    /// belonging to an account whose fetch failed.
+    fn account_id(&self) -> Option<&str>;
 }
 impl Tagged for WaitingItem {
     fn set_account_id(&mut self, id: &str) {
         self.account_id = Some(id.to_string());
+    }
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
     }
 }
 impl Tagged for Repo {
     fn set_account_id(&mut self, id: &str) {
         self.account_id = Some(id.to_string());
     }
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 impl Tagged for Release {
     fn set_account_id(&mut self, id: &str) {
         self.account_id = Some(id.to_string());
     }
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 impl Tagged for CiRun {
     fn set_account_id(&mut self, id: &str) {
         self.account_id = Some(id.to_string());
+    }
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
     }
 }
 
@@ -580,6 +737,7 @@ mod tests {
             &HashMap::new(),
             &mut store,
             "2026-06-02T00:00:00Z",
+            true,
         );
         assert!(events.is_empty(), "cold start must emit nothing");
         assert!(store.initialised, "cold start flips the flag");
@@ -600,12 +758,12 @@ mod tests {
             waiting: vec![waiting("1", "acc")],
             ..Default::default()
         };
-        let ev1 = compute_new_events(&snap1, &HashMap::new(), &mut store, "t1");
+        let ev1 = compute_new_events(&snap1, &HashMap::new(), &mut store, "t1", true);
         assert_eq!(ev1.len(), 1, "first sighting of item 1 emits");
         assert!(matches!(ev1[0], Kind::Waiting { .. }));
 
         // Same item again → already seen → nothing.
-        let ev2 = compute_new_events(&snap1, &HashMap::new(), &mut store, "t2");
+        let ev2 = compute_new_events(&snap1, &HashMap::new(), &mut store, "t2", true);
         assert!(ev2.is_empty(), "re-seeing the same item must not emit");
 
         // A brand-new item alongside the old one → only the new one emits.
@@ -613,7 +771,7 @@ mod tests {
             waiting: vec![waiting("1", "acc"), waiting("2", "acc")],
             ..Default::default()
         };
-        let ev3 = compute_new_events(&snap3, &HashMap::new(), &mut store, "t3");
+        let ev3 = compute_new_events(&snap3, &HashMap::new(), &mut store, "t3", true);
         assert_eq!(ev3.len(), 1, "only the unseen item emits");
     }
 
@@ -624,7 +782,7 @@ mod tests {
             waiting: vec![waiting("1", "acc-a"), waiting("1", "acc-b")],
             ..Default::default()
         };
-        let ev = compute_new_events(&snap, &HashMap::new(), &mut store, "t");
+        let ev = compute_new_events(&snap, &HashMap::new(), &mut store, "t", true);
         assert_eq!(ev.len(), 2, "the same id via two accounts is two events");
     }
 
@@ -635,7 +793,7 @@ mod tests {
             releases: vec![release("v1", "acc", false)], // backfill, not new
             ..Default::default()
         };
-        let ev = compute_new_events(&snap, &HashMap::new(), &mut store, "t");
+        let ev = compute_new_events(&snap, &HashMap::new(), &mut store, "t", true);
         assert!(ev.is_empty(), "stale release must not emit");
         // …but it is still recorded so it never emits later either.
         assert!(store.releases.contains_key(&release_key(&snap.releases[0])));
@@ -652,26 +810,26 @@ mod tests {
             ci: vec![ci(CiStatus::Ok, Some("bjoernw"), Some("acc"), "u1")],
             ..Default::default()
         };
-        assert!(compute_new_events(&ok, &viewers, &mut store, "t").is_empty());
+        assert!(compute_new_events(&ok, &viewers, &mut store, "t", true).is_empty());
 
         // Failure triggered by someone else → no event.
         let other = FetchSnapshot {
             ci: vec![ci(CiStatus::Fail, Some("someoneelse"), Some("acc"), "u2")],
             ..Default::default()
         };
-        assert!(compute_new_events(&other, &viewers, &mut store, "t").is_empty());
+        assert!(compute_new_events(&other, &viewers, &mut store, "t", true).is_empty());
 
         // Failure I triggered (case-insensitive match) → one event.
         let mine = FetchSnapshot {
             ci: vec![ci(CiStatus::Fail, Some("BjoernW"), Some("acc"), "u3")],
             ..Default::default()
         };
-        let ev = compute_new_events(&mine, &viewers, &mut store, "t");
+        let ev = compute_new_events(&mine, &viewers, &mut store, "t", true);
         assert_eq!(ev.len(), 1);
         assert!(matches!(ev[0], Kind::CiFailure { .. }));
 
         // Same still-failing run on the next tick → no second event.
-        assert!(compute_new_events(&mine, &viewers, &mut store, "t").is_empty());
+        assert!(compute_new_events(&mine, &viewers, &mut store, "t", true).is_empty());
     }
 
     #[test]
@@ -682,14 +840,14 @@ mod tests {
             ci: vec![ci(CiStatus::Fail, None, Some("acc"), "u")],
             ..Default::default()
         };
-        assert!(compute_new_events(&no_author, &HashMap::new(), &mut store, "t").is_empty());
+        assert!(compute_new_events(&no_author, &HashMap::new(), &mut store, "t", true).is_empty());
 
         // Author present but the account has no known viewer login → skip.
         let no_viewer = FetchSnapshot {
             ci: vec![ci(CiStatus::Fail, Some("me"), Some("acc"), "u")],
             ..Default::default()
         };
-        assert!(compute_new_events(&no_viewer, &HashMap::new(), &mut store, "t").is_empty());
+        assert!(compute_new_events(&no_viewer, &HashMap::new(), &mut store, "t", true).is_empty());
     }
 
     #[test]
@@ -708,6 +866,166 @@ mod tests {
         let mut c2 = c.clone();
         c2.html_url = None;
         assert_eq!(ci_failure_key(&c2), "acc:o/r:main");
+    }
+
+    #[test]
+    fn cold_start_without_a_reachable_provider_does_not_seed() {
+        // The fresh-install shape: the very first tick runs before any account
+        // is connected, so it fetches nothing. Flipping `initialised` here
+        // would make the first tick that *does* reach the network treat the
+        // user's entire backlog as new.
+        let mut store = SeenStore::default();
+        let empty = FetchSnapshot::default();
+        let events = compute_new_events(&empty, &HashMap::new(), &mut store, "t0", false);
+        assert!(events.is_empty());
+        assert!(
+            !store.initialised,
+            "a tick that reached no provider must not seed the baseline"
+        );
+
+        // Account connected; the next tick reaches the network and finds the
+        // backlog. That tick is the seed — still silent, but now it counts.
+        let backlog = FetchSnapshot {
+            waiting: vec![waiting("1", "acc"), waiting("2", "acc")],
+            releases: vec![release("v1", "acc", true)],
+            ..Default::default()
+        };
+        let events = compute_new_events(&backlog, &HashMap::new(), &mut store, "t1", true);
+        assert!(events.is_empty(), "the real cold start still emits nothing");
+        assert!(store.initialised);
+
+        // And only genuinely new items emit from here on.
+        let plus_one = FetchSnapshot {
+            waiting: vec![
+                waiting("1", "acc"),
+                waiting("2", "acc"),
+                waiting("3", "acc"),
+            ],
+            ..Default::default()
+        };
+        let events = compute_new_events(&plus_one, &HashMap::new(), &mut store, "t2", true);
+        assert_eq!(events.len(), 1, "only the item added after the seed emits");
+    }
+
+    #[test]
+    fn sighting_refreshes_the_seen_timestamp() {
+        // The TTL prune keys on this timestamp. If it stayed at first-sight,
+        // an item open longer than the TTL would be pruned and re-notified as
+        // new on the very next tick, forever.
+        let mut store = seeded_store();
+        let snap = FetchSnapshot {
+            waiting: vec![waiting("1", "acc")],
+            ..Default::default()
+        };
+        compute_new_events(&snap, &HashMap::new(), &mut store, "day-1", true);
+        assert_eq!(store.waiting[&waiting_key(&snap.waiting[0])], "day-1");
+
+        compute_new_events(&snap, &HashMap::new(), &mut store, "day-61", true);
+        assert_eq!(
+            store.waiting[&waiting_key(&snap.waiting[0])],
+            "day-61",
+            "a still-visible item must carry a fresh last-seen stamp"
+        );
+    }
+
+    #[test]
+    fn carry_over_restores_only_the_failed_account() {
+        let previous = vec![waiting("1", "acc-broken"), waiting("2", "acc-fine")];
+        // acc-fine fetched cleanly this tick and returned one (newer) item;
+        // acc-broken's fetch failed, so it contributed nothing.
+        let mut fresh = vec![waiting("9", "acc-fine")];
+        let failed = HashSet::from([("acc-broken".to_string(), "list_waiting")]);
+
+        carry_over(&mut fresh, &previous, &failed, "list_waiting");
+
+        let ids: Vec<&str> = fresh.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["9", "1"],
+            "the broken account keeps its last-known row; the healthy one is not duplicated"
+        );
+    }
+
+    #[test]
+    fn carry_over_is_scoped_to_the_failed_list() {
+        // list_repos failed for this account, list_waiting did not — the
+        // waiting list must not resurrect anything.
+        let previous = vec![waiting("1", "acc")];
+        let mut fresh: Vec<WaitingItem> = Vec::new();
+        let failed = HashSet::from([("acc".to_string(), "list_repos")]);
+        carry_over(&mut fresh, &previous, &failed, "list_waiting");
+        assert!(fresh.is_empty());
+    }
+
+    #[test]
+    fn errors_are_all_recorded_not_just_rate_limits() {
+        let mut snapshot = FetchSnapshot::default();
+        let id = "github:github.com:me";
+
+        let outcome = merge_result(
+            &mut snapshot.waiting,
+            Err(ProviderError::Unauthorized("check the token's repo scope")),
+            id,
+        );
+        snapshot.record(outcome, id, "list_waiting");
+
+        assert_eq!(snapshot.ok_count, 0);
+        assert!(snapshot.failed.contains(&(id.to_string(), "list_waiting")));
+        assert_eq!(snapshot.errors.len(), 1);
+        assert!(
+            snapshot.errors[0].contains("authentication failed"),
+            "a dead token must reach the UI, not just stderr: {}",
+            snapshot.errors[0]
+        );
+
+        // The same failure via another list is deduplicated — one dead token
+        // shouldn't render as four identical messages.
+        let outcome = merge_result(
+            &mut snapshot.repos,
+            Err(ProviderError::Unauthorized("check the token's repo scope")),
+            id,
+        );
+        snapshot.record(outcome, id, "list_repos");
+        assert_eq!(snapshot.errors.len(), 1, "identical messages collapse");
+        assert_eq!(snapshot.failed.len(), 2, "but both lists are marked failed");
+    }
+
+    #[test]
+    fn rate_limit_retry_after_becomes_the_tick_backoff() {
+        let mut snapshot = FetchSnapshot::default();
+        for (id, secs) in [("acc-a", 30u64), ("acc-b", 90), ("acc-c", 10)] {
+            let outcome: Result<(), ProviderError> = Err(ProviderError::RateLimited {
+                provider: "GitHub",
+                retry_after_secs: Some(secs),
+            });
+            snapshot.record(outcome, id, "list_repos");
+        }
+        assert_eq!(
+            snapshot.backoff_secs,
+            Some(90),
+            "the loop waits for the most patient forge"
+        );
+    }
+
+    #[test]
+    fn timestamps_sort_across_provider_formats() {
+        // Gitea renders in the instance's timezone, GitLab appends millis,
+        // GitHub uses plain Z. Sorted newest-first these must interleave by
+        // real instant, not by byte order.
+        let mut v = vec![
+            "2026-06-01T14:00:00+02:00", // 12:00 UTC — Gitea
+            "2026-06-01T13:00:00Z",      // 13:00 UTC — GitHub
+            "2026-06-01T12:30:00.000Z",  // 12:30 UTC — GitLab
+        ];
+        v.sort_by(|a, b| cmp_newest_first(a, b));
+        assert_eq!(
+            v,
+            vec![
+                "2026-06-01T13:00:00Z",
+                "2026-06-01T12:30:00.000Z",
+                "2026-06-01T14:00:00+02:00",
+            ]
+        );
     }
 
     #[test]

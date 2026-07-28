@@ -200,6 +200,19 @@ pub fn load(app: &AppHandle) -> Result<Settings, String> {
 
     let on_disk_version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
 
+    // A file from a *newer* build parses fine here — every field has a serde
+    // default, so unknown keys are simply dropped — and the next `save` would
+    // restamp it with today's version number, permanently discarding whatever
+    // that version added. Refuse instead: the `unsupported version` arm in
+    // `migrate_from_value` is unreachable for this case because migration only
+    // runs when the on-disk version is *older*.
+    if on_disk_version > CURRENT_VERSION {
+        return Err(format!(
+            "{path:?} was written by a newer version of gitBuddy (config v{on_disk_version}, this build understands v{CURRENT_VERSION}). \
+             Update gitBuddy, or move that file aside to start from defaults."
+        ));
+    }
+
     let needs_persist = on_disk_version < CURRENT_VERSION;
 
     let mut settings: Settings = if needs_persist {

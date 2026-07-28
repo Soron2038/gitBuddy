@@ -247,7 +247,7 @@ fn parse_poll(body: &str) -> Result<PollOutcome> {
 /// Minimal form-encoder. The full `url` crate would pull in extra dependencies
 /// for a use that boils down to escaping ASCII separators inside known-good
 /// strings (client id, device code, scope list, grant type).
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
