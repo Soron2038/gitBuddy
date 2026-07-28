@@ -253,17 +253,22 @@ detach_stale_scratch_images
 # generate-latest-json.sh globs release/*.app.tar.gz and refuses to run when it
 # finds one whose filename doesn't carry the current version, and these are
 # often the only local copy of what was published.
+# Match on version *and* architecture, not version alone: a universal build
+# and an arch-specific build of the same version can coexist here, and
+# generate-latest-json.sh then maps two artifacts onto darwin-aarch64 and
+# refuses to guess which one you meant.
 if compgen -G "release/*" >/dev/null; then
   STALE=()
   for f in release/*; do
     case "$(basename "$f")" in
-      *"$VERSION"*|archive) ;;
+      "gitBuddy_${VERSION}_${ARCH}".*|archive) ;;
       *) STALE+=("$f") ;;
     esac
   done
   if [[ ${#STALE[@]} -gt 0 ]]; then
     mkdir -p release/archive
-    echo "▸ Moving ${#STALE[@]} artifact(s) from earlier versions to release/archive/"
+    echo "▸ Moving ${#STALE[@]} artifact(s) that aren't ${VERSION}/${ARCH} to release/archive/"
+    printf '    %s\n' "${STALE[@]#release/}"
     mv "${STALE[@]}" release/archive/
     echo
   fi
@@ -278,8 +283,13 @@ echo
 
 # ── Verify before publishing anything ─────────────────────────────────────
 echo "▸ Verifying the signature"
-APP="$(find src-tauri/target -type d -name 'gitBuddy.app' -path '*/release/bundle/macos/*' | head -n 1)"
-[[ -n "$APP" ]] || { echo "error: could not find the built gitBuddy.app." >&2; exit 1; }
+# Pinned to the target we built: a plain `find` across target/ can just as
+# easily turn up a leftover .app from a different architecture and verify that
+# one instead.
+APP="src-tauri/target/$TARGET/release/bundle/macos/gitBuddy.app"
+[[ -d "$APP" ]] || APP="src-tauri/target/release/bundle/macos/gitBuddy.app"
+[[ -d "$APP" ]] || { echo "error: could not find the built gitBuddy.app for $TARGET." >&2; exit 1; }
+echo "  $APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 spctl -a -vv "$APP"
 echo
