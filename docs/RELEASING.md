@@ -6,7 +6,7 @@ checklist for the secrets-and-publish steps that can't live in the repo.
 
 The updater endpoint is configured in `src-tauri/tauri.conf.json` as:
 
-```
+```text
 https://github.com/Soron2038/gitBuddy/releases/latest/download/latest.json
 ```
 
@@ -64,6 +64,23 @@ With these set, `tauri build` signs, notarizes, and staples the bundle.
 ---
 
 ## Per-release steps
+
+**The short version:** bump + commit, then `scripts/release.sh`. That script
+runs everything from step 3 down — build, signature verification, `latest.json`,
+tag, publish — and asks for the two secrets interactively so they never land in
+a file. The manual steps below document what it does (and are still what you
+follow if something breaks mid-way).
+
+```bash
+# 1. bump the version in the three files + lockfiles, commit
+# 2. verify the gate
+# 3. everything else:
+scripts/release.sh              # --dry-run to stop before publishing
+```
+
+It refuses to run on a dirty tree, off `main`, when the tag already points
+somewhere else, or when the release already exists — and it checks the Apple
+credentials against Apple *before* starting a multi-minute build.
 
 ### 1. Bump the version
 
