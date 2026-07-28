@@ -195,14 +195,34 @@ async fn migrate_id_scheme_to_v2(app: &AppHandle) {
         return;
     }
 
-    let mut migrated = Vec::with_capacity(file.accounts.len());
+    let (migrated, all_clean) = migrate_ids(file.accounts, &keychain::SystemKeychain).await;
+    file.accounts = migrated;
+    if all_clean {
+        file.version = accounts::CURRENT_VERSION;
+    }
+    if let Err(e) = accounts::save(app, &file) {
+        eprintln!("gitbuddy: writing v2 accounts.json failed: {e}");
+    }
+}
+
+/// The id-scheme migration itself, over plain data and an injectable Keychain.
+///
+/// Split out from [`migrate_id_scheme_to_v2`] so it can be tested: the wrapper
+/// is only the `accounts.json` read/write, while every decision that can lose
+/// a token lives here. Returns the migrated records plus whether the run was
+/// clean enough to bump the file's version.
+async fn migrate_ids(
+    accounts_in: Vec<Account>,
+    keychain: &dyn keychain::KeychainStore,
+) -> (Vec<Account>, bool) {
+    let mut migrated = Vec::with_capacity(accounts_in.len());
     // Bump `accounts.json`'s version only if every account either was already
     // on v2 or got cleanly upgraded. Leaving the version at v1 on partial
-    // failure lets the next launch retry; otherwise the early-return at the
-    // top of this function would skip migration forever and the failed
-    // accounts would be stuck on v1 ids despite the file claiming v2.
+    // failure lets the next launch retry; otherwise the early-return in the
+    // caller would skip migration forever and the failed accounts would be
+    // stuck on v1 ids despite the file claiming v2.
     let mut all_clean = true;
-    for mut account in file.accounts {
+    for mut account in accounts_in {
         let host = accounts::account_host(account.provider, account.base_url.as_deref());
         let new_id = accounts::make_id(account.provider, &host, &account.login);
         if new_id == account.id {
@@ -210,15 +230,18 @@ async fn migrate_id_scheme_to_v2(app: &AppHandle) {
             continue;
         }
 
-        match keychain::load(&account.id).await {
+        match keychain.load(&account.id).await {
             Ok(Some(secret)) => {
-                if let Err(e) = keychain::save(&new_id, &secret).await {
+                if let Err(e) = keychain.save(&new_id, &secret).await {
+                    // The copy failed, so the old entry is the only one left —
+                    // keep the old id and retry next launch. Deleting here
+                    // would destroy the user's token.
                     eprintln!("gitbuddy: writing v2 keychain entry under {new_id} failed: {e}");
                     migrated.push(account);
                     all_clean = false;
                     continue;
                 }
-                if let Err(e) = keychain::delete(&account.id).await {
+                if let Err(e) = keychain.delete(&account.id).await {
                     eprintln!(
                         "gitbuddy: deleting v1 keychain entry {} failed: {e} — leftover key is harmless",
                         account.id
@@ -247,14 +270,7 @@ async fn migrate_id_scheme_to_v2(app: &AppHandle) {
             }
         }
     }
-
-    file.accounts = migrated;
-    if all_clean {
-        file.version = accounts::CURRENT_VERSION;
-    }
-    if let Err(e) = accounts::save(app, &file) {
-        eprintln!("gitbuddy: writing v2 accounts.json failed: {e}");
-    }
+    (migrated, all_clean)
 }
 
 /// Best-effort one-shot upgrade of the pre-M6.3 single-account Keychain
@@ -1215,6 +1231,158 @@ fn url_host(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keychain::test_support::FakeKeychain;
+
+    fn acct(id: &str, provider: Provider, login: &str, base_url: Option<&str>) -> Account {
+        Account {
+            id: id.into(),
+            provider,
+            login: login.into(),
+            viewer: Viewer {
+                login: login.into(),
+                avatar_url: None,
+                name: None,
+            },
+            auth: AuthMethod::Pat,
+            base_url: base_url.map(Into::into),
+            added_at: "2026-07-28T00:00:00Z".into(),
+        }
+    }
+
+    // ── v1 → v2 account-id migration ──────────────────────────────────────
+    // This is where a bug loses somebody's stored token, and until the
+    // KeychainStore seam existed it could only be reached with a real
+    // Keychain and a Tauri AppHandle.
+
+    #[tokio::test]
+    async fn migration_moves_the_token_to_the_new_id_and_removes_the_old() {
+        let kc = FakeKeychain::with(&[("github:bjoernw", "ghp_secret")]);
+        let (out, clean) = migrate_ids(
+            vec![acct("github:bjoernw", Provider::Github, "bjoernw", None)],
+            &kc,
+        )
+        .await;
+
+        assert!(clean, "a fully successful run may bump the file version");
+        assert_eq!(out[0].id, "github:github.com:bjoernw");
+        assert_eq!(
+            kc.get("github:github.com:bjoernw").as_deref(),
+            Some("ghp_secret")
+        );
+        assert!(
+            kc.get("github:bjoernw").is_none(),
+            "the v1 entry is cleaned up"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_keeps_the_old_entry_when_the_copy_fails() {
+        // The single most destructive thing this code could do: delete the v1
+        // entry after a failed copy would leave the account with no token at
+        // all, and no way back.
+        let kc = FakeKeychain::with(&[("gitlab:bwitt", "glpat_secret")]);
+        kc.fail_save_for("gitlab:gitlab.gwdg.de:bwitt");
+
+        let (out, clean) = migrate_ids(
+            vec![acct(
+                "gitlab:bwitt",
+                Provider::Gitlab,
+                "bwitt",
+                Some("https://gitlab.gwdg.de"),
+            )],
+            &kc,
+        )
+        .await;
+
+        assert!(!clean, "a partial failure must not bump the file version");
+        assert_eq!(out[0].id, "gitlab:bwitt", "the record keeps its old id");
+        assert_eq!(kc.get("gitlab:bwitt").as_deref(), Some("glpat_secret"));
+        assert!(
+            kc.deleted.lock().expect("lock").is_empty(),
+            "nothing may be deleted when the copy didn't land"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_defers_an_unreadable_entry_to_the_next_launch() {
+        // A locked Keychain, or the user dismissing the permission dialog.
+        let kc = FakeKeychain::with(&[("github:bjoernw", "ghp_secret")]);
+        kc.fail_load_for("github:bjoernw");
+
+        let (out, clean) = migrate_ids(
+            vec![acct("github:bjoernw", Provider::Github, "bjoernw", None)],
+            &kc,
+        )
+        .await;
+
+        assert!(!clean);
+        assert_eq!(out[0].id, "github:bjoernw");
+        assert_eq!(kc.keys().len(), 1, "the entry is left exactly as it was");
+    }
+
+    #[tokio::test]
+    async fn migration_does_not_block_the_version_bump_on_an_orphan_record() {
+        // A record whose Keychain entry is already gone is orphaned either
+        // way — retrying it forever would pin the file at v1.
+        let kc = FakeKeychain::default();
+        let (out, clean) = migrate_ids(
+            vec![acct("github:ghost", Provider::Github, "ghost", None)],
+            &kc,
+        )
+        .await;
+
+        assert!(clean);
+        assert_eq!(out[0].id, "github:ghost", "the id can't be moved either");
+    }
+
+    #[tokio::test]
+    async fn migration_leaves_already_v2_records_untouched() {
+        let kc = FakeKeychain::with(&[("github:github.com:bjoernw", "ghp_secret")]);
+        let (out, clean) = migrate_ids(
+            vec![acct(
+                "github:github.com:bjoernw",
+                Provider::Github,
+                "bjoernw",
+                None,
+            )],
+            &kc,
+        )
+        .await;
+
+        assert!(clean);
+        assert_eq!(out[0].id, "github:github.com:bjoernw");
+        assert!(kc.deleted.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_carries_on_past_one_bad_account() {
+        // One failure must not abandon the accounts after it — but it must
+        // still hold the version back.
+        let kc = FakeKeychain::with(&[("github:a", "tok_a"), ("codeberg:b", "tok_b")]);
+        kc.fail_load_for("github:a");
+
+        let (out, clean) = migrate_ids(
+            vec![
+                acct("github:a", Provider::Github, "a", None),
+                acct(
+                    "codeberg:b",
+                    Provider::Codeberg,
+                    "b",
+                    Some("https://codeberg.org"),
+                ),
+            ],
+            &kc,
+        )
+        .await;
+
+        assert!(!clean);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, "github:a", "the failed one is unchanged");
+        assert_eq!(
+            out[1].id, "codeberg:codeberg.org:b",
+            "the healthy one still migrates"
+        );
+    }
 
     #[test]
     fn url_host_extracts_and_normalises() {

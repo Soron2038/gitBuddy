@@ -16,6 +16,8 @@ All commands run from repo root unless noted.
 |------|---------|
 | Dev (Tauri + Vite) | `npm run tauri dev` |
 | Frontend type-check | `npm run check` |
+| Frontend tests | `npm run test` (watch: `npm run test:watch`) |
+| Frontend gate (check + tests) | `npm run verify` |
 | Frontend type-check (watch) | `npm run check:watch` |
 | Rust check | `cd src-tauri && cargo check --all-targets` |
 | Rust lint | `cd src-tauri && cargo clippy --all-targets -- -D warnings` |
@@ -93,7 +95,9 @@ This wrapper does **not** run for `tauri build` (release bundles) — production
 ## Conventions to follow
 
 - **`docs/DECISIONS.md` is append-only**. If a decision is being reversed, add a new dated entry that explains why and points back at the older one — don't edit history.
-- **Rust unit tests live in per-module `#[cfg(test)]` blocks** (~108 tests: provider fixture deserialization, oauth parsing, settings migrations, aggregator diff logic, and libgit2 tests against temp fixture repos in `local_index.rs`). Run via `cargo test --lib`. Includes an HTTP-level **provider conformance suite** (`wiremock` dev-dependency): each provider is pointed at a localhost mock server via the per-provider `#[cfg(test)] for_test` seam and driven through real reqwest requests — pagination, the bearer header, and the rate-limit/401/403/5xx/graceful-404 mappings. Shared test helpers (a `Viewer` stub, a pagination-page generator) live in `provider_util::test_support`. GitHub's API base is a struct field (defaulting to `API_BASE`) purely so this seam can redirect it; `base_url()` still returns `None`.
+- **Rust unit tests live in per-module `#[cfg(test)]` blocks** (~117 tests: provider fixture deserialization, oauth parsing, settings migrations, aggregator diff logic, and libgit2 tests against temp fixture repos in `local_index.rs`). Run via `cargo test --lib`. Includes an HTTP-level **provider conformance suite** (`wiremock` dev-dependency): each provider is pointed at a localhost mock server via the per-provider `#[cfg(test)] for_test` seam and driven through real reqwest requests — pagination, the bearer header, and the rate-limit/401/403/5xx/graceful-404 mappings. Shared test helpers (a `Viewer` stub, a pagination-page generator) live in `provider_util::test_support`. GitHub's API base is a struct field (defaulting to `API_BASE`) purely so this seam can redirect it; `base_url()` still returns `None`.
+- **Frontend tests are Vitest, in `src/**/*.test.ts`** next to the module they cover (`format.test.ts`, `data/api.test.ts`, `data/auth.test.ts` — ~40 tests over the pure logic both windows share: key derivation, dedup, formatters, provider resolution, auth-head derivation). `vitest.config.ts` deliberately does *not* load the SvelteKit plugin — these are plain functions, so a Node environment plus the `$lib` alias keeps the suite at ~100 ms. Component tests would need the plugin plus jsdom; add a second project there if that day comes.
+- **The account migrations take a `keychain::KeychainStore`**, not the free functions, so `migrate_ids` can run against `keychain::test_support::FakeKeychain` (in-memory, with per-key load/save failure injection and a record of every delete). This is the code that can lose a user's stored token — the partial-failure branches are covered, in particular that a failed copy never deletes the v1 entry.
 - **Settings & accounts use `util::atomic_write`** — never write JSON config files directly with `serde_json::to_writer`; the atomic helper survives mid-write crashes.
 - **Frontend uses Svelte 5 runes** (`$state`, `$derived`, etc.) — not the legacy reactive `$:` syntax.
 - **Static adapter, no SSR**: `svelte.config.js` uses `@sveltejs/adapter-static`. The frontend is a single-page bundle Tauri loads from disk; there is no server runtime.
