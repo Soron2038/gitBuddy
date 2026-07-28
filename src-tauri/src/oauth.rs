@@ -70,17 +70,30 @@ pub struct DeviceCodeResponse {
 }
 
 /// Persisted in the Keychain under the account's composite key for OAuth
-/// accounts. Refresh tokens are deliberately not stored — GitHub OAuth Apps
-/// configured for the default (non-expiring) Device Flow don't issue them.
-/// If an org later enables user-to-server token expiration, the access_token
-/// will start failing with 401 and the UI will surface a "reconnect" path,
-/// same as for an expired PAT.
+/// accounts.
+///
+/// `refresh_token` / `expires_in` are captured when GitHub sends them, which
+/// it does once an org enables user-to-server token expiration. They used to
+/// be dropped on the floor, so such an account silently degraded into a full
+/// re-auth every eight hours — and, until the review, did so invisibly,
+/// because the resulting 401 never reached the UI. Storing them now keeps the
+/// door open for a silent refresh; nothing consumes them yet.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
     pub access_token: String,
     pub token_type: String,
     pub scope: String,
     pub obtained_at: String,
+    /// Present only when the token expires. `serde(default)` so blobs written
+    /// by older builds still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// Lifetime of `access_token` in seconds, when GitHub declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<u64>,
+    /// Lifetime of `refresh_token` in seconds, when GitHub declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_expires_in: Option<u64>,
 }
 
 // Hand-rolled Debug redacts `access_token` so a future `dbg!(tokens)` or
@@ -93,9 +106,17 @@ impl std::fmt::Debug for OAuthTokens {
                 "access_token",
                 &format!("<redacted, {} bytes>", self.access_token.len()),
             )
+            .field(
+                "refresh_token",
+                &self
+                    .refresh_token
+                    .as_ref()
+                    .map(|t| format!("<redacted, {} bytes>", t.len())),
+            )
             .field("token_type", &self.token_type)
             .field("scope", &self.scope)
             .field("obtained_at", &self.obtained_at)
+            .field("expires_in", &self.expires_in)
             .finish()
     }
 }
@@ -117,6 +138,40 @@ pub enum PollOutcome {
     Denied,
     /// The device_code has passed its `expires_in` deadline without approval.
     Expired,
+    /// A terminal error the user cannot poll their way out of:
+    /// `unsupported_grant_type`, `incorrect_client_credentials`,
+    /// `incorrect_device_code`, `device_flow_disabled`, or anything else
+    /// GitHub invents later.
+    ///
+    /// These used to fall through to `Err(BadResponse)`, which the frontend
+    /// treated the same as a transient failure — it stopped rescheduling and
+    /// the whole flow died, forcing the user to restart with a fresh code.
+    /// Naming them lets the UI say what actually happened, and lets a genuine
+    /// *transient* failure (a timed-out poll mid-approval) keep polling.
+    Failed {
+        code: String,
+        message: String,
+    },
+}
+
+/// Human-readable explanation for a terminal device-flow error code.
+fn describe_poll_error(code: &str) -> String {
+    match code {
+        "unsupported_grant_type" | "incorrect_client_credentials" => {
+            "gitBuddy's GitHub app configuration was rejected. That's a bug in the app, \
+             not something you can fix — please report it."
+                .into()
+        }
+        "incorrect_device_code" => {
+            "GitHub didn't recognise this sign-in attempt. Start over to get a fresh code.".into()
+        }
+        "device_flow_disabled" => {
+            "Device Flow is disabled for gitBuddy's GitHub app. Use a personal access token \
+             instead."
+                .into()
+        }
+        other => format!("GitHub rejected the sign-in with an unexpected error: {other}."),
+    }
 }
 
 /// Kick off the flow. Returns the `user_code` for the human and the
@@ -188,6 +243,12 @@ fn parse_poll(body: &str) -> Result<PollOutcome> {
         token_type: Option<String>,
         #[serde(default)]
         scope: Option<String>,
+        #[serde(default)]
+        refresh_token: Option<String>,
+        #[serde(default)]
+        expires_in: Option<u64>,
+        #[serde(default)]
+        refresh_token_expires_in: Option<u64>,
     }
 
     // As with parse_device_code, the body is not echoed — a partial-success
@@ -206,11 +267,10 @@ fn parse_poll(body: &str) -> Result<PollOutcome> {
             },
             "access_denied" => PollOutcome::Denied,
             "expired_token" => PollOutcome::Expired,
-            other => {
-                return Err(OAuthError::BadResponse(format!(
-                    "unknown poll error: {other}"
-                )))
-            }
+            other => PollOutcome::Failed {
+                code: other.to_string(),
+                message: describe_poll_error(other),
+            },
         });
     }
 
@@ -223,6 +283,9 @@ fn parse_poll(body: &str) -> Result<PollOutcome> {
                 token_type,
                 scope,
                 obtained_at: Utc::now().to_rfc3339(),
+                refresh_token: raw.refresh_token,
+                expires_in: raw.expires_in,
+                refresh_token_expires_in: raw.refresh_token_expires_in,
             }))
         }
         (access_token, token_type, scope) => {
@@ -336,9 +399,87 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_poll_error_code() {
-        let body = r#"{"error":"surprise_party"}"#;
-        assert!(matches!(parse_poll(body), Err(OAuthError::BadResponse(_))));
+    fn documented_terminal_errors_become_failed_not_a_hard_error() {
+        // These four are documented by GitHub but were unmapped, so they fell
+        // through to Err — which the frontend couldn't tell apart from a
+        // transient network failure, and the whole flow died silently.
+        for code in [
+            "unsupported_grant_type",
+            "incorrect_client_credentials",
+            "incorrect_device_code",
+            "device_flow_disabled",
+        ] {
+            let body = format!(r#"{{"error":"{code}"}}"#);
+            match parse_poll(&body) {
+                Ok(PollOutcome::Failed { code: c, message }) => {
+                    assert_eq!(c, code);
+                    assert!(!message.is_empty(), "{code} needs a human explanation");
+                    assert!(
+                        !message.contains("  "),
+                        "{code}: line continuation left a double space in the message"
+                    );
+                }
+                other => panic!("{code} should map to Failed, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_poll_error_is_terminal_but_named() {
+        match parse_poll(r#"{"error":"surprise_party"}"#) {
+            Ok(PollOutcome::Failed { code, message }) => {
+                assert_eq!(code, "surprise_party");
+                assert!(message.contains("surprise_party"));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn success_captures_refresh_token_and_expiry_when_present() {
+        // GitHub sends these once an org enables user-to-server token
+        // expiration. Dropping them meant a full re-auth every 8 hours.
+        let body = r#"{"access_token":"gho_abc","token_type":"bearer","scope":"repo",
+                       "refresh_token":"ghr_xyz","expires_in":28800,
+                       "refresh_token_expires_in":15811200}"#;
+        match parse_poll(body).expect("parses") {
+            PollOutcome::Success(t) => {
+                assert_eq!(t.refresh_token.as_deref(), Some("ghr_xyz"));
+                assert_eq!(t.expires_in, Some(28800));
+                assert_eq!(t.refresh_token_expires_in, Some(15_811_200));
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+
+        // The non-expiring case (today's default) still works and leaves them None.
+        let body = r#"{"access_token":"gho_abc","token_type":"bearer","scope":"repo"}"#;
+        match parse_poll(body).expect("parses") {
+            PollOutcome::Success(t) => {
+                assert!(t.refresh_token.is_none());
+                assert!(t.expires_in.is_none());
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn debug_redacts_both_tokens() {
+        let t = OAuthTokens {
+            access_token: "gho_supersecret".into(),
+            token_type: "bearer".into(),
+            scope: "repo".into(),
+            obtained_at: "2026-07-28T00:00:00Z".into(),
+            refresh_token: Some("ghr_alsosecret".into()),
+            expires_in: Some(28800),
+            refresh_token_expires_in: None,
+        };
+        let rendered = format!("{t:?}");
+        assert!(!rendered.contains("gho_supersecret"));
+        assert!(
+            !rendered.contains("ghr_alsosecret"),
+            "the refresh token is just as sensitive as the access token"
+        );
+        assert!(rendered.contains("redacted"));
     }
 
     #[test]

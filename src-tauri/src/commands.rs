@@ -603,11 +603,22 @@ pub async fn gh_oauth_begin() -> Result<DeviceCodeResponse, String> {
 #[derive(serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GhOAuthPollResult {
-    Success { viewer: Viewer },
+    Success {
+        viewer: Viewer,
+    },
     Pending,
-    SlowDown { interval: u64 },
+    SlowDown {
+        interval: u64,
+    },
     Denied,
     Expired,
+    /// Terminal, and not something more polling will fix — see
+    /// [`oauth::PollOutcome::Failed`]. Carries a message the UI can show
+    /// verbatim instead of a raw error code.
+    Failed {
+        code: String,
+        message: String,
+    },
 }
 
 #[tauri::command]
@@ -626,6 +637,7 @@ pub async fn gh_oauth_poll(
         PollOutcome::SlowDown { interval } => Ok(GhOAuthPollResult::SlowDown { interval }),
         PollOutcome::Denied => Ok(GhOAuthPollResult::Denied),
         PollOutcome::Expired => Ok(GhOAuthPollResult::Expired),
+        PollOutcome::Failed { code, message } => Ok(GhOAuthPollResult::Failed { code, message }),
         PollOutcome::Success(tokens) => {
             // Validate the token works against /user and populate the viewer.
             // If GitHub immediately rejects it, surface as an error so the
@@ -719,6 +731,25 @@ pub fn open_main(app: AppHandle) -> Result<(), String> {
 pub fn open_main_settings(app: AppHandle) -> Result<(), String> {
     open_main(app.clone())?;
     let _ = app.emit("main-window-navigate", "settings");
+    Ok(())
+}
+
+/// Open the main window straight into "add an account", optionally with a
+/// provider preselected.
+///
+/// The popover used to carry its own connect form. That form only ever
+/// offered a personal access token — never the OAuth device flow the README
+/// calls the recommended path — and allowed exactly one account per provider,
+/// while the backend and the main window have supported several since M6.3.
+/// Worse, its primary button opened a browser, and the popover's
+/// focus-loss handler promptly hid the window the user was in the middle of
+/// filling in. Handing the flow to the main window removes all three at once
+/// and leaves a single connect implementation to maintain.
+#[tauri::command]
+pub fn open_main_add_account(app: AppHandle, provider: Option<Provider>) -> Result<(), String> {
+    open_main(app.clone())?;
+    let slug = provider.map(accounts::provider_slug).unwrap_or("");
+    let _ = app.emit("main-window-add-account", slug);
     Ok(())
 }
 

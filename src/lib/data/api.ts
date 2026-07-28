@@ -322,7 +322,11 @@ export type GhOAuthPollResult =
   | { kind: 'pending' }
   | { kind: 'slow_down'; interval: number }
   | { kind: 'denied' }
-  | { kind: 'expired' };
+  | { kind: 'expired' }
+  /** Terminal — GitHub rejected the flow itself (bad client config, Device
+   *  Flow disabled, unrecognised device code). `message` is written for the
+   *  user and can be shown verbatim; polling again won't help. */
+  | { kind: 'failed'; code: string; message: string };
 
 /** Start the GitHub OAuth Device Flow. Returns the user_code for the human
  *  plus the device_code + interval the caller echoes back into ghOAuthPoll. */
@@ -374,6 +378,13 @@ export const openMainWindow = (): Promise<void> => invoke('open_main');
  *  forwards its gear-icon click here — settings live in the main window so
  *  they have room to breathe. */
 export const openMainSettings = (): Promise<void> => invoke('open_main_settings');
+
+/** Reveal the main window and open its "add an account" form, optionally with
+ *  `provider` preselected. The popover's onboarding forwards here instead of
+ *  carrying a second connect implementation — see the note on the Rust
+ *  command for why the popover is a bad place for that flow. */
+export const openMainAddAccount = (provider?: Provider): Promise<void> =>
+  invoke('open_main_add_account', { provider: provider ?? null });
 
 // ── Aggregated data (across all connected providers) ───────────────────────
 

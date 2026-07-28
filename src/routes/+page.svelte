@@ -206,6 +206,10 @@
   let oauthInterval = $state(5);
   let oauthRemaining = $state(0);
   let oauthErrorMsg = $state('');
+  /** A poll that failed transiently. Shown as a soft note *inside* the
+   *  in-flight panel — the flow keeps running, so this must not look like the
+   *  terminal error state. Cleared as soon as a poll succeeds. */
+  let oauthTransientError = $state('');
   let oauthCopied = $state(false);
   let oauthPollHandle: ReturnType<typeof setTimeout> | null = null;
   /** Handle for the transient "Copied" label reset, so teardown can cancel it. */
@@ -719,6 +723,19 @@
       }
     });
 
+    // The popover's onboarding forwards here rather than carrying its own
+    // connect form. Land on Settings with the add-account form already open
+    // and the chosen provider selected, so the hand-off costs the user one
+    // window switch and no extra clicks.
+    const unlistenAddPromise = listen<string>('main-window-add-account', (e) => {
+      view = 'settings';
+      startAddingProvider();
+      const slug = e.payload;
+      if (slug === 'github' || slug === 'gitlab' || slug === 'codeberg') {
+        chosenProvider = slug;
+      }
+    });
+
     return () => {
       cancelled = true;
       // A device-flow in progress must not keep polling (and writing state)
@@ -733,6 +750,7 @@
       void unlistenProviderPromise.then((u) => u());
       void unlistenSettingsPromise.then((u) => u());
       void unlistenNavPromise.then((u) => u());
+      void unlistenAddPromise.then((u) => u());
     };
   });
 
@@ -1126,6 +1144,7 @@
     oauthInterval = 5;
     oauthRemaining = 0;
     oauthErrorMsg = '';
+    oauthTransientError = '';
     oauthCopied = false;
   }
 
@@ -1182,6 +1201,7 @@
     if (oauthState !== 'awaiting' || !oauthDeviceCode) return;
     try {
       const r = await ghOAuthPoll(oauthDeviceCode);
+      oauthTransientError = '';
       switch (r.kind) {
         case 'pending':
           scheduleOAuthPoll(oauthInterval);
@@ -1206,6 +1226,17 @@
             oauthCountdownHandle = null;
           }
           break;
+        case 'failed':
+          // Terminal: GitHub rejected the flow itself (bad client config,
+          // Device Flow switched off, unrecognised device code). More polling
+          // cannot fix any of these, so stop and say what happened.
+          oauthErrorMsg = r.message;
+          oauthState = 'error';
+          if (oauthCountdownHandle) {
+            clearInterval(oauthCountdownHandle);
+            oauthCountdownHandle = null;
+          }
+          break;
         case 'success':
           resetOAuthState();
           addingProvider = false;
@@ -1214,11 +1245,20 @@
           break;
       }
     } catch (e) {
-      // Network/parse failure: keep the flow alive — the next scheduled
-      // poll might succeed. Show a soft inline error so the user knows
-      // why progress stalled.
-      oauthErrorMsg = String(e);
-      oauthState = 'error';
+      // Transient failure — a timed-out request, a dropped connection. The
+      // comment here always claimed the flow stayed alive, but setting
+      // `oauthState = 'error'` ended it: `runOAuthPoll` returns early unless
+      // the state is 'awaiting', so a single hiccup during the ~15-minute
+      // approval window killed the whole attempt and the user had to start
+      // over with a fresh code. Terminal conditions now arrive as the
+      // 'failed' case above, which frees this branch to do what it says.
+      oauthTransientError = String(e);
+      if (oauthRemaining > 0) {
+        scheduleOAuthPoll(oauthInterval);
+      } else {
+        oauthErrorMsg = 'The code expired before approval. Start over to get a fresh one.';
+        oauthState = 'error';
+      }
     }
   }
 
@@ -1947,6 +1987,13 @@
                         Waiting for approval —
                         {Math.floor(oauthRemaining / 60)}m {oauthRemaining % 60}s left
                       </p>
+                      <!-- A poll that failed transiently: the flow is still
+                           running, so this is a note, not the error state. -->
+                      {#if oauthTransientError}
+                        <p class="oauth-retry-note">
+                          Couldn't reach GitHub on the last check — still trying.
+                        </p>
+                      {/if}
 
                       <button
                         type="button"
@@ -2517,7 +2564,9 @@
     top: -4px;
     right: -4px;
     background: var(--terracotta);
-    color: white;
+    /* --paper, not white: terracotta lightens in dark mode, and white on it
+       drops to ~2:1. --paper flips to espresso there and stays legible. */
+    color: var(--paper);
     font-size: 9.5px;
     font-weight: 600;
     border-radius: 999px;
@@ -3517,6 +3566,13 @@
     font-size: 12px;
     font-family: var(--font-mono);
   }
+  /* Deliberately not the plum error styling: the flow is still alive and the
+     next poll may well succeed. */
+  .oauth-retry-note {
+    margin: 6px 0 0;
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
   .oauth-spinner {
     width: 10px;
     height: 10px;
@@ -3600,7 +3656,9 @@
     cursor: pointer;
     transition: background 0.15s, opacity 0.15s;
   }
-  .primary:hover:not(:disabled) { background: #B05738; }
+  .primary:hover:not(:disabled) {
+    background: var(--terracotta-hover);
+  }
   .primary:disabled { opacity: 0.5; cursor: default; }
   .secondary {
     height: 36px;

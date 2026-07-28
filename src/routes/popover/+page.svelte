@@ -17,8 +17,6 @@
   import ContextMenu, { type MenuItem } from '$lib/ContextMenu.svelte';
   import {
     humaniseSync,
-    hostSuggestions,
-    connectedHosts,
     repoAge,
     shortenPath,
     repoKey,
@@ -28,11 +26,9 @@
   import { deriveProviderHeads } from '$lib/data/auth';
   import {
     accountsList,
-    ghSetToken,
-    glSetToken,
-    cbSetToken,
     openMainWindow,
     openMainSettings,
+    openMainAddAccount,
     listWaiting,
     listRepos,
     listReleases,
@@ -49,6 +45,7 @@
     providerLabel,
     providerChipText,
     providerCssClass,
+    type Provider,
     type Viewer,
     type GitLabStatus,
     type CodebergStatus,
@@ -94,15 +91,6 @@
   let refreshing = $state(false);
   let error: string | null = $state(null);
 
-  // Initial-onboarding state — used only when no provider is connected.
-  // Adding more providers later happens in the main window's Settings view,
-  // so we don't track an "adding another" mode here anymore.
-  let chosenProvider: 'github' | 'gitlab' | 'codeberg' = $state('github');
-  let tokenInput = $state('');
-  let gitlabBaseInput = $state('https://gitlab.com');
-  let codebergBaseInput = $state('https://codeberg.org');
-  let connecting = $state(false);
-
   // Settings is read-only here — toggling lives in the main window.
   // Loaded on mount so e.g. `editor_command` is available for the row
   // context menu without an extra round-trip per render.
@@ -116,12 +104,10 @@
   let menuItems: MenuItem[] = $state([]);
 
   let connected = $derived(viewer !== null || gl !== null || cb !== null);
-  /** The popover shows the onboarding form when *no* provider is connected.
-   *  Adding more providers after that lives in the main window's Settings. */
+  /** With nothing connected the popover shows its hand-off screen; once an
+   *  account exists it becomes a pure viewer. Connecting — the first account
+   *  and every one after it — happens in the main window's Settings. */
   let showOnboarding = $derived(!connected);
-  let canAddGithub = $derived(viewer === null);
-  let canAddGitlab = $derived(gl === null);
-  let canAddCodeberg = $derived(cb === null);
   let displayName = $derived.by(() => {
     if (viewer) return viewer.name ?? viewer.login;
     if (gl) return gl.viewer.name ?? gl.viewer.login;
@@ -130,19 +116,6 @@
   });
 
   let localByKey = $derived(indexLocalByRemote(locals));
-
-  /** Hosts seen in local orphan clones, filtered to those that aren't
-   *  already a connected provider. Drives the quick-pick chips for both
-   *  GitLab and Codeberg onboarding so the user doesn't have to retype
-   *  `gitlab.gwdg.de` or `codeberg.org`. */
-  // Thin wrapper: the shared logic lives in `$lib/format`, but keeping the
-  // `gl`/`cb` reads inside a function avoids TS narrowing them to `null` in
-  // the top-level reactive flow (they're assigned on connect).
-  function hostSuggestionsFor(target: 'gitlab' | 'codeberg'): string[] {
-    return hostSuggestions(target, locals, connectedHosts([gl?.base_url, cb?.base_url]));
-  }
-  let gitlabHostSuggestions = $derived(hostSuggestionsFor('gitlab'));
-  let codebergHostSuggestions = $derived(hostSuggestionsFor('codeberg'));
 
   /** Local repos whose `origin` doesn't match any of the user's known remote
    *  accounts — typically scratch clones, abandoned forks, or repos hosted
@@ -237,11 +210,6 @@
 
       await refreshAuth();
 
-      // Default the onboarding tab to whichever provider can still be added.
-      if (!viewer && (gl || cb)) chosenProvider = 'github';
-      else if (viewer && !gl && cb) chosenProvider = 'gitlab';
-      else if (viewer && gl && !cb) chosenProvider = 'codeberg';
-
       if (viewer || gl || cb) {
         items = await listWaiting();
         try {
@@ -260,27 +228,13 @@
     }
   });
 
-  async function connect() {
-    if (!tokenInput.trim()) return;
-    if (chosenProvider === 'gitlab' && !gitlabBaseInput.trim()) return;
-    if (chosenProvider === 'codeberg' && !codebergBaseInput.trim()) return;
-    connecting = true;
-    error = null;
+  /** Hand the connect flow to the main window, with the provider the user
+   *  picked already selected there. */
+  async function openAddAccount(provider: Provider) {
     try {
-      if (chosenProvider === 'github') {
-        await ghSetToken(tokenInput.trim());
-      } else if (chosenProvider === 'gitlab') {
-        await glSetToken(tokenInput.trim(), gitlabBaseInput.trim());
-      } else {
-        await cbSetToken(tokenInput.trim(), codebergBaseInput.trim());
-      }
-      await refreshAuth();
-      tokenInput = '';
-      await loadInitialData();
+      await openMainAddAccount(provider);
     } catch (e) {
       error = String(e);
-    } finally {
-      connecting = false;
     }
   }
 
@@ -646,199 +600,39 @@
         <p class="loading-text">Connecting…</p>
       </div>
     {:else if showOnboarding}
-      <!-- Onboarding: no account, or user clicked "+ add provider". -->
-      <div class="setup">
-        {#if connected}
-          <h2>Add <em>provider</em>.</h2>
-          <p class="lede">
-            Connect another forge to see all your work in one place.
-          </p>
-        {:else}
-          <h2>Hi — let's <em>meet</em>.</h2>
-          <p class="lede">
-            Connect a Git forge to get started. Tokens are stored in your
-            macOS Keychain and never sent anywhere else.
-          </p>
-        {/if}
+      <!-- Onboarding hands off to the main window rather than carrying its
+           own connect form. That form was PAT-only (no OAuth device flow,
+           which is the recommended path), capped at one account per provider,
+           and its own "create a token" button opened a browser — which made
+           the focus-loss handler hide the window mid-setup. One connect
+           implementation, in the window that has room for it. -->
+      <div class="setup setup-handoff">
+        <Buddy size={56} />
+        <h2>Hi — let's <em>meet</em>.</h2>
+        <p class="lede">
+          Connect a Git forge and gitBuddy starts watching it. Tokens go into
+          your macOS Keychain and are never sent anywhere else.
+        </p>
 
-        <!-- Provider selector: only render the tab strip when more than
-             one slot is still empty; otherwise we'd lock to the only option. -->
-        {#if [canAddGithub, canAddGitlab, canAddCodeberg].filter(Boolean).length > 1}
-          <div class="provider-tabs">
-            {#if canAddGithub}
-              <button
-                class:on={chosenProvider === 'github'}
-                onclick={() => (chosenProvider = 'github')}
-              >
-                GitHub
-              </button>
-            {/if}
-            {#if canAddGitlab}
-              <button
-                class:on={chosenProvider === 'gitlab'}
-                onclick={() => (chosenProvider = 'gitlab')}
-              >
-                GitLab
-              </button>
-            {/if}
-            {#if canAddCodeberg}
-              <button
-                class:on={chosenProvider === 'codeberg'}
-                onclick={() => (chosenProvider = 'codeberg')}
-              >
-                Codeberg
-              </button>
-            {/if}
-          </div>
-        {/if}
-
-        {#if chosenProvider === 'github' && canAddGithub}
-          <button
-            class="token-link"
-            onclick={() =>
-              openExternal(
-                'https://github.com/settings/tokens/new?description=gitBuddy&scopes=repo,read:org',
-              )}
-          >
-            Create a token on GitHub →
-          </button>
-
-          <label class="token-input">
-            <span class="lbl">Personal access token</span>
-            <input
-              type="password"
-              placeholder="ghp_… or github_pat_…"
-              bind:value={tokenInput}
-              onkeydown={(e) => e.key === 'Enter' && connect()}
-              disabled={connecting}
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </label>
-        {:else if chosenProvider === 'gitlab' && canAddGitlab}
-          <label class="token-input">
-            <span class="lbl">Instance URL</span>
-            <input
-              type="url"
-              placeholder="https://gitlab.com"
-              bind:value={gitlabBaseInput}
-              disabled={connecting}
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </label>
-
-          {#if gitlabHostSuggestions.length > 0}
-            <div class="host-hints">
-              <span class="hint">Found in your local clones:</span>
-              <div class="host-chips">
-                {#each gitlabHostSuggestions as host}
-                  <button
-                    type="button"
-                    class="host-chip"
-                    onclick={() => (gitlabBaseInput = `https://${host}`)}
-                  >
-                    {host}
-                  </button>
-                {/each}
-              </div>
-            </div>
-          {/if}
-
-          <button
-            class="token-link"
-            onclick={() =>
-              openExternal(
-                `${gitlabBaseInput.replace(/\/$/, '')}/-/user_settings/personal_access_tokens?name=gitBuddy&scopes=api,read_user`,
-              )}
-          >
-            Create a token on this GitLab →
-          </button>
-
-          <label class="token-input">
-            <span class="lbl">Personal access token</span>
-            <input
-              type="password"
-              placeholder="glpat-…"
-              bind:value={tokenInput}
-              onkeydown={(e) => e.key === 'Enter' && connect()}
-              disabled={connecting}
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </label>
-        {:else if chosenProvider === 'codeberg' && canAddCodeberg}
-          <label class="token-input">
-            <span class="lbl">Instance URL</span>
-            <input
-              type="url"
-              placeholder="https://codeberg.org"
-              bind:value={codebergBaseInput}
-              disabled={connecting}
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </label>
-
-          {#if codebergHostSuggestions.length > 0}
-            <div class="host-hints">
-              <span class="hint">Found in your local clones:</span>
-              <div class="host-chips">
-                {#each codebergHostSuggestions as host}
-                  <button
-                    type="button"
-                    class="host-chip"
-                    onclick={() => (codebergBaseInput = `https://${host}`)}
-                  >
-                    {host}
-                  </button>
-                {/each}
-              </div>
-            </div>
-          {/if}
-
-          <button
-            class="token-link"
-            onclick={() =>
-              openExternal(
-                `${codebergBaseInput.replace(/\/$/, '')}/user/settings/applications`,
-              )}
-          >
-            Create a token on this Gitea/Forgejo →
-          </button>
-
-          <label class="token-input">
-            <span class="lbl">Personal access token</span>
-            <input
-              type="password"
-              placeholder="token"
-              bind:value={tokenInput}
-              onkeydown={(e) => e.key === 'Enter' && connect()}
-              disabled={connecting}
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </label>
-        {/if}
-
-        {#if error}
-          <p class="err">{error}</p>
-        {/if}
-
-        <div class="setup-actions">
-          <button
-            class="primary"
-            onclick={connect}
-            disabled={
-              connecting ||
-              !tokenInput.trim() ||
-              (chosenProvider === 'gitlab' && !gitlabBaseInput.trim()) ||
-              (chosenProvider === 'codeberg' && !codebergBaseInput.trim())
-            }
-          >
-            {connecting ? 'Verifying…' : 'Connect'}
-          </button>
+        <div class="handoff-choices">
+          {#each [
+            { id: 'github', label: 'GitHub', hint: 'Sign in with your browser — no token to create' },
+            { id: 'gitlab', label: 'GitLab', hint: 'gitlab.com or your own instance' },
+            { id: 'codeberg', label: 'Codeberg', hint: 'Codeberg, Gitea or Forgejo' },
+          ] as choice (choice.id)}
+            <button
+              type="button"
+              class="handoff-btn"
+              onclick={() => void openAddAccount(choice.id as Provider)}
+            >
+              <span class="handoff-label">{choice.label}</span>
+              <span class="handoff-hint">{choice.hint}</span>
+              <span class="handoff-arrow" aria-hidden="true">→</span>
+            </button>
+          {/each}
         </div>
+
+        <p class="handoff-note">Opens the main window, where there's room for it.</p>
       </div>
     {:else}
       <p class="greeting">
@@ -1214,6 +1008,72 @@
     color: var(--ink);
   }
   .setup h2 em { font-style: italic; color: var(--terracotta); }
+
+  /* Hand-off variant: a greeting and three destinations, no form. Centred
+     because there's nothing to fill in — the eye should land on the choices. */
+  .setup-handoff {
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+  }
+  .setup-handoff .lede {
+    margin: 0 0 4px;
+  }
+  .handoff-choices {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    margin-top: 4px;
+  }
+  .handoff-btn {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      'label arrow'
+      'hint  arrow';
+    align-items: center;
+    gap: 0 10px;
+    width: 100%;
+    padding: 11px 14px;
+    text-align: left;
+    background: var(--paper);
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-md);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, transform 0.15s;
+  }
+  .handoff-btn:hover {
+    background: var(--cream);
+    border-color: var(--terracotta);
+    transform: translateY(-1px);
+  }
+  .handoff-btn:focus-visible {
+    outline: 2px solid var(--terracotta);
+    outline-offset: 2px;
+  }
+  .handoff-label {
+    grid-area: label;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .handoff-hint {
+    grid-area: hint;
+    font-size: 11.5px;
+    color: var(--ink-3);
+    line-height: 1.35;
+  }
+  .handoff-arrow {
+    grid-area: arrow;
+    font-size: 15px;
+    color: var(--terracotta);
+  }
+  .handoff-note {
+    margin: 2px 0 0;
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
   .setup .lede {
     margin: 0;
     color: var(--ink-2);
@@ -1228,30 +1088,6 @@
   }
   .token-link:hover { text-decoration: underline; }
   .token-input { display: flex; flex-direction: column; gap: 6px; }
-  .token-input .lbl {
-    font-size: 11.5px;
-    color: var(--ink-3);
-    font-family: var(--font-mono);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-  .token-input input {
-    height: 36px;
-    padding: 0 12px;
-    border: 1px solid var(--line-2);
-    border-radius: var(--r-sm);
-    font: inherit;
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    background: var(--paper-2);
-    color: var(--ink);
-    outline: none;
-    transition: border-color 0.15s, background 0.15s;
-  }
-  .token-input input:focus {
-    border-color: var(--terracotta);
-    background: var(--paper);
-  }
   .primary {
     height: 38px;
     background: var(--terracotta);
@@ -1279,7 +1115,6 @@
     gap: 8px;
     margin-top: 4px;
   }
-  .setup-actions .primary { flex: 1; }
 
   /* Provider segmented control — same shape as the in-list tab strip but a
      little tighter and inline in the setup form. */
@@ -1292,19 +1127,6 @@
     font-size: 12.5px;
     margin-bottom: 4px;
   }
-  .provider-tabs button {
-    flex: 1;
-    padding: 6px 8px;
-    color: var(--ink-2);
-    border-radius: 9px;
-    text-align: center;
-  }
-  .provider-tabs button.on {
-    background: var(--paper);
-    color: var(--ink);
-    font-weight: 600;
-    box-shadow: var(--shadow-1);
-  }
 
   /* Quick-pick chips for hosts seen in local orphan clones — clicking one
      fills the GitLab instance URL field so the user doesn't have to retype
@@ -1314,12 +1136,6 @@
     flex-direction: column;
     gap: 6px;
     margin-top: -4px;
-  }
-  .host-hints .hint {
-    font-size: 11px;
-    color: var(--ink-3);
-    font-family: var(--font-mono);
-    letter-spacing: 0.02em;
   }
   .host-chips {
     display: flex;

@@ -61,6 +61,7 @@ pub fn run() {
             commands::accounts_disconnect,
             commands::open_main,
             commands::open_main_settings,
+            commands::open_main_add_account,
             commands::list_waiting,
             commands::list_repos,
             commands::list_releases,
@@ -152,6 +153,13 @@ pub fn run() {
             // also flip the activation policy back to Accessory so the dock
             // icon disappears, signalling "main window is closed".
             if let Some(main) = app.get_webview_window("main") {
+                // Match the *window's* background to the system appearance.
+                // The webview paints its own surface a moment later, but the
+                // window beneath is what shows during that moment and around
+                // the overlay title bar — with the hardcoded cream from
+                // tauri.conf.json it flashed white on every open in dark mode.
+                apply_window_background(&main);
+
                 let main_clone = main.clone();
                 let app_handle = app.handle().clone();
                 main.on_window_event(move |event| {
@@ -171,6 +179,26 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Paint the window background to match the system appearance.
+///
+/// `tauri.conf.json` can only carry one literal `backgroundColor`, and it held
+/// the light paper tone — so opening the main window in dark mode flashed a
+/// white rectangle before the webview drew over it, and the strip around the
+/// overlay title bar stayed light. These two values are the `--paper` token
+/// from `app.css` in each scheme; keep them in sync with it.
+fn apply_window_background(window: &tauri::WebviewWindow) {
+    use tauri::{window::Color, Theme};
+    let color = match window.theme() {
+        Ok(Theme::Dark) => Color(0x1A, 0x15, 0x12, 0xFF),
+        // Light, or a theme this Tauri version doesn't know: the light tone is
+        // the safe default, since that's what the app looked like before.
+        _ => Color(0xFF, 0xFD, 0xF8, 0xFF),
+    };
+    if let Err(e) = window.set_background_color(Some(color)) {
+        eprintln!("gitbuddy: setting window background failed: {e}");
+    }
 }
 
 fn open_main_window(app: &tauri::AppHandle) {

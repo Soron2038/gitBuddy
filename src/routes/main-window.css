@@ -35,7 +35,10 @@
   font-size: 11px;
   font-family: var(--font-display);
 }
-.pchip.gh { background: #2E211B; color: #FAF4EA; }
+/* The GitHub chip is the only one that isn't a saturated gradient — it's
+   ink-on-cream, so it has to flip with the scheme or it turns into a dark
+   block on a dark ground. The saturated chips below read on both. */
+.pchip.gh { background: var(--ink); color: var(--paper); }
 .pchip.gl { background: linear-gradient(135deg, #E89C5C, #C66243); color: white; }
 .pchip.cb { background: linear-gradient(135deg, #8DBBC9, #4E7A8A); color: white; }
 .pchip.gl-self { background: linear-gradient(135deg, #B6A5C9, #6E5E80); color: white; }
@@ -56,7 +59,7 @@
 }
 .rci.fail { color: var(--terracotta); }
 .rci.fail .b { background: var(--terracotta); }
-.rci.run { color: #B68C2C; }
+.rci.run { color: var(--butter-ink); }
 .rci.run .b {
   background: var(--butter);
   animation: rci 1.4s ease-in-out infinite;
@@ -113,9 +116,11 @@
 .kind-chip.pr { background: linear-gradient(135deg, #80987B, #4A5E48); }
 .kind-chip.mr { background: linear-gradient(135deg, #E8A06A, #C66243); }
 .kind-chip.is { background: linear-gradient(135deg, #B6A5C9, #6E5E80); }
+/* Fixed dark text, not var(--ink): the gradient stays light in both schemes,
+   so an ink that flips to cream would leave this unreadable at night. */
 .kind-chip.rel {
   background: linear-gradient(135deg, #F1D58A, #B68C2C);
-  color: var(--ink);
+  color: #2E211B;
 }
 .row-body {
   min-width: 0;
@@ -176,7 +181,8 @@
 }
 .new-badge {
   background: var(--terracotta);
-  color: white;
+  /* See .iconbtn.bell::after — white can't ride a token that changes lightness. */
+  color: var(--paper);
   font-family: var(--font-mono);
   font-size: 9.5px;
   font-weight: 700;

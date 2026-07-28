@@ -589,12 +589,12 @@
 }
 .dp-action.primary {
   background: var(--terracotta);
-  color: white;
+  color: var(--paper);
   border-color: transparent;
 }
 .dp-action.primary:hover {
-  background: #B05738;
-  color: white;
+  background: var(--terracotta-hover);
+  color: var(--paper);
   border-color: transparent;
 }
 
@@ -756,7 +756,9 @@
   cursor: pointer;
   transition: background 0.15s, opacity 0.15s;
 }
-.dp-clone-go:hover:not(:disabled) { background: #B05738; }
+.dp-clone-go:hover:not(:disabled) {
+  background: var(--terracotta-hover);
+}
 .dp-clone-go:disabled { opacity: 0.5; cursor: default; }
 
 .dp-clone {

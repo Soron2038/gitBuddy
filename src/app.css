@@ -35,6 +35,11 @@
      on its own soft tint: sage on sage-soft was 2.30:1. */
   --terracotta:        #BB5738;
   --terracotta-soft:   #F4D9CC;
+  /* Hover fill for terracotta buttons. A token rather than a literal because
+     the base lightens in dark mode, so a fixed darker shade would read as a
+     *lighter* hover there. (color-mix() would express this in one line, but
+     WebKit only got it in Safari 16.2 and the app supports macOS 11.) */
+  --terracotta-hover:  #B05738;
   --sage:              #80987B;
   --sage-soft:         #D6E0CF;
   --sage-ink:          #50684B;
@@ -61,6 +66,102 @@
   --font-display: 'Gambarino', 'Fraunces', Georgia, serif;
   --font-body:    'Switzer', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono:    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Dark ---------------------------------------------------------------
+   Buddy Warm after dark, not a neutral greyscale: the paper goes to warm
+   espresso rather than black, the ink to cream, and terracotta / sage /
+   butter / plum keep their hue and simply move up in lightness. A
+   menu-bar popover sits directly under the system bar, so a hard white
+   panel at night is the single most jarring thing the app can do — and
+   the tray icon is already a template image that inverts correctly, so
+   the UI was the only part not following the system.
+
+   Every value below was computed against the dark --paper rather than
+   eyeballed: body ink 15.1:1, --ink-3 (the 11–12.5px meta workhorse)
+   5.97:1, the accents 6.5–10.8:1, and each accent on its own --*-soft
+   tint 5.2–8.2:1. --ink-4 stays decorative-only at 3.68:1.
+
+   Note the *-soft / *-ink pair swaps roles here: in light mode `soft` is a
+   pale tint carrying dark `ink` text; in dark mode `soft` is a muted dark
+   tint carrying light `ink` text. Components reference the pair, not the
+   raw colours, so they need no per-scheme branching. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --cream:        #252019;
+    --cream-2:      #2E2720;
+    --cream-3:      #3A322A;
+    --paper:        #1A1512;
+    --paper-2:      #211B17;
+
+    --ink:          #F2E9DF;
+    --ink-2:        #CDBFB1;
+    --ink-3:        #A29184;
+    --ink-4:        #7C6E62;
+
+    /* Light hairlines on a dark ground — the light-mode values are black at
+       low alpha and vanish completely here. */
+    --line:         rgba(242, 233, 223, 0.10);
+    --line-2:       rgba(242, 233, 223, 0.17);
+
+    --terracotta:        #E08363;
+    --terracotta-soft:   #3B241B;
+    /* Lighter on hover here, not darker — the direction of "more prominent"
+       inverts with the scheme. */
+    --terracotta-hover:  #E9977B;
+    --sage:              #9DB897;
+    --sage-soft:         #25301F;
+    --sage-ink:          #9DB897;
+    --butter:            #E8C46B;
+    --butter-soft:       #382C13;
+    --butter-ink:        #E8C46B;
+    --plum:              #E58AA8;
+    --plum-soft:         #3A1F29;
+    --plum-ink:          #E58AA8;
+
+    /* Shadows read as depth against light surfaces and as mud against dark
+       ones. Deepen and tighten them so cards still lift without haloing. */
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 8px 20px -10px rgba(0, 0, 0, 0.6);
+    --shadow-3: 0 30px 60px -20px rgba(0, 0, 0, 0.7),
+                0 8px 16px -8px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* Reduced motion ------------------------------------------------------
+   A blanket rule rather than per-component opt-outs: it catches every
+   transition and animation in the app, including the refresh spinner, the
+   OAuth countdown bar and the CI pulse. All three are decorative — nothing
+   here conveys state through motion alone, so freezing them loses no
+   information. Near-zero rather than `none` so transitionend/animationend
+   handlers still fire. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Forced colors -------------------------------------------------------
+   In Increase Contrast / forced-colors mode the OS replaces our palette
+   wholesale. Our own borders and backgrounds would then either disappear
+   or fight the system colours, so hand the structural cues over to the
+   system keywords and keep only the layout. */
+@media (forced-colors: active) {
+  :root {
+    --line: CanvasText;
+    --line-2: CanvasText;
+  }
+  button:focus-visible {
+    outline: 2px solid Highlight;
+  }
+  /* Status is otherwise carried by our accent colours, which are gone here;
+     a border keeps the dots and chips distinguishable as shapes. */
+  [class*='ci-'], [class*='pchip'], [class*='badge'] {
+    border: 1px solid CanvasText;
+  }
 }
 
 /* Reset --------------------------------------------------------- */
