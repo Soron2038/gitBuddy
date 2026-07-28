@@ -214,6 +214,40 @@ fi
 echo "  ✓ accepted"
 echo
 
+# ── Clear leftovers from a failed DMG step ────────────────────────────────
+# `bundle_dmg.sh` mounts a read-write scratch image, has Finder lay the window
+# out over AppleScript, then detaches. When that AppleScript hiccups (the
+# script carries its own sleep against intermittent "Can't get disk (-1728)"
+# errors) the detach can fail too, leaving the image attached — and every
+# subsequent build then dies at the same step with a message that names none
+# of this. Sweep our own scratch images before building.
+detach_stale_scratch_images() {
+  local info dev path found=0
+  # `hdiutil info` prints one block per attached image; pair each image-path
+  # with the /dev node that follows it.
+  while IFS= read -r line; do
+    case "$line" in
+      image-path*) path="${line#*: }" ;;
+      /dev/disk*)
+        dev="${line%%[[:space:]]*}"
+        case "$path" in
+          *"$REPO_ROOT"*rw.*.dmg)
+            echo "▸ Detaching a scratch image left behind by an earlier build:"
+            echo "    $(basename "$path")"
+            hdiutil detach "$dev" >/dev/null 2>&1 || hdiutil detach "$dev" -force >/dev/null 2>&1 || true
+            rm -f "$path"
+            found=1
+            ;;
+        esac
+        path=""
+        ;;
+    esac
+  done < <(hdiutil info 2>/dev/null)
+  [[ "$found" -eq 1 ]] && echo
+  return 0
+}
+detach_stale_scratch_images
+
 # ── Build ─────────────────────────────────────────────────────────────────
 # Stale artifacts from previous versions are moved aside rather than deleted —
 # generate-latest-json.sh globs release/*.app.tar.gz and refuses to run when it
