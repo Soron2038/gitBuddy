@@ -7,6 +7,53 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-07-29
+
+Dark mode, a simpler way in, and the last of the review findings closed.
+
+### Added
+
+- **Dark mode.** gitBuddy follows the system appearance. It's Buddy Warm after
+  dark rather than a neutral grey: the paper goes to warm espresso, the ink to
+  cream, and terracotta, sage and butter keep their hue. Every colour was
+  measured against the dark background for WCAG AA rather than eyeballed.
+- **Reduced motion and increased contrast** are respected. With "Reduce motion"
+  on, the spinners and the CI pulse hold still — nothing in the app conveys
+  state through movement, so nothing is lost.
+
+### Changed
+
+- **Connecting an account now happens in one place.** The menu-bar popover used
+  to carry its own connect form, which only ever offered a personal access
+  token — never the browser sign-in that the rest of the app recommends — and
+  allowed a single account per forge. Worse, its own "create a token" button
+  opened your browser, which made the popover slide shut on the form you were
+  filling in. It now offers the three forges and hands you to the main window,
+  where the full flow lives: browser sign-in or a token, and as many accounts
+  per forge as you like.
+
+### Fixed
+
+- **A hiccup during GitHub sign-in no longer throws away the attempt.** A
+  request that timed out while you were approving in the browser ended the
+  whole flow and made you start over with a fresh code; it now keeps waiting.
+  Four error responses that GitHub documents but gitBuddy didn't recognise now
+  explain themselves instead of failing anonymously.
+- GitHub sign-ins for organisations that expire tokens now keep the refresh
+  token they're issued, rather than requiring a full re-authentication roughly
+  every eight hours.
+- Opening the main window in dark mode no longer flashes white first.
+
+### Internal
+
+- Frontend test suite (Vitest, 40 tests) covering the logic both windows share:
+  row keys and deduplication, host suggestions, provider resolution, the
+  local-clone join, and auth state.
+- The account-id migration — the code most able to lose a stored token — is now
+  testable against an in-memory Keychain and covered by six tests, including
+  the case that matters most: a failed copy must never delete the original.
+  Rust tests are at 117, up from 91 before the review.
+
 ## [1.1.0] — 2026-07-28
 
 A correctness and accessibility pass over the whole app, from a full code and
