@@ -102,6 +102,12 @@ pub fn run() {
             aggregator::spawn_loop(app.handle().clone(), state);
 
             // ── Tray menu (right-click) ─────────────────────────────────
+            // Deliberately NOT passed to `TrayIconBuilder::menu`. A menu that
+            // is permanently attached to the NSStatusItem swallows the left
+            // click on macOS 27 (AppKit pops the menu before tray-icon's
+            // overlay view sees the event). Instead the menu is attached only
+            // while it is being shown — see `show_tray_menu` and the
+            // 2026-09-16 entry in docs/DECISIONS.md.
             let open_main =
                 MenuItem::with_id(app, "open_main", "Open gitBuddy", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
@@ -113,23 +119,25 @@ pub fn run() {
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(tray_icon)
                 .icon_as_template(true)
-                .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open_main" => open_main_window(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
+                .on_tray_icon_event(move |tray, event| match event {
+                    TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         rect,
                         ..
-                    } = event
-                    {
-                        toggle_popover(tray.app_handle(), rect);
-                    }
+                    } => toggle_popover(tray.app_handle(), rect),
+                    TrayIconEvent::Click {
+                        button: MouseButton::Right,
+                        button_state: MouseButtonState::Down,
+                        ..
+                    } => show_tray_menu(tray, &menu),
+                    _ => {}
                 })
                 .build(app)?;
 
@@ -215,6 +223,26 @@ fn open_main_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+/// Show the tray context menu, attaching it to the status item only for the
+/// duration of the popup.
+///
+/// macOS 27 stopped forwarding clicks to tray-icon's overlay view while an
+/// `NSMenu` is attached to the `NSStatusItem`, so a permanently attached menu
+/// swallows the left click and pops the menu instead
+/// (tauri-apps/tray-icon#355). This mirrors upstream's fix (tray-icon 0.25.1,
+/// PR #365: `setMenu(Some) → performClick → setMenu(None)`) at the app level
+/// until a Tauri 2.x release pulls that version in. `show_menu` blocks until
+/// the menu is dismissed, so detaching right after it returns is correct.
+///
+/// Runs inside the tray event handler, i.e. on the main thread; Tauri's
+/// `run_on_main_thread` executes inline there, so this cannot deadlock.
+fn show_tray_menu(tray: &tauri::tray::TrayIcon, menu: &Menu<tauri::Wry>) {
+    // A failed attach only degrades to "no menu this time"; never worth a panic.
+    let _ = tray.set_menu(Some(menu.clone()));
+    let _ = tray.with_inner_tray_icon(|inner| inner.show_menu());
+    let _ = tray.set_menu(None::<Menu<tauri::Wry>>);
 }
 
 fn toggle_popover(app: &tauri::AppHandle, tray_rect: tauri::Rect) {

@@ -416,3 +416,41 @@ constructor.
 
 This closes the PRD §12 "provider trait conformance tests" item; the trait
 itself landed 2026-06-01. Test count ~67 → ~87.
+
+## 2026-09-16 — Tray menu attached only while shown (macOS 27 workaround)
+
+**Symptom.** On macOS 27 (reproduced on every machine tested, 27.0 / 26A428)
+a left-click on the tray icon shows the right-click menu instead of toggling
+the popover. Nothing in the app changed between 1.2.0 on macOS 26 (works)
+and 1.2.0 on macOS 27 (broken).
+
+**Cause.** `tray-icon` 0.23.1 (via Tauri 2.11.1, `^0.23`) attaches the menu
+permanently with `NSStatusItem.setMenu` and relies on an overlay `NSView`
+(`TaoTrayTarget`) over the status-bar button to intercept mouse events so
+that AppKit does *not* pop the menu on left-click itself. macOS 27 no longer
+forwards left-clicks to that overlay while an `NSMenu` is attached — AppKit
+shows the menu and our `TrayIconEvent::Click` handler never runs. Upstream:
+[tray-icon#355](https://github.com/tauri-apps/tray-icon/issues/355), fixed by
+[PR #365](https://github.com/tauri-apps/tray-icon/pull/365) in tray-icon
+0.25.1 (attach the menu only while presenting it: `setMenu(Some) →
+performClick → setMenu(None)`).
+
+**Why not just bump.** Tauri 2.11.x requires tray-icon `^0.23`/`^0.24`; only
+Tauri 3.0.0-alpha pulls `^0.25`. A `[patch.crates-io]` to the git repo is
+ignored by cargo because of the semver mismatch. Vendoring 0.23.1 and
+back-porting the patch would put ~4k lines of third-party code in the repo
+that has to be redone on every Tauri bump.
+
+**Decision: mirror the upstream fix at the app level.** The tray is built
+without `TrayIconBuilder::menu`; on `Click { Right, Down }` the handler calls
+`show_tray_menu`, which does `TrayIcon::set_menu(Some)` →
+`with_inner_tray_icon(|t| t.show_menu())` → `set_menu(None)`. `show_menu` is
+`performClick` and blocks until the menu is dismissed. `MenuEvent`s reach the
+global listeners regardless of whether the menu is attached, so
+`on_menu_event` keeps working unchanged. On macOS ≤ 26 the path behaves as
+before (menu on right mouse-down).
+
+**Roll-back.** Once a Tauri 2.x release ships tray-icon ≥ 0.25.1, the
+workaround becomes redundant (upstream's `show_menu` then does the same
+attach/pop/detach) but stays harmless; `.menu(&menu)` may return, but
+does not have to.

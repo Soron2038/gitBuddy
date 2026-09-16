@@ -92,6 +92,10 @@ This wrapper does **not** run for `tauri build` (release bundles) — production
 
 `src-tauri/icons/tray-icon.png` is `include_bytes!`'d into the binary and used as a template image (macOS inverts it per system appearance). Regenerate it via the Python script — system SVG-to-PNG converters produce unreliable output for this size.
 
+### Tray menu is attached only while it is shown
+
+The right-click menu is deliberately **not** passed to `TrayIconBuilder::menu`. On macOS 27 a menu that is permanently attached to the `NSStatusItem` swallows the left click (AppKit pops the menu before `tray-icon`'s overlay view sees the event), so `TrayIconEvent::Click` never fires and the popover can't open. `show_tray_menu` in `lib.rs` attaches the menu on right mouse-down, pops it, and detaches it again — the same trick upstream shipped in `tray-icon` 0.25.1, which no Tauri 2.x release pulls in yet. Don't "clean this up" by restoring `.menu(&menu)`; see the 2026-09-16 entry in `docs/DECISIONS.md`.
+
 ## Conventions to follow
 
 - **`docs/DECISIONS.md` is append-only**. If a decision is being reversed, add a new dated entry that explains why and points back at the older one — don't edit history.

@@ -7,6 +7,14 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS 27: left-clicking the tray icon opens the popover again** instead of
+  the "Open gitBuddy / Quit gitBuddy" context menu. AppKit on macOS 27 pops a
+  permanently attached status-item menu before `tray-icon`'s click handler
+  runs; the menu is now attached only while it is being shown (upstream fix:
+  tauri-apps/tray-icon#365, not yet reachable through any Tauri 2.x release).
+
 ## [1.2.0] — 2026-07-29
 
 Dark mode, a simpler way in, and the last of the review findings closed.

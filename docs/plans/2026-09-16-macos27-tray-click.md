@@ -1,10 +1,10 @@
 # macOS 27: tray left-click opens the context menu instead of the popover
 
-> **Status:** drafted 2026-09-16 — **not executed yet.** Reproduced on one
-> MacBook running macOS 27.0 (26A428) with the signed 1.2.0 release; to be
-> confirmed on one or two more machines after upgrading them to macOS 27
-> before the change is made. Nothing in the app changed between 1.2.0 on
-> macOS 26 (works) and 1.2.0 on macOS 27 (broken).
+> **Status:** executed 2026-09-16. Reproduced on macOS 27.0 (26A428) with the
+> signed 1.2.0 release and confirmed on every macOS 27 machine tested; nothing
+> in the app changed between 1.2.0 on macOS 26 (works) and 1.2.0 on macOS 27
+> (broken). Implemented as described below; see the 2026-09-16 entry in
+> `docs/DECISIONS.md`. Release 1.2.1 follows separately.
 
 ## Context
 
