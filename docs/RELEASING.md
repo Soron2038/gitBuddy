@@ -166,6 +166,26 @@ must be named exactly `latest.json`. Mirror the release notes into
 
 ---
 
+## Troubleshooting
+
+### `codesign` fails with `unknown error -26276`
+
+Seen on macOS 27.0 with Xcode 27: `tauri build` dies at "Signing … gitbuddy"
+with `error: unknown error -26276=ffffffffffff995c` (errSecInternalError)
+although `security find-identity` lists the Developer ID as valid and the
+certificate chain verifies. The identity is looked up by *name*, and the name
+contains a non-ASCII character ("Björn"). Addressing the same identity by its
+SHA-1 hash signs fine:
+
+```bash
+security find-identity -v -p codesigning        # copy the 40-hex hash
+export APPLE_SIGNING_IDENTITY=<hash>
+```
+
+`scripts/release.sh` does this automatically since 2026-09-16 and probes a
+throwaway binary before building, so the failure shows up in seconds rather
+than after the compile.
+
 ## Verifying the updater end-to-end (PRD §12)
 
 1. Install the current release (e.g. 1.0.0) from its `.dmg` and run it.

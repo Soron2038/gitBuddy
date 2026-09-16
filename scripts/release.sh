@@ -111,18 +111,27 @@ fi
 
 # Signing identity + team ID out of the keychain — no reason to make anyone
 # retype what's already provisioned on the machine.
-IDENTITY="$(security find-identity -v -p codesigning \
-  | sed -n 's/.*"\(Developer ID Application: .*\)".*/\1/p' | head -n 1)"
-[[ -n "$IDENTITY" ]] || {
+#
+# Sign by the certificate's SHA-1 hash, not its name. Since macOS 27, codesign
+# fails with "unknown error -26276" (errSecInternalError) when the identity is
+# looked up by a name containing non-ASCII characters (the "ö" in "Björn
+# Witt"); the same identity addressed by hash signs fine. The name is still
+# parsed for the team ID and shown for the human.
+IDENTITY_LINE="$(security find-identity -v -p codesigning \
+  | grep -F 'Developer ID Application:' | head -n 1)"
+IDENTITY_NAME="$(sed -n 's/.*"\(Developer ID Application: .*\)".*/\1/p' <<<"$IDENTITY_LINE")"
+IDENTITY_HASH="$(sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) .*/\1/p' <<<"$IDENTITY_LINE")"
+[[ -n "$IDENTITY_NAME" && -n "$IDENTITY_HASH" ]] || {
   echo "error: no 'Developer ID Application' certificate in the login keychain." >&2
   echo "       Without it the build can be signed ad-hoc at best, and macOS" >&2
   echo "       will refuse it on any other machine. See docs/RELEASING.md." >&2
   exit 1
 }
-TEAM_ID="$(sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p' <<<"$IDENTITY")"
-[[ -n "$TEAM_ID" ]] || { echo "error: could not parse the team ID out of '$IDENTITY'." >&2; exit 1; }
+TEAM_ID="$(sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p' <<<"$IDENTITY_NAME")"
+[[ -n "$TEAM_ID" ]] || { echo "error: could not parse the team ID out of '$IDENTITY_NAME'." >&2; exit 1; }
 
-echo "  identity : $IDENTITY"
+echo "  identity : $IDENTITY_NAME"
+echo "  hash     : $IDENTITY_HASH"
 echo "  team     : $TEAM_ID"
 echo "  tag      : v$VERSION @ $(git rev-parse --short HEAD)"
 echo
@@ -198,9 +207,26 @@ if ! grep -Eq '^[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}$' <<<"$APPLE_PASSWORD"; then
   [[ "$yn" == [yY] ]] || exit 1
 fi
 
-export APPLE_SIGNING_IDENTITY="$IDENTITY"
+export APPLE_SIGNING_IDENTITY="$IDENTITY_HASH"
 export APPLE_TEAM_ID="$TEAM_ID"
 export TAURI_SIGNING_PRIVATE_KEY="$(cat "$UPDATER_KEY")"
+
+# Fail on a signing problem now, not after a multi-minute build: sign a
+# throwaway copy of a system binary exactly the way the bundler will (hardened
+# runtime + timestamp), which also surfaces the Keychain access prompt for the
+# private key up front instead of in the middle of the bundle step.
+echo "▸ Checking that codesign can use the Developer ID key…"
+SIGN_PROBE="$(mktemp -d)/probe"
+trap 'rm -rf "$(dirname "$SIGN_PROBE")" ${NOTES_TMP:+"$NOTES_TMP"}' EXIT
+cp /usr/bin/true "$SIGN_PROBE"
+if ! codesign --force --sign "$APPLE_SIGNING_IDENTITY" --options runtime --timestamp \
+       "$SIGN_PROBE" >/dev/null 2>&1; then
+  echo "error: codesign could not sign with $IDENTITY_HASH ($IDENTITY_NAME)." >&2
+  echo "       Try it by hand to see the real error:" >&2
+  echo "         cp /usr/bin/true /tmp/probe && codesign --force --sign $IDENTITY_HASH --options runtime --timestamp /tmp/probe" >&2
+  exit 1
+fi
+echo "  ✓ signs"
 
 # Fail on bad credentials now, not after a multi-minute build.
 echo "▸ Checking the notarization credentials with Apple…"
