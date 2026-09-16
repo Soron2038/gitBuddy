@@ -7,6 +7,10 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-09-16
+
+One fix, for everyone who upgraded to macOS 27.
+
 ### Fixed
 
 - **macOS 27: left-clicking the tray icon opens the popover again** instead of
@@ -226,7 +230,8 @@ First signed and notarized release.
   config export/import.
 - In-app auto-update via signed `latest.json` on GitHub Releases.
 
-[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/Soron2038/gitBuddy/compare/v1.2.0...v1.2.1
 [1.0.2]: https://github.com/Soron2038/gitBuddy/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Soron2038/gitBuddy/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Soron2038/gitBuddy/releases/tag/v1.0.0
