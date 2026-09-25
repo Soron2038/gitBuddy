@@ -278,7 +278,11 @@
   let showAccountBadges = $derived(accounts.length > 1);
 
   let waitingCount = $derived(items.length);
-  let newReleasesCount = $derived(releases.filter((r) => r.is_new).length);
+  /** One row per repo with a published release, deduped the same way the
+   *  Releases list is, so the counters agree with what that view shows. */
+  let uniqueReleases = $derived(dedupeBy(releases, releaseKey));
+  let newReleasesCount = $derived(uniqueReleases.filter((r) => r.is_new).length);
+  let releaseTotalCount = $derived(uniqueReleases.length);
   let localCount = $derived(locals.length);
   let withUncommittedCount = $derived(
     locals.filter((l) => l.dirty_staged + l.dirty_unstaged + l.untracked > 0).length,
@@ -473,16 +477,16 @@
         matchesSearchItem(it, normalisedQuery),
     ),
   );
-  /** Deduped for the same reason `filteredRepos` is: two accounts that can
-   *  both see a repo each report its latest release, so the row appears
-   *  twice with an identical key and the keyed {#each} throws. */
+  /** The latest release of every repo, newest first — deliberately not
+   *  narrowed to `is_new`: the release you need is often months old, and the
+   *  NEW badge already marks the fresh ones (same rule as the popover's
+   *  Releases tab). Deduped for the same reason `filteredRepos` is: two
+   *  accounts that can both see a repo each report its latest release, so the
+   *  row appears twice with an identical key and the keyed {#each} throws. */
   let filteredReleases = $derived(
     dedupeBy(
       releases.filter(
-        (rel) =>
-          rel.is_new &&
-          isAccountSelected(rel) &&
-          matchesSearchRelease(rel, normalisedQuery),
+        (rel) => isAccountSelected(rel) && matchesSearchRelease(rel, normalisedQuery),
       ),
       releaseKey,
     ),
@@ -1482,7 +1486,7 @@
             onclick={() => (status = 'releases')}
             aria-pressed={status === 'releases'}
           >
-            <span class="sw b"></span> New releases <span class="c">{newReleasesCount}</span>
+            <span class="sw b"></span> Releases <span class="c">{releaseTotalCount}</span>
           </button>
           <button
             type="button"
@@ -1714,17 +1718,17 @@
             {/if}
           {:else if status === 'releases'}
             <h2 class="section-h">
-              New <em>releases</em>
+              Latest <em>releases</em>
               <span class="count">
-                {filteredReleases.length} shown{#if filteredReleases.length !== newReleasesCount}
-                  <span class="muted-count"> · of {newReleasesCount}</span>
+                {filteredReleases.length} shown{#if filteredReleases.length !== releaseTotalCount}
+                  <span class="muted-count"> · of {releaseTotalCount}</span>
                 {/if}
               </span>
             </h2>
 
-            {#if newReleasesCount === 0}
+            {#if releaseTotalCount === 0}
               <p class="content-empty">
-                No fresh releases in the last week.
+                None of your repos has published a release yet.
               </p>
             {:else if filteredReleases.length === 0}
               <p class="content-empty">

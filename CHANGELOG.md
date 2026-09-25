@@ -7,6 +7,13 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The main window's Releases view lists the latest release of every repo**,
+  not just the ones from the last seven days. The release you need is often
+  months old; fresh ones still carry the NEW badge and sort to the top, the
+  same rule the popover's Releases tab already followed.
+
 ## [1.2.1] — 2026-09-16
 
 One fix, for everyone who upgraded to macOS 27.
