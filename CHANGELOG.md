@@ -7,6 +7,11 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-25
+
+Release files one click away, and `git push` from any terminal without
+setting up SSH keys.
+
 ### Added
 
 - **Download release files straight from gitBuddy.** Releases now list the
@@ -272,8 +277,11 @@ First signed and notarized release.
   config export/import.
 - In-app auto-update via signed `latest.json` on GitHub Releases.
 
-[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/Soron2038/gitBuddy/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/Soron2038/gitBuddy/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/Soron2038/gitBuddy/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/Soron2038/gitBuddy/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/Soron2038/gitBuddy/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Soron2038/gitBuddy/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Soron2038/gitBuddy/releases/tag/v1.0.0
