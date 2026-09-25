@@ -162,10 +162,36 @@ pub struct Release {
     pub is_new: bool,
     /// Pre-rendered relative age, e.g. "2d", "3w".
     pub age_human: String,
+    /// Files attached to the release (installers, binaries, archives) —
+    /// only what the publisher uploaded or linked, never the forge's
+    /// auto-generated source archives. All three forges return these in the
+    /// release listing the provider already fetches, so they cost no extra
+    /// request.
+    #[serde(default)]
+    pub assets: Vec<ReleaseAsset>,
     /// `Account.id` of the providing account. Same aggregator-tagging
     /// contract as [`WaitingItem::account_id`].
     #[serde(default)]
     pub account_id: Option<String>,
+}
+
+/// One downloadable file of a [`Release`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseAsset {
+    pub name: String,
+    /// Size in bytes, when the forge reports it (GitLab links carry none).
+    #[serde(default)]
+    pub size: Option<u64>,
+    /// Where a browser downloads the file from. The fallback whenever the app
+    /// can't fetch it itself — an external link, or a forge route that only
+    /// accepts a browser session.
+    pub browser_url: String,
+    /// What the app fetches with the account token. Differs from
+    /// `browser_url` where the forge has a token-authenticated API route for
+    /// the same file (GitHub's asset endpoint, GitLab's uploads API); the
+    /// token is only ever sent here when this URL is on the account's own
+    /// forge — see `ProviderBackend::asset_request`.
+    pub download_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

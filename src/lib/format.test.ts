@@ -8,6 +8,7 @@ import {
   repoKey,
   releaseKey,
   dedupeBy,
+  formatBytes,
 } from './format';
 import type { LocalRepo } from './data/api';
 
@@ -170,5 +171,19 @@ describe('shortenPath', () => {
   it('keeps short paths whole and trims long ones to the last two parts', () => {
     expect(shortenPath('/Users/witt')).toBe('/Users/witt');
     expect(shortenPath('/Users/witt/Developer/gitBuddy')).toBe('…/Developer/gitBuddy');
+  });
+});
+
+describe('formatBytes', () => {
+  it('uses decimal units like Finder, one decimal below ten', () => {
+    expect(formatBytes(840)).toBe('840 B');
+    expect(formatBytes(1_000)).toBe('1.0 kB');
+    expect(formatBytes(12_400_000)).toBe('12 MB');
+    expect(formatBytes(9_950_000)).toBe('9.9 MB');
+    expect(formatBytes(2_500_000_000)).toBe('2.5 GB');
+  });
+  it('renders nothing for an unknown size', () => {
+    expect(formatBytes(null)).toBe('');
+    expect(formatBytes(-1)).toBe('');
   });
 });

@@ -7,14 +7,15 @@
 //! milestone one of the providers.
 
 use crate::provider_util::{
-    collapse_ci_status, decode_error, http_client, humanise_age, reason_priority, repo_call_budget,
-    response_error, within_days, ProviderBackend, ProviderError,
+    bearer_asset_request, collapse_ci_status, decode_error, http_client, humanise_age,
+    reason_priority, repo_call_budget, response_error, within_days, ProviderBackend, ProviderError,
 };
 use crate::types::{
-    CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
+    CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, ReleaseAsset, Repo, Viewer,
+    WaitingItem,
 };
 use chrono::Utc;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::Deserialize;
 
 const API_BASE: &str = "https://api.github.com";
@@ -281,6 +282,14 @@ impl ProviderBackend for GitHubProvider {
     async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
         self.list_ci(repos).await
     }
+    fn asset_request(&self, client: &Client, asset: &ReleaseAsset) -> Option<RequestBuilder> {
+        // `download_url` is the asset's API endpoint on api.github.com. Asked
+        // for octet-stream it redirects to a signed URL on another host;
+        // reqwest drops the Authorization header on that cross-host hop, so
+        // the token never reaches the storage backend.
+        bearer_asset_request(client, &asset.download_url, &self.api_base, &self.token)
+            .map(|req| req.header("Accept", "application/octet-stream"))
+    }
 }
 
 /// Top-level wrapper of the `/repos/{owner}/{name}/actions/runs` response.
@@ -396,6 +405,32 @@ async fn fetch_latest_ci_run(
     }))
 }
 
+/// One entry of a release's `assets` array. Hoisted to module level so the
+/// fixture tests can deserialize it directly.
+#[derive(Deserialize)]
+struct RawAsset {
+    name: String,
+    size: u64,
+    /// The asset's REST endpoint (`/repos/{o}/{r}/releases/assets/{id}`).
+    /// Fetched with `Accept: application/octet-stream` it redirects to the
+    /// file — and unlike `browser_download_url` it accepts the token, which
+    /// is what makes private-repo assets downloadable without a browser that
+    /// happens to be signed in to github.com.
+    url: String,
+    browser_download_url: String,
+}
+
+impl RawAsset {
+    fn into_asset(self) -> ReleaseAsset {
+        ReleaseAsset {
+            name: self.name,
+            size: Some(self.size),
+            browser_url: self.browser_download_url,
+            download_url: self.url,
+        }
+    }
+}
+
 async fn fetch_latest_release(
     client: &Client,
     token: &str,
@@ -433,6 +468,8 @@ async fn fetch_latest_release(
         prerelease: bool,
         #[serde(default)]
         draft: bool,
+        #[serde(default)]
+        assets: Vec<RawAsset>,
     }
 
     let raw: Vec<RawRelease> = resp.json().await.map_err(decode_error("GitHub"))?;
@@ -466,6 +503,7 @@ async fn fetch_latest_release(
         is_prerelease: raw.prerelease,
         is_new: false, // filled in by list_releases against a consistent `now`
         age_human: String::new(),
+        assets: raw.assets.into_iter().map(RawAsset::into_asset).collect(),
         account_id: None,
     }))
 }
@@ -800,7 +838,7 @@ mod tests {
     async fn list_releases_treats_404_as_no_release() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/repos/o/r/releases/latest"))
+            .and(path("/repos/o/r/releases"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
@@ -861,5 +899,85 @@ mod tests {
             gh.list_waiting().await.unwrap_err(),
             ProviderError::Unauthorized(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn latest_release_carries_its_uploaded_assets() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"tag_name":"v1.2","name":"v1.2","html_url":"https://github.com/o/r/releases/tag/v1.2",
+                     "published_at":"2026-06-01T00:00:00Z","prerelease":false,"draft":false,
+                     "assets":[{"name":"app_1.2_aarch64.dmg","size":1234,
+                                "url":"https://api.github.com/repos/o/r/releases/assets/7",
+                                "browser_download_url":"https://github.com/o/r/releases/download/v1.2/app_1.2_aarch64.dmg"}]}]"#,
+            ))
+            .mount(&server)
+            .await;
+        let gh = GitHubProvider::for_test(server.uri(), "t".into(), viewer("tester"));
+
+        let releases = gh.list_releases(&[repo("o", "r")]).await.expect("ok");
+
+        assert_eq!(
+            releases[0].assets,
+            vec![ReleaseAsset {
+                name: "app_1.2_aarch64.dmg".into(),
+                size: Some(1234),
+                browser_url: "https://github.com/o/r/releases/download/v1.2/app_1.2_aarch64.dmg"
+                    .into(),
+                download_url: "https://api.github.com/repos/o/r/releases/assets/7".into(),
+            }]
+        );
+    }
+
+    fn asset_at(download_url: String) -> ReleaseAsset {
+        ReleaseAsset {
+            name: "app.dmg".into(),
+            size: None,
+            browser_url: "https://github.com/o/r/releases/download/v1/app.dmg".into(),
+            download_url,
+        }
+    }
+
+    #[tokio::test]
+    async fn asset_request_sends_the_token_and_asks_for_the_bytes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/releases/assets/7"))
+            .and(header("authorization", "Bearer secret"))
+            .and(header("accept", "application/octet-stream"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"dmg".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gh = GitHubProvider::for_test(server.uri(), "secret".into(), viewer("tester"));
+        let client = http_client().expect("client");
+
+        let req = gh
+            .asset_request(
+                &client,
+                &asset_at(format!("{}/repos/o/r/releases/assets/7", server.uri())),
+            )
+            .expect("an API-origin asset is fetched with the token");
+        assert_eq!(req.send().await.expect("sent").status(), 200);
+    }
+
+    #[test]
+    fn asset_request_never_sends_the_token_off_the_api_origin() {
+        let gh = GitHubProvider::for_test(API_BASE.into(), "secret".into(), viewer("tester"));
+        let client = http_client().expect("client");
+        for foreign in [
+            "https://github.com/o/r/releases/download/v1/app.dmg",
+            "https://evil.example/app.dmg",
+            "https://api.github.com@evil.example/app.dmg",
+            "http://api.github.com/repos/o/r/releases/assets/7",
+        ] {
+            assert!(
+                gh.asset_request(&client, &asset_at(foreign.into()))
+                    .is_none(),
+                "{foreign}"
+            );
+        }
     }
 }

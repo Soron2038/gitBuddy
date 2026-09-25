@@ -35,7 +35,9 @@ serde_json = "1"
 
 # M2 — GitHub provider (PAT auth, search API), Keychain storage, async networking.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+# `fs` + `io-util`: release-asset downloads stream to disk without blocking a
+# runtime thread (see downloads.rs).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util"] }
 keyring = { version = "3", features = ["apple-native"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "2"

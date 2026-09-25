@@ -7,14 +7,16 @@
 //! newer project/group access tokens.
 
 use crate::provider_util::{
-    decode_error, http_client, humanise_age, is_rate_limited, normalise_base_url, reason_priority,
-    repo_call_budget, response_error, within_days, ProviderBackend, ProviderError,
+    bearer_asset_request, decode_error, http_client, humanise_age, is_rate_limited,
+    normalise_base_url, reason_priority, repo_call_budget, response_error, within_days,
+    ProviderBackend, ProviderError,
 };
 use crate::types::{
-    CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
+    CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, ReleaseAsset, Repo, Viewer,
+    WaitingItem,
 };
 use chrono::{DateTime, Utc};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::Deserialize;
 
 /// Hint surfaced when GitLab rejects the token — names the scope to check.
@@ -322,6 +324,9 @@ impl ProviderBackend for GitLabProvider {
     async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
         self.list_ci(repos).await
     }
+    fn asset_request(&self, client: &Client, asset: &ReleaseAsset) -> Option<RequestBuilder> {
+        bearer_asset_request(client, &asset.download_url, &self.base_url, &self.token)
+    }
 }
 
 async fn fetch_viewer(client: &Client, token: &str, base_url: &str) -> Result<Viewer> {
@@ -597,6 +602,8 @@ async fn fetch_latest_release(
         #[serde(default)]
         #[serde(rename = "_links")]
         links: Option<RawLinks>,
+        #[serde(default)]
+        assets: Option<RawReleaseAssets>,
     }
     #[derive(Deserialize)]
     struct RawLinks {
@@ -667,8 +674,72 @@ async fn fetch_latest_release(
         is_prerelease: false,
         is_new: false, // filled in by list_releases against a consistent `now`
         age_human: String::new(),
+        assets: r
+            .assets
+            .map(|a| a.links)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|link| release_link_asset(link, base_url, project_id))
+            .collect(),
         account_id: None,
     }))
+}
+
+/// The `assets` object of a GitLab release. Only `links` — the files the
+/// publisher attached — is read; `sources` are GitLab's auto-generated
+/// source archives, which every release has and nobody needs a shortcut to.
+#[derive(Deserialize)]
+struct RawReleaseAssets {
+    #[serde(default)]
+    links: Vec<RawReleaseLink>,
+}
+
+#[derive(Deserialize)]
+struct RawReleaseLink {
+    name: String,
+    url: String,
+}
+
+fn release_link_asset(link: RawReleaseLink, base_url: &str, project_id: &str) -> ReleaseAsset {
+    let download_url =
+        upload_api_url(&link.url, base_url, project_id).unwrap_or_else(|| link.url.clone());
+    ReleaseAsset {
+        name: link.name,
+        // Release links carry no size.
+        size: None,
+        browser_url: link.url,
+        download_url,
+    }
+}
+
+/// Map a project-upload link onto GitLab's uploads API.
+///
+/// Files attached through the UI live at `{base}/-/project/{id}/uploads/
+/// {secret}/{file}` (older instances: `{base}/{namespace}/{project}/uploads/
+/// …`). Those are web routes: for a private project they want a browser
+/// session and answer a token with the sign-in page. The same file is
+/// reachable at `/api/v4/projects/{id}/uploads/{secret}/{file}` (GitLab
+/// 17.4+), which does take the token. Anything else — a generic-package
+/// URL, which is already an API route, or an external link — is left alone.
+/// On an older instance the API route 404s and the download falls back to
+/// the browser.
+fn upload_api_url(url: &str, base_url: &str, project_id: &str) -> Option<String> {
+    let rest = url.strip_prefix(base_url)?;
+    if rest.starts_with("/api/") {
+        return None;
+    }
+    let segments: Vec<&str> = rest.trim_start_matches('/').split('/').collect();
+    // `uploads`, then exactly the secret and the file name.
+    let [.., uploads, secret, file] = segments.as_slice() else {
+        return None;
+    };
+    let secret_ok = secret.len() >= 10 && secret.chars().all(|c| c.is_ascii_hexdigit());
+    if *uploads != "uploads" || !secret_ok || file.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{base_url}/api/v4/projects/{project_id}/uploads/{secret}/{file}"
+    ))
 }
 
 /// Shape returned by `/projects/{id}/pipelines?per_page=1`. Hoisted to
@@ -1020,5 +1091,146 @@ mod tests {
             .await;
         let gl = GitLabProvider::for_test(server.uri(), "t".into(), viewer("tester"));
         assert!(gl.list_releases(&[repo()]).await.expect("ok").is_empty());
+    }
+
+    const SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn upload_links_map_onto_the_uploads_api() {
+        let base = "https://gitlab.example.com";
+        assert_eq!(
+            upload_api_url(
+                &format!("{base}/-/project/42/uploads/{SECRET}/app%20v1.dmg"),
+                base,
+                "42"
+            ),
+            Some(format!(
+                "{base}/api/v4/projects/42/uploads/{SECRET}/app%20v1.dmg"
+            ))
+        );
+        // The older namespace-path form.
+        assert_eq!(
+            upload_api_url(
+                &format!("{base}/grp/sub/proj/uploads/{SECRET}/a.zip"),
+                base,
+                "42"
+            ),
+            Some(format!("{base}/api/v4/projects/42/uploads/{SECRET}/a.zip"))
+        );
+        // Under a relative URL root.
+        let rooted = "https://example.com/gitlab";
+        assert_eq!(
+            upload_api_url(&format!("{rooted}/g/p/uploads/{SECRET}/a.zip"), rooted, "7"),
+            Some(format!("{rooted}/api/v4/projects/7/uploads/{SECRET}/a.zip"))
+        );
+    }
+
+    #[test]
+    fn other_links_are_left_alone() {
+        let base = "https://gitlab.example.com";
+        // Already an API route (generic package registry): takes the token as is.
+        assert_eq!(
+            upload_api_url(
+                &format!("{base}/api/v4/projects/42/packages/generic/app/1.0/app.dmg"),
+                base,
+                "42"
+            ),
+            None
+        );
+        // Another host entirely.
+        assert_eq!(
+            upload_api_url(
+                &format!("https://cdn.example.com/uploads/{SECRET}/a"),
+                base,
+                "42"
+            ),
+            None
+        );
+        // Not an upload secret, or trailing path after the file name.
+        assert_eq!(
+            upload_api_url(
+                &format!("{base}/g/p/uploads/not-a-secret/a.zip"),
+                base,
+                "42"
+            ),
+            None
+        );
+        assert_eq!(
+            upload_api_url(
+                &format!("{base}/g/p/uploads/{SECRET}/a.zip/extra"),
+                base,
+                "42"
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_release_carries_its_links_but_not_the_source_archives() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let body = format!(
+            r#"[{{"tag_name":"v1","name":"v1","released_at":"2026-06-01T00:00:00Z",
+                 "assets":{{"count":4,
+                   "sources":[{{"format":"zip","url":"{base}/o/r/-/archive/v1/r-v1.zip"}}],
+                   "links":[
+                     {{"id":1,"name":"app.dmg","url":"{base}/-/project/42/uploads/{SECRET}/app.dmg","link_type":"package"}},
+                     {{"id":2,"name":"mirror","url":"https://cdn.example.com/app.dmg","link_type":"other"}}
+                   ]}}}}]"#
+        );
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/42/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let repo = Repo {
+            id: "gl:127.0.0.1:42".into(),
+            ..repo()
+        };
+
+        let release =
+            fetch_latest_release(&http_client().expect("client"), "t", &base, &repo, true)
+                .await
+                .expect("ok")
+                .expect("a release");
+
+        assert_eq!(release.assets.len(), 2);
+        assert_eq!(
+            release.assets[0].download_url,
+            format!("{base}/api/v4/projects/42/uploads/{SECRET}/app.dmg")
+        );
+        assert_eq!(
+            release.assets[0].browser_url,
+            format!("{base}/-/project/42/uploads/{SECRET}/app.dmg")
+        );
+        assert_eq!(
+            release.assets[1].download_url,
+            "https://cdn.example.com/app.dmg"
+        );
+    }
+
+    #[test]
+    fn asset_request_only_sends_the_token_to_the_instance() {
+        let gl = GitLabProvider::for_test(
+            "https://gitlab.example.com".into(),
+            "t".into(),
+            viewer("tester"),
+        );
+        let client = http_client().expect("client");
+        let asset = |url: &str| ReleaseAsset {
+            name: "a".into(),
+            size: None,
+            browser_url: url.into(),
+            download_url: url.into(),
+        };
+        assert!(gl
+            .asset_request(&client, &asset("https://gitlab.example.com/api/v4/x"))
+            .is_some());
+        assert!(gl
+            .asset_request(&client, &asset("https://cdn.example.com/app.dmg"))
+            .is_none());
+        assert!(gl
+            .asset_request(&client, &asset("https://gitlab.example.com.evil.example/x"))
+            .is_none());
     }
 }

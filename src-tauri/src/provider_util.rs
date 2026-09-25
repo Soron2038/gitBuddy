@@ -10,10 +10,10 @@
 //! pipeline status vocabulary differs from GitHub Actions, so it keeps its
 //! own `collapse_pipeline_status` in `gitlab.rs`.
 
-use crate::types::{CiRun, CiStatus, ItemReason, Release, Repo, WaitingItem};
+use crate::types::{CiRun, CiStatus, ItemReason, Release, ReleaseAsset, Repo, WaitingItem};
 use chrono::{DateTime, Utc};
 use reqwest::header::HeaderMap;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, RequestBuilder, StatusCode};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -248,6 +248,40 @@ pub trait ProviderBackend: Send + Sync {
     async fn list_releases(&self, repos: &[Repo]) -> Result<Vec<Release>, ProviderError>;
     /// See [`Self::list_releases`] for the `repos` contract.
     async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>, ProviderError>;
+
+    /// The request that downloads `asset` with this account's token, built on
+    /// `client` — or `None` when the asset's `download_url` is not on this
+    /// account's forge. Release links are publisher-controlled (a GitLab link
+    /// can point anywhere), so the token only goes to the forge's own origin;
+    /// for anything else the caller hands `browser_url` to the browser.
+    fn asset_request(&self, client: &Client, asset: &ReleaseAsset) -> Option<RequestBuilder>;
+}
+
+/// Whether `url` shares scheme, host and port with `base` — the test for
+/// "may this URL carry the account's token". Parsed rather than
+/// prefix-matched, so `https://api.github.com@evil.example/` (host
+/// `evil.example`) and `https://api.github.com.evil.example/` are rejected.
+pub(crate) fn same_origin(url: &str, base: &str) -> bool {
+    match (reqwest::Url::parse(url), reqwest::Url::parse(base)) {
+        (Ok(u), Ok(b)) => {
+            u.scheme() == b.scheme()
+                && u.host_str() == b.host_str()
+                && u.port_or_known_default() == b.port_or_known_default()
+        }
+        _ => false,
+    }
+}
+
+/// [`ProviderBackend::asset_request`] for the forges whose download URLs take
+/// the token as a plain bearer header: a GET, authenticated only when `url`
+/// is on `origin`.
+pub(crate) fn bearer_asset_request(
+    client: &Client,
+    url: &str,
+    origin: &str,
+    token: &str,
+) -> Option<RequestBuilder> {
+    same_origin(url, origin).then(|| client.get(url).bearer_auth(token))
 }
 
 /// Render an RFC3339 timestamp as a compact relative age ("now", "30m",
@@ -452,6 +486,29 @@ mod tests {
                 &HeaderMap::new(),
             ),
             ProviderError::HttpStatus { .. }
+        ));
+    }
+
+    #[test]
+    fn same_origin_rejects_lookalike_hosts() {
+        let base = "https://api.github.com";
+        assert!(same_origin(
+            "https://api.github.com/repos/o/r/releases/assets/1",
+            base
+        ));
+        assert!(same_origin("https://API.github.com/x", base));
+        // Userinfo trick: the host is evil.example, not api.github.com.
+        assert!(!same_origin("https://api.github.com@evil.example/x", base));
+        assert!(!same_origin("https://api.github.com.evil.example/x", base));
+        // Plain HTTP would put the token on the wire in clear.
+        assert!(!same_origin("http://api.github.com/x", base));
+        assert!(!same_origin("https://api.github.com:8443/x", base));
+        assert!(!same_origin("not a url", base));
+        // A path prefix on the base (GitLab under a relative URL root) doesn't
+        // narrow the origin — the instance is the trust boundary.
+        assert!(same_origin(
+            "https://example.com/other/path",
+            "https://example.com/gitlab"
         ));
     }
 

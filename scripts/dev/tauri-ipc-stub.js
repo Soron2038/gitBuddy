@@ -91,12 +91,36 @@
       tag: 'v1.0.1', name: 'gitBuddy 1.0.1', published_at: iso(5 * D),
       html_url: 'https://github.com/Soron2038/gitBuddy/releases/tag/v1.0.1',
       is_prerelease: false, is_new: true, age_human: '5d', account_id: ACCOUNT.id,
+      assets: [
+        { name: 'gitBuddy_1.0.1_aarch64.dmg', size: 9_870_123,
+          browser_url: 'https://github.com/Soron2038/gitBuddy/releases/download/v1.0.1/gitBuddy_1.0.1_aarch64.dmg',
+          download_url: 'https://api.github.com/repos/Soron2038/gitBuddy/releases/assets/1' },
+        { name: 'gitBuddy_1.0.1_aarch64.app.tar.gz', size: 9_512_004,
+          browser_url: 'https://github.com/Soron2038/gitBuddy/releases/download/v1.0.1/gitBuddy_1.0.1_aarch64.app.tar.gz',
+          download_url: 'https://api.github.com/repos/Soron2038/gitBuddy/releases/assets/2' },
+        { name: 'latest.json', size: 812,
+          browser_url: 'https://github.com/Soron2038/gitBuddy/releases/download/v1.0.1/latest.json',
+          download_url: 'https://api.github.com/repos/Soron2038/gitBuddy/releases/assets/3' },
+      ],
+    },
+    {
+      // Months old and not `is_new` — still the release you want most days.
+      repo_id: 'gh:2', repo_full_name: 'Soron2038/website', provider: 'github',
+      tag: 'v2.3.0', name: 'Website 2.3', published_at: iso(170 * D),
+      html_url: 'https://github.com/Soron2038/website/releases/tag/v2.3.0',
+      is_prerelease: false, is_new: false, age_human: '5mo', account_id: ACCOUNT.id,
+      assets: [
+        { name: 'site-dist.zip', size: 3_400_000,
+          browser_url: 'https://github.com/Soron2038/website/releases/download/v2.3.0/site-dist.zip',
+          download_url: 'https://api.github.com/repos/Soron2038/website/releases/assets/9' },
+      ],
     },
     {
       repo_id: 'gh:4', repo_full_name: 'mpsd/analysis-tools', provider: 'github',
       tag: 'v0.9.0-rc1', name: 'Release candidate', published_at: iso(2 * D),
       html_url: 'https://github.com/mpsd/analysis-tools/releases/tag/v0.9.0-rc1',
       is_prerelease: true, is_new: true, age_human: '2d', account_id: ACCOUNT.id,
+      assets: [],
     },
   ];
 
@@ -146,6 +170,8 @@
     list_releases: () => RELEASES,
     list_ci: () => CI,
     list_local_repos: () => LOCALS,
+    download_release_asset: ({ assetName }) =>
+      ({ kind: 'saved', path: `/Users/witt/Downloads/${assetName}` }),
     get_settings: () => SETTINGS,
     save_settings: () => null,
     last_sync_info: () => ({ synced_at: iso(90e3), last_error: null }),
@@ -162,6 +188,7 @@
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
     'plugin:opener|open_url': () => null,
+    'plugin:opener|reveal_item_in_dir': () => null,
     'plugin:clipboard-manager|write_text': () => null,
   };
 

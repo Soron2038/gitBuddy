@@ -272,8 +272,24 @@ export interface Release {
   is_prerelease: boolean;
   is_new: boolean;
   age_human: string;
+  /** Files the publisher attached — never the auto-generated source
+   *  archives. */
+  assets: ReleaseAsset[];
   account_id: string | null;
 }
+
+export interface ReleaseAsset {
+  name: string;
+  /** Bytes; `null` where the forge doesn't report it (GitLab links). */
+  size: number | null;
+  browser_url: string;
+  download_url: string;
+}
+
+/** Outcome of `download_release_asset`: saved to disk, or a URL the browser
+ *  should take over (external link, or a file the forge only serves to a
+ *  signed-in browser). */
+export type AssetDownload = { kind: 'saved'; path: string } | { kind: 'browser'; url: string };
 
 export type CiStatus = 'ok' | 'fail' | 'run' | 'cancelled' | 'none';
 
@@ -472,6 +488,17 @@ export const cloneRepo = (
   accountId: string | null,
 ): Promise<string> =>
   invoke('clone_repo', { url, parentDir, folderName, accountId });
+
+/** Download one release file into ~/Downloads with the account's token. The
+ *  file is named by (account, repo, tag, name) — the backend looks the URL up
+ *  in its own cache and decides whether the token may be sent there. */
+export const downloadReleaseAsset = (
+  accountId: string,
+  repoId: string,
+  tag: string,
+  assetName: string,
+): Promise<AssetDownload> =>
+  invoke('download_release_asset', { accountId, repoId, tag, assetName });
 
 /** Build a (host, owner, name) → LocalRepo[] map for fast remote→local joins. */
 export function indexLocalByRemote(locals: LocalRepo[]): Map<string, LocalRepo[]> {

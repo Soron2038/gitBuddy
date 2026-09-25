@@ -9,6 +9,7 @@ mod accounts;
 mod aggregator;
 mod codeberg;
 mod commands;
+mod downloads;
 mod github;
 mod gitlab;
 mod keychain;
@@ -70,6 +71,7 @@ pub fn run() {
             commands::aggregator_refresh_now,
             commands::last_sync_info,
             commands::clone_repo,
+            commands::download_release_asset,
             commands::get_settings,
             commands::save_settings,
             commands::export_config,

@@ -3,15 +3,16 @@
 //! REST API at `/api/v1/`, so this module mirrors github.rs closely.
 
 use crate::provider_util::{
-    collapse_ci_status, decode_error, http_client, humanise_age, is_rate_limited,
-    normalise_base_url, reason_priority, repo_call_budget, response_error, within_days,
-    ProviderBackend, ProviderError,
+    bearer_asset_request, collapse_ci_status, decode_error, http_client, humanise_age,
+    is_rate_limited, normalise_base_url, reason_priority, repo_call_budget, response_error,
+    within_days, ProviderBackend, ProviderError,
 };
 use crate::types::{
-    CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, Repo, Viewer, WaitingItem,
+    CiRun, CiStatus, ItemKind, ItemReason, Provider, Release, ReleaseAsset, Repo, Viewer,
+    WaitingItem,
 };
 use chrono::Utc;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::Deserialize;
 
 const ACCEPT: &str = "application/json";
@@ -269,6 +270,9 @@ impl ProviderBackend for CodebergProvider {
     }
     async fn list_ci(&self, repos: &[Repo]) -> Result<Vec<CiRun>> {
         self.list_ci(repos).await
+    }
+    fn asset_request(&self, client: &Client, asset: &ReleaseAsset) -> Option<RequestBuilder> {
+        bearer_asset_request(client, &asset.download_url, &self.base_url, &self.token)
     }
 }
 
@@ -539,6 +543,19 @@ async fn fetch_latest_release(
         prerelease: bool,
         #[serde(default)]
         draft: bool,
+        #[serde(default)]
+        assets: Vec<RawAsset>,
+    }
+    /// A release attachment. Gitea/Forgejo accept the token on the
+    /// attachment download routes (`/attachments/…`, `…/releases/download/…`)
+    /// as well as on the API, so `browser_download_url` doubles as the
+    /// authenticated download URL.
+    #[derive(Deserialize)]
+    struct RawAsset {
+        name: String,
+        #[serde(default)]
+        size: Option<u64>,
+        browser_download_url: String,
     }
 
     let raw: Vec<RawRelease> = resp.json().await.map_err(decode_error("Gitea"))?;
@@ -566,6 +583,16 @@ async fn fetch_latest_release(
         is_prerelease: r.prerelease,
         is_new: false, // filled in by list_releases against a consistent `now`
         age_human: String::new(),
+        assets: r
+            .assets
+            .into_iter()
+            .map(|a| ReleaseAsset {
+                name: a.name,
+                size: a.size,
+                download_url: a.browser_download_url.clone(),
+                browser_url: a.browser_download_url,
+            })
+            .collect(),
         account_id: None,
     }))
 }
@@ -988,5 +1015,55 @@ mod tests {
             .await;
         let cb = CodebergProvider::for_test(server.uri(), "t".into(), viewer("tester"));
         assert!(cb.list_releases(&[repo()]).await.expect("ok").is_empty());
+    }
+
+    #[tokio::test]
+    async fn latest_release_carries_its_attachments() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"tag_name":"v1","name":"v1","html_url":"https://x/v1",
+                     "published_at":"2026-06-01T00:00:00Z","draft":false,"prerelease":false,
+                     "assets":[{"id":3,"name":"tool.tar.gz","size":99,"uuid":"u",
+                                "browser_download_url":"https://codeberg.org/o/r/releases/download/v1/tool.tar.gz"}]}]"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let release =
+            fetch_latest_release(&http_client().expect("client"), "t", &server.uri(), &repo())
+                .await
+                .expect("ok")
+                .expect("a release");
+
+        let url = "https://codeberg.org/o/r/releases/download/v1/tool.tar.gz";
+        assert_eq!(
+            release.assets,
+            vec![ReleaseAsset {
+                name: "tool.tar.gz".into(),
+                size: Some(99),
+                browser_url: url.into(),
+                download_url: url.into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn asset_request_only_sends_the_token_to_the_instance() {
+        let cb = CodebergProvider::for_test("https://codeberg.org".into(), "t".into(), viewer("x"));
+        let client = http_client().expect("client");
+        let asset = |url: &str| ReleaseAsset {
+            name: "a".into(),
+            size: None,
+            browser_url: url.into(),
+            download_url: url.into(),
+        };
+        assert!(cb
+            .asset_request(&client, &asset("https://codeberg.org/attachments/u"))
+            .is_some());
+        assert!(cb
+            .asset_request(&client, &asset("https://other.example/attachments/u"))
+            .is_none());
     }
 }

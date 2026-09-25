@@ -125,3 +125,19 @@ export function hostSuggestions(
   // now say so by suggesting nothing, rather than guessing wrong.
   return Array.from(out).sort();
 }
+
+/** Human file size for a release asset ("840 B", "12.4 MB"). Decimal units,
+ *  the way Finder reports sizes, so the number matches what the user sees
+ *  after the download. Empty string when the forge reported no size. */
+export function formatBytes(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1000) return `${bytes} B`;
+  const units = ['kB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1000;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}

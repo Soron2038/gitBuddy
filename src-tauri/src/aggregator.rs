@@ -698,6 +698,7 @@ mod tests {
             is_prerelease: false,
             is_new,
             age_human: "1d".into(),
+            assets: Vec::new(),
             account_id: Some(account.into()),
         }
     }

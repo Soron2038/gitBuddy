@@ -11,6 +11,7 @@ use crate::{
     accounts, aggregator,
     aggregator::AggregatorCache,
     codeberg::CodebergProvider,
+    downloads::{self, Fetched},
     github::GitHubProvider,
     gitlab::GitLabProvider,
     keychain,
@@ -976,6 +977,84 @@ pub async fn clone_repo(
     })
     .await
     .map_err(|e| format!("clone task panicked: {e}"))?
+}
+
+/// Result of [`download_release_asset`]. Tagged so the frontend can switch on
+/// `kind`.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AssetDownload {
+    /// Saved to disk; the frontend reveals it in Finder.
+    Saved { path: String },
+    /// The app can't (or mustn't) fetch this file itself — open this URL in
+    /// the browser instead.
+    Browser { url: String },
+}
+
+/// Download one release asset into the user's Downloads folder with the
+/// account's token.
+///
+/// The frontend names the asset by `(account, repo, tag, file name)` rather
+/// than passing a URL: the URL is looked up in the aggregator cache, i.e. it
+/// is whatever the forge reported, and `ProviderBackend::asset_request`
+/// decides whether the token may go there. When it may not (an external
+/// link), or the forge wants a browser session for the file, the answer is
+/// the browser URL instead of an error.
+#[tauri::command]
+pub async fn download_release_asset(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+    account_id: String,
+    repo_id: String,
+    tag: String,
+    asset_name: String,
+) -> Result<AssetDownload, String> {
+    state.ensure_initialized(&app).await;
+
+    let asset = {
+        let cache = state.cache.read().await;
+        cache
+            .releases
+            .iter()
+            .find(|r| {
+                r.account_id.as_deref() == Some(account_id.as_str())
+                    && r.repo_id == repo_id
+                    && r.tag == tag
+            })
+            .and_then(|r| r.assets.iter().find(|a| a.name == asset_name))
+            .cloned()
+    }
+    .ok_or("That release file is no longer listed — refresh and try again.")?;
+
+    // Only ever hand the webview an http(s) URL to open, whatever the forge
+    // put in a publisher-controlled link.
+    let browser_url = asset.browser_url.clone();
+    let browser = || {
+        if browser_url.starts_with("https://") || browser_url.starts_with("http://") {
+            Ok(AssetDownload::Browser {
+                url: browser_url.clone(),
+            })
+        } else {
+            Err("This release file has no web address gitBuddy can open.".to_string())
+        }
+    };
+
+    let provider = state.providers.read().await.get(&account_id).cloned();
+    let Some(provider) = provider else {
+        return browser();
+    };
+    let client = downloads::download_client().map_err(|e| e.to_string())?;
+    let Some(request) = provider.asset_request(&client, &asset) else {
+        return browser();
+    };
+    let dir = dirs::download_dir().ok_or("Couldn't locate your Downloads folder.")?;
+
+    match downloads::fetch_to(request, &dir, &asset.name).await? {
+        Fetched::Saved(path) => Ok(AssetDownload::Saved {
+            path: path.to_string_lossy().into_owned(),
+        }),
+        Fetched::NeedsBrowser => browser(),
+    }
 }
 
 #[tauri::command]

@@ -29,6 +29,7 @@
     dedupeBy,
   } from '$lib/format';
   import { deriveProviderHeads } from '$lib/data/auth';
+  import { assetLabel, getReleaseAsset } from '$lib/data/assets';
   // Window-wide visual vocabulary shared with the extracted components
   // (.row family, chips, badges) — see the note at the top of the file.
   import './main-window.css';
@@ -69,6 +70,7 @@
     type Repo,
     type LocalRepo,
     type Release,
+    type ReleaseAsset,
     type CiRun,
     type CiStatus,
     type Settings,
@@ -897,10 +899,48 @@
   }
 
   function openReleaseMenu(e: MouseEvent, rel: Release) {
-    showMenu(e, [
+    const m: MenuItem[] = rel.assets.map((a) => ({
+      label: `Download ${assetLabel(a)}`,
+      onclick: () => downloadAsset(rel, a),
+    }));
+    if (m.length > 0) m.push({ separator: true });
+    m.push(
       { label: 'Open release', onclick: () => openExternal(rel.html_url) },
       { label: 'Copy release URL', onclick: () => act(() => writeText(rel.html_url)) },
-    ]);
+    );
+    showMenu(e, m);
+  }
+
+  /** Releases with a download in flight, by `releaseKey`. */
+  let downloading = $state<Set<string>>(new Set());
+
+  function downloadAsset(rel: Release, asset: ReleaseAsset) {
+    const key = releaseKey(rel);
+    if (downloading.has(key)) return;
+    downloading = new Set(downloading).add(key);
+    act(() =>
+      getReleaseAsset(rel, asset).finally(() => {
+        const next = new Set(downloading);
+        next.delete(key);
+        downloading = next;
+      }),
+    );
+  }
+
+  /** One file downloads straight away; several open a menu to pick from. */
+  function onDownloadClick(e: MouseEvent, rel: Release) {
+    if (rel.assets.length === 1) {
+      downloadAsset(rel, rel.assets[0]);
+      return;
+    }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    menuItems = rel.assets.map((a) => ({
+      label: assetLabel(a),
+      onclick: () => downloadAsset(rel, a),
+    }));
+    menuX = rect.left;
+    menuY = rect.bottom + 4;
+    menuOpen = true;
   }
 
   // ── Settings actions ─────────────────────────────────────────────────
@@ -1737,35 +1777,67 @@
             {:else}
               <div class="row-list">
                 {#each filteredReleases as rel (releaseKey(rel))}
-                  <button
-                    type="button"
-                    class="row release-row"
-                    onclick={() => openExternal(rel.html_url)}
-                    oncontextmenu={(e) => openReleaseMenu(e, rel)}
-                  >
-                    <span class="kind-chip rel">
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M12 2 4 7v10l8 5 8-5V7z" />
-                        <path d="m4 7 8 5 8-5" />
-                        <path d="M12 22V12" />
-                      </svg>
-                    </span>
-                    <span class="row-body">
-                      <span class="row-title">
-                        {rel.name || rel.tag}
-                        {#if rel.is_prerelease}<span class="badge-pre">pre</span>{/if}
+                  {@const busy = downloading.has(releaseKey(rel))}
+                  <div class="release-item">
+                    <button
+                      type="button"
+                      class="row release-row"
+                      class:has-dl={rel.assets.length > 0}
+                      onclick={() => openExternal(rel.html_url)}
+                      oncontextmenu={(e) => openReleaseMenu(e, rel)}
+                    >
+                      <span class="kind-chip rel">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M12 2 4 7v10l8 5 8-5V7z" />
+                          <path d="m4 7 8 5 8-5" />
+                          <path d="M12 22V12" />
+                        </svg>
                       </span>
-                      <span class="row-meta">
-                        <span class="row-repo">{rel.repo_full_name}</span>
-                        <span class="row-dot">·</span>
-                        <span class="row-tag">{rel.tag}</span>
+                      <span class="row-body">
+                        <span class="row-title">
+                          {rel.name || rel.tag}
+                          {#if rel.is_prerelease}<span class="badge-pre">pre</span>{/if}
+                        </span>
+                        <span class="row-meta">
+                          <span class="row-repo">{rel.repo_full_name}</span>
+                          <span class="row-dot">·</span>
+                          <span class="row-tag">{rel.tag}</span>
+                        </span>
                       </span>
-                    </span>
-                    <span class="row-age">
-                      {rel.age_human}
-                      {#if rel.is_new}<span class="new-badge">NEW</span>{/if}
-                    </span>
-                  </button>
+                      <span class="row-age">
+                        {rel.age_human}
+                        {#if rel.is_new}<span class="new-badge">NEW</span>{/if}
+                      </span>
+                    </button>
+                    <!-- Sibling of the row button (buttons can't nest), laid
+                         over the space `.has-dl` reserves on the row's right. -->
+                    {#if rel.assets.length > 0}
+                      <button
+                        type="button"
+                        class="dl-btn"
+                        class:busy
+                        disabled={busy}
+                        onclick={(e) => onDownloadClick(e, rel)}
+                        aria-label={busy
+                          ? `Downloading from ${rel.repo_full_name} ${rel.tag}`
+                          : rel.assets.length === 1
+                            ? `Download ${assetLabel(rel.assets[0])}`
+                            : `Download a file from ${rel.repo_full_name} ${rel.tag} (${rel.assets.length} files)`}
+                        data-tip={busy
+                          ? 'Downloading…'
+                          : rel.assets.length === 1
+                            ? assetLabel(rel.assets[0])
+                            : `${rel.assets.length} files`}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M12 3v12" />
+                          <path d="m7 10 5 5 5-5" />
+                          <path d="M5 21h14" />
+                        </svg>
+                        {#if rel.assets.length > 1}<span class="dl-count">{rel.assets.length}</span>{/if}
+                      </button>
+                    {/if}
+                  </div>
                 {/each}
               </div>
             {/if}

@@ -21,8 +21,11 @@
     type LocalRepo,
     type CiRun,
     type Release,
+    type ReleaseAsset,
     type WaitingItem,
   } from '$lib/data/api';
+  import { formatBytes } from '$lib/format';
+  import { getReleaseAsset } from '$lib/data/assets';
 
   interface Props {
     repo: Repo;
@@ -71,6 +74,22 @@
   }: Props = $props();
 
   let firstLocal = $derived(localDiag[0]);
+
+  /** Name of the release file being downloaded, if any — one at a time from
+   *  this pane, so the busy state is a single slot. */
+  let downloadingAsset: string | null = $state(null);
+
+  async function downloadAsset(rel: Release, asset: ReleaseAsset) {
+    if (downloadingAsset !== null) return;
+    downloadingAsset = asset.name;
+    try {
+      await getReleaseAsset(rel, asset);
+    } catch (e) {
+      onActionError(String(e));
+    } finally {
+      downloadingAsset = null;
+    }
+  }
 
   /** Run a fire-and-forget action and surface its failure instead of letting
    *  the rejection disappear into an unhandled promise. */
@@ -429,6 +448,31 @@
             onclick={() => openExternal(rel.html_url)}
           >View release →</button>
         </div>
+        {#if rel.assets.length > 0}
+          <ul class="dp-assets" aria-label="Release files">
+            {#each rel.assets as asset}
+              {@const busy = downloadingAsset === asset.name}
+              <li>
+                <button
+                  type="button"
+                  class="dp-asset"
+                  class:busy
+                  disabled={downloadingAsset !== null}
+                  onclick={() => downloadAsset(rel, asset)}
+                  aria-label={busy ? `Downloading ${asset.name}` : `Download ${asset.name}`}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 3v12" />
+                    <path d="m7 10 5 5 5-5" />
+                    <path d="M5 21h14" />
+                  </svg>
+                  <span class="dp-asset-name">{asset.name}</span>
+                  <span class="dp-asset-size">{busy ? 'downloading…' : formatBytes(asset.size)}</span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </div>
     {/if}
   </section>
@@ -859,6 +903,47 @@
   margin-left: auto;
 }
 .dp-link:hover { text-decoration: underline; }
+
+.dp-assets {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dp-asset {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.dp-asset:hover:not(:disabled) { background: var(--cream-2); color: var(--ink); }
+.dp-asset:focus-visible { outline: 2px solid var(--terracotta); outline-offset: 1px; }
+.dp-asset:disabled { cursor: default; opacity: 0.6; }
+.dp-asset.busy { cursor: progress; opacity: 1; }
+.dp-asset-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.dp-asset-size {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
 
 .dp-items {
   display: flex;

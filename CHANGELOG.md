@@ -7,6 +7,20 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Download release files straight from gitBuddy.** Releases now list the
+  files the publisher attached (installers, binaries, archives — not the
+  auto-generated source archives). A download button on each release in the
+  popover and the main window, and a file list in the repo detail pane,
+  fetch the file into `~/Downloads` with your account's token and show it in
+  Finder — so a private repo's installer downloads even on a machine whose
+  browser was never signed in to the forge. The token is only ever sent to
+  the account's own forge; a file linked from anywhere else, or one the forge
+  only serves to a signed-in browser, opens in the browser instead.
+  Downloaded files carry the same quarantine flag a browser download gets, so
+  Gatekeeper checks them as usual.
+
 ### Changed
 
 - **The main window's Releases view lists the latest release of every repo**,
