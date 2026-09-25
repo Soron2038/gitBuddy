@@ -11,6 +11,21 @@
   --paper:        #FFFDF8;
   --paper-2:      #FDF7EA;
 
+  /* Gradient surfaces, as from/to pairs: the popover header, the main
+     window's title bar and its three tinted stat cards. They were literal
+     colours in the components, so in dark mode they stayed light under
+     text that had already turned cream. */
+  --head-from:      #FFF9EC;
+  --head-to:        #FDF7EA;
+  --titlebar-from:  #FDF7EA;
+  --titlebar-to:    #F4E9D2;
+  --stat-t-from:    #FBE6DA;
+  --stat-t-to:      #F6D7C2;
+  --stat-s-from:    #E7EDD9;
+  --stat-s-to:      #DCE7CD;
+  --stat-b-from:    #FBEED1;
+  --stat-b-to:      #F4E0AE;
+
   /* Ink.
      ink-3 is the workhorse for 11–12.5px meta text and now clears WCAG AA
      (4.52:1 on --paper; it was 4.15:1). ink-4 is deliberately *not* pushed to
@@ -93,6 +108,21 @@
     --cream-3:      #3A322A;
     --paper:        #1A1512;
     --paper-2:      #211B17;
+
+    /* Headers lift slightly off --paper; the stat cards run from each
+       accent's --*-soft tint to a shade darker. Measured like the rest:
+       --ink on the headers 13.4:1 or more, --ink-2 on the stat cards
+       7.6:1 or more, each card's number on its own tint 5.2:1 or more. */
+    --head-from:      #27201A;
+    --head-to:        #211B17;
+    --titlebar-from:  #241E19;
+    --titlebar-to:    #1E1915;
+    --stat-t-from:    #3B241B;
+    --stat-t-to:      #321F17;
+    --stat-s-from:    #25301F;
+    --stat-s-to:      #1F281A;
+    --stat-b-from:    #382C13;
+    --stat-b-to:      #2F2510;
 
     --ink:          #F2E9DF;
     --ink-2:        #CDBFB1;

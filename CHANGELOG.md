@@ -28,6 +28,15 @@ All notable changes to gitBuddy are documented here. The format follows
   months old; fresh ones still carry the NEW badge and sort to the top, the
   same rule the popover's Releases tab already followed.
 
+### Fixed
+
+- **Dark mode: the popover header, the main window's title bar and the three
+  tinted stat cards now go dark too.** They were painted with fixed light
+  colours, so at night the "git" of the wordmark, the window title and the
+  new-release count all but disappeared against them. The small print on the
+  tinted stat cards is also darker in both schemes; it fell short of WCAG AA
+  on those tints even in light mode.
+
 ## [1.2.1] — 2026-09-16
 
 One fix, for everyone who upgraded to macOS 27.

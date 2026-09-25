@@ -2514,7 +2514,7 @@
   /* Title bar ------------------------------------------------------- */
   .titlebar {
     height: 46px;
-    background: linear-gradient(180deg, #FDF7EA 0%, #F4E9D2 100%);
+    background: linear-gradient(180deg, var(--titlebar-from) 0%, var(--titlebar-to) 100%);
     border-bottom: 1px solid var(--line);
     display: flex;
     align-items: center;
@@ -3029,19 +3029,27 @@
     margin-top: 4px;
   }
   .stat.t {
-    background: linear-gradient(135deg, #FBE6DA 0%, #F6D7C2 100%);
+    background: linear-gradient(135deg, var(--stat-t-from) 0%, var(--stat-t-to) 100%);
     border-color: rgba(198, 98, 67, 0.12);
   }
   .stat.t .num { color: var(--terracotta); }
   .stat.s {
-    background: linear-gradient(135deg, #E7EDD9 0%, #DCE7CD 100%);
+    background: linear-gradient(135deg, var(--stat-s-from) 0%, var(--stat-s-to) 100%);
     border-color: rgba(128, 152, 123, 0.18);
   }
-  .stat.s .num { color: #5E7758; }
+  /* --sage-ink rather than a literal: #5E7758 was 3.8:1 on this card and
+     would have sunk into the dark tint entirely. */
+  .stat.s .num { color: var(--sage-ink); }
   .stat.b {
-    background: linear-gradient(135deg, #FBEED1 0%, #F4E0AE 100%);
+    background: linear-gradient(135deg, var(--stat-b-from) 0%, var(--stat-b-to) 100%);
     border-color: rgba(232, 185, 75, 0.2);
   }
+  /* The small print on a tinted card needs --ink-2: --ink-3 clears AA on
+     --paper but measured 3.4–4.0:1 on these tints in light mode and only
+     just 4.5:1 in dark. */
+  .stat.t :is(.lbl, .delta),
+  .stat.s :is(.lbl, .delta),
+  .stat.b :is(.lbl, .delta) { color: var(--ink-2); }
   /* On the butter gradient behind it, #B68C2C measured ~2.4:1. */
   .stat.b .num { color: var(--butter-ink); }
 

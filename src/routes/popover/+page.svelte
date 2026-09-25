@@ -1027,7 +1027,7 @@
     align-items: center;
     gap: 10px;
     border-bottom: 1px solid var(--line);
-    background: linear-gradient(180deg, #FFF9EC 0%, #FDF7EA 100%);
+    background: linear-gradient(180deg, var(--head-from) 0%, var(--head-to) 100%);
   }
   .brand {
     font-family: var(--font-display);
