@@ -12,7 +12,11 @@ clones (branch, dirty/untracked, ahead/behind) via libgit2.
 - **Waiting on me** — issues/PRs/MRs where you're assigned, review-requested,
   authored, or mentioned.
 - **Releases & CI** — latest release per repo and the CI status of the default
-  branch.
+  branch. Release files (installers, binaries) download straight into
+  `~/Downloads` with your account's token, private repos included.
+- **Push from anywhere** — clones made with gitBuddy push over HTTPS with the
+  token of the account you're signed in with, from any terminal, without SSH
+  keys (see below).
 - **Local clone diagnostics** — current branch, staged/unstaged/untracked
   counts, ahead/behind upstream, all via libgit2 (no shelling out to `git`).
 - **Native notifications** — for waiting items, new releases, and CI failures
@@ -38,7 +42,18 @@ GitHub can be connected two ways:
 - **Personal access token** — create a token with scopes `repo, read:org` and
   paste it in.
 
-GitLab and Codeberg/Gitea/Forgejo currently use PATs only.
+GitLab and Codeberg/Gitea/Forgejo currently use PATs only. A Gitea/Forgejo
+token needs `read:user` and `read:repository`, plus `write:repository` if you
+want to push through gitBuddy.
+
+### Pushing from gitBuddy clones
+
+Every clone gitBuddy makes registers gitBuddy as its git credential helper, so
+`git push` over HTTPS gets the account's token from gitBuddy — in any terminal,
+whether or not the app is running. For a clone made some other way, use
+**Enable push via gitBuddy** in the repo's detail pane. Only the clone's own
+`.git/config` is changed (a `credential."https://<forge>".helper` entry);
+remove that section to undo it. Clones that use SSH remotes are left alone.
 
 Background on OAuth app registration and the Keychain layout: see
 [docs/DECISIONS.md](docs/DECISIONS.md).

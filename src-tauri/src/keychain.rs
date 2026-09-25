@@ -26,15 +26,20 @@ pub async fn save(account: &str, token: &str) -> keyring::Result<()> {
 /// `Err(_)` for any other failure.
 pub async fn load(account: &str) -> keyring::Result<Option<String>> {
     let account = account.to_owned();
-    tokio::task::spawn_blocking(
-        move || match Entry::new(SERVICE, &account)?.get_password() {
-            Ok(p) => Ok(Some(p)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e),
-        },
-    )
-    .await
-    .map_err(join_failure)?
+    tokio::task::spawn_blocking(move || load_blocking(&account))
+        .await
+        .map_err(join_failure)?
+}
+
+/// [`load`] without the async wrapper, for the one caller that has no Tokio
+/// runtime: the git credential helper (`git_credential.rs`), which runs as a
+/// short-lived process of its own.
+pub fn load_blocking(account: &str) -> keyring::Result<Option<String>> {
+    match Entry::new(SERVICE, account)?.get_password() {
+        Ok(p) => Ok(Some(p)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn delete(account: &str) -> keyring::Result<()> {

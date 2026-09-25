@@ -12,6 +12,7 @@ use crate::{
     aggregator::AggregatorCache,
     codeberg::CodebergProvider,
     downloads::{self, Fetched},
+    git_credential::{self, HelperScope},
     github::GitHubProvider,
     gitlab::GitLabProvider,
     keychain,
@@ -928,6 +929,11 @@ pub async fn clone_repo(
     // clone URL originates from a forge API response, and a malicious or
     // compromised instance could return a clone_url pointing at a foreign
     // HTTPS host to harvest the token the credentials callback hands out.
+    //
+    // The same account also becomes the clone's git credential helper, so a
+    // later `git push` in any terminal gets the token from gitBuddy instead of
+    // asking for a password (see `git_credential.rs`).
+    let mut push_helper: Option<(HelperScope, String)> = None;
     let token: Option<String> = if let Some(id) = account_id.as_deref() {
         match state.providers.read().await.get(id) {
             Some(p) => {
@@ -944,6 +950,7 @@ pub async fn clone_repo(
                         "Clone URL host does not match the account's host ({expected})."
                     ));
                 }
+                push_helper = push_helper_for(id, p.base_url());
                 Some(p.token().to_string())
             }
             None => None,
@@ -970,13 +977,104 @@ pub async fn clone_repo(
         let mut builder = git2::build::RepoBuilder::new();
         builder.fetch_options(fo);
 
-        builder
+        let repo = builder
             .clone(&url, &target)
-            .map(|_| target.to_string_lossy().into_owned())
-            .map_err(|e| format!("clone failed: {e}"))
+            .map_err(|e| format!("clone failed: {e}"))?;
+        // Best-effort: the clone itself succeeded, and the detail pane offers
+        // "Enable push via gitBuddy" for any clone that ended up without it.
+        if let Some((scope, command)) = push_helper {
+            if let Err(e) = git_credential::configure(&repo, &scope, &command) {
+                eprintln!("gitbuddy: setting up push for {}: {e}", target.display());
+            }
+        }
+        Ok(target.to_string_lossy().into_owned())
     })
     .await
     .map_err(|e| format!("clone task panicked: {e}"))?
+}
+
+/// The credential-helper config for `account_id`, or `None` when this binary
+/// can't serve as the helper (see `git_credential::unusable_exe`) — a clone
+/// is still worth having without it.
+fn push_helper_for(account_id: &str, base_url: Option<&str>) -> Option<(HelperScope, String)> {
+    let scope = HelperScope::for_forge(base_url)?;
+    let exe = std::env::current_exe().ok()?;
+    if git_credential::unusable_exe(&exe).is_some() {
+        return None;
+    }
+    let command = git_credential::helper_command(&exe, account_id, &scope.host);
+    Some((scope, command))
+}
+
+/// Make an existing clone push through gitBuddy: route its git credentials
+/// for `account_id`'s forge to the gitBuddy credential helper. What
+/// `clone_repo` does for new clones, for checkouts made some other way.
+#[tauri::command]
+pub async fn enable_git_push(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+    path: String,
+    account_id: String,
+) -> Result<(), String> {
+    state.ensure_initialized(&app).await;
+
+    let base_url = state
+        .providers
+        .read()
+        .await
+        .get(&account_id)
+        .map(|p| p.base_url().map(str::to_string))
+        .ok_or("That account isn't connected any more.")?;
+    let scope = HelperScope::for_forge(base_url.as_deref())
+        .ok_or("The account's forge address isn't an HTTPS URL.")?;
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("Couldn't locate the gitBuddy program: {e}"))?;
+    if let Some(why) = git_credential::unusable_exe(&exe) {
+        return Err(why.into());
+    }
+    let command = git_credential::helper_command(&exe, &account_id, &scope.host);
+
+    tokio::task::spawn_blocking(move || {
+        let repo = git2::Repository::open(&path)
+            .map_err(|e| format!("Couldn't open the clone at {path}: {e}"))?;
+        let origin = repo
+            .find_remote("origin")
+            .ok()
+            .and_then(|r| r.url().map(str::to_string))
+            .ok_or("This clone has no origin remote to push to.")?;
+        // A credential helper only ever sees HTTPS; an SSH remote already
+        // pushes with the SSH key and needs nothing from us.
+        if !origin.starts_with("https://") {
+            return Err(
+                "This clone talks to its forge over SSH, so pushes already use your SSH key."
+                    .to_string(),
+            );
+        }
+        if !crate::provider_util::same_origin(&origin, &scope.url) {
+            return Err(format!("This clone's origin isn't on {}.", scope.host));
+        }
+        git_credential::configure(&repo, &scope, &command)
+    })
+    .await
+    .map_err(|e| format!("push setup task panicked: {e}"))?
+}
+
+/// Walk the scan roots now and replace the cached local list — no network.
+/// For when the UI knows the disk just changed (a clone landed, push was set
+/// up on a checkout): `list_local_repos` only reads the cache, which the next
+/// poll would refresh up to a whole interval later.
+#[tauri::command]
+pub async fn rescan_local_repos(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<Vec<LocalRepo>, String> {
+    state.ensure_initialized(&app).await;
+    let settings = settings::load(&app)?;
+    let locals = tokio::task::spawn_blocking(move || crate::local_index::scan(&settings))
+        .await
+        .map_err(|e| format!("Local scan task panicked: {e}"))?;
+    state.cache.write().await.locals = locals.clone();
+    Ok(locals)
 }
 
 /// Result of [`download_release_asset`]. Tagged so the frontend can switch on

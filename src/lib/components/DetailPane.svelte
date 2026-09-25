@@ -12,6 +12,7 @@
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import {
     cloneRepo,
+    enableGitPush,
     runEditor,
     runTerminal,
     providerChipText,
@@ -45,8 +46,9 @@
     hasScanRoots: boolean;
     onclose: () => void;
     onOpenSettings: () => void;
-    /** Called after a successful clone so the parent can rescan locals. */
-    onCloned: () => Promise<void> | void;
+    /** Called after a clone lands or push is set up on one, so the parent
+     *  rescans the local clones. */
+    onLocalsChanged: () => Promise<void> | void;
     onItemContextMenu: (e: MouseEvent, item: WaitingItem) => void;
     /** Report a failed quick action to the parent so it can show it. These
      *  actions are all fire-and-forget IPC calls: `run_editor` fails when the
@@ -68,12 +70,34 @@
     hasScanRoots,
     onclose,
     onOpenSettings,
-    onCloned,
+    onLocalsChanged,
     onItemContextMenu,
     onActionError,
   }: Props = $props();
 
   let firstLocal = $derived(localDiag[0]);
+
+  /** Clone whose push setup is in flight, by path. */
+  let enablingPush: string | null = $state(null);
+
+  async function enablePush(l: LocalRepo) {
+    if (!cloneAccountId || enablingPush !== null) return;
+    enablingPush = l.path;
+    try {
+      await enableGitPush(l.path, cloneAccountId);
+      await onLocalsChanged();
+    } catch (e) {
+      onActionError(String(e));
+    } finally {
+      enablingPush = null;
+    }
+  }
+
+  /** A credential helper only ever sees HTTPS remotes; an SSH clone already
+   *  pushes with the SSH key. */
+  function canEnablePush(l: LocalRepo): boolean {
+    return !l.push_via_gitbuddy && !!cloneAccountId && !!l.remote?.raw_url.startsWith('https://');
+  }
 
   /** Name of the release file being downloaded, if any — one at a time from
    *  this pane, so the busy state is a single slot. */
@@ -161,7 +185,7 @@
       cloneMessage = path;
       // Refresh the local scan so the new clone gets joined onto its
       // remote repo across the UI.
-      await onCloned();
+      await onLocalsChanged();
       // Auto-close after a short beat so the user sees the success
       // message but doesn't have to dismiss it.
       autoCloseHandle = setTimeout(() => {
@@ -391,6 +415,20 @@
               <span class="dp-clone-stat clean">clean</span>
             {/if}
           </div>
+          {#if l.push_via_gitbuddy}
+            <div class="dp-clone-push" title="git push over HTTPS takes its token from gitBuddy">
+              <span class="d on"></span>push via gitBuddy
+            </div>
+          {:else if canEnablePush(l)}
+            <button
+              type="button"
+              class="dp-clone-push-btn"
+              onclick={() => enablePush(l)}
+              disabled={enablingPush !== null}
+            >
+              {enablingPush === l.path ? 'Setting up…' : 'Enable push via gitBuddy'}
+            </button>
+          {/if}
         </div>
       {/each}
     {/if}
@@ -846,6 +884,34 @@
 }
 .dp-clone-branch .d.off { background: var(--ink-4); }
 .dp-clone-stat { color: var(--ink-3); }
+.dp-clone-push {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--sage-ink);
+}
+.dp-clone-push .d {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sage);
+}
+.dp-clone-push-btn {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dp-clone-push-btn:hover:not(:disabled) { background: var(--cream-2); color: var(--ink); }
+.dp-clone-push-btn:focus-visible { outline: 2px solid var(--terracotta); outline-offset: 1px; }
+.dp-clone-push-btn:disabled { cursor: progress; opacity: 0.6; }
 .dp-clone-stat.warn { color: var(--terracotta); }
 .dp-clone-stat.clean { color: var(--sage-ink); }
 

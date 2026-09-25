@@ -454,3 +454,88 @@ before (menu on right mouse-down).
 workaround becomes redundant (upstream's `show_menu` then does the same
 attach/pop/detach) but stays harmless; `.menu(&menu)` may return, but
 does not have to.
+
+## 2026-09-25 — Release files download in the app, with the account token
+
+**Context.** The common reason to open a release is to get its installer,
+often on a second machine. "Open in browser" only works where the browser
+holds a signed-in session: for a private repo on a machine whose browser was
+never logged in to the forge, the asset link lands on a sign-in page. The app
+already holds a token for the account.
+
+**Decision.** Releases carry their attached files (`Release.assets`, parsed
+from the listing each provider already fetches — no extra requests; forge
+auto-generated source archives are left out). `download_release_asset`
+fetches a file into `~/Downloads` itself. Rules:
+
+- The frontend names the file by `(account, repo, tag, name)`; the URL comes
+  from the aggregator cache, never from the webview.
+- `ProviderBackend::asset_request` attaches the token only when the URL has
+  the account forge's scheme, host and port (`provider_util::same_origin`).
+  Release links are publisher-controlled — a GitLab link can point anywhere.
+  Anything else, and any 401/403/404 or HTML sign-in page, is handed to the
+  browser instead of failing.
+- GitHub downloads go through the asset API (`Accept:
+  application/octet-stream`), which redirects to a storage host; reqwest drops
+  the Authorization header on that cross-host hop (tested). GitLab upload
+  links are rewritten to the uploads API (17.4+), the only upload route that
+  takes a token.
+- Files stream to a hidden part file and are renamed into place when
+  complete, and get the `com.apple.quarantine` attribute a browser download
+  would. Without it the app would bypass Gatekeeper for anything published as
+  a release asset in any repo the account can see. (This shells out to
+  `/usr/bin/xattr`; the no-shelling-out rule is about git.)
+
+## 2026-09-25 — `git push` via gitBuddy as a git credential helper, not SSH setup
+
+**Context.** Clones made with gitBuddy are HTTPS clones; the token is used
+for the clone and not kept. Pushing from them afterwards needed separately
+configured credentials — on a second machine usually SSH keys, set up by
+hand. The goal: push from any terminal (including editors' and agents'
+terminals) on any machine where gitBuddy is signed in, with no per-machine
+setup.
+
+**Options.**
+- *A — credential helper.* The gitBuddy binary answers git's credential
+  protocol (`gitbuddy credential … get`) from the Keychain entry the app
+  already has. Like `gh auth setup-git`.
+- *B — automated SSH setup.* Generate a key per machine, upload it through each
+  forge's API, edit `~/.ssh/config` and `known_hosts`, switch remotes to SSH.
+
+**Decision: A, configured per clone.** B writes into the user's SSH files,
+needs a new GitHub scope (`write:public_key`, i.e. re-authentication), leaves
+one key per machine on every forge with nobody to clean it up, and fails on
+networks that block port 22. A needs no new scopes for GitHub (`repo`) or
+GitLab (`api`); Gitea/Forgejo tokens need `write:repository`, which the
+onboarding now names. Its cost: pushing through a clone configured this way
+depends on gitBuddy being installed and signed in — without it git falls back
+to its usual prompt, nothing breaks.
+
+**How.**
+- `clone_repo` writes, into the new clone's own `.git/config` only, a
+  `credential.<forge-url>.helper` entry — an empty value first, which resets
+  helpers inherited from the global/system config (on macOS the osxkeychain
+  helper Apple's git ships with would otherwise answer first and also copy
+  the token into its own Keychain item), then `!'<gitbuddy binary>' credential
+  --account '<id>' --host '<host>'`. `enable_git_push` does the same for an
+  existing HTTPS clone from the detail pane. Nothing touches `~/.gitconfig`.
+- `main` checks for `credential` as the first argument before anything of the
+  GUI starts. The helper answers only `get`, only for `protocol=https` and the
+  configured host (git already scopes the entry by URL; the check is defence in
+  depth), and only when no other username is requested; it reads the Keychain
+  only after those checks. `store`/`erase` are ignored — erasing because one
+  push was rejected would disconnect the account.
+- The Keychain entry is read by the same signed binary that wrote it, so no
+  access prompt. The account id (`<slug>:<host>:<login>`) supplies the login;
+  PAT and OAuth entries are told apart by shape (an OAuth entry is a JSON
+  object), so the helper needs neither `accounts.json` nor a running app.
+- An app launched from a translocated path (opened straight from Downloads)
+  refuses to register itself; that path disappears at the next launch.
+- A test drives a real `git credential fill` against the written config: the
+  scoped host gets the helper with exactly the argv the parser expects, a
+  globally configured helper is overridden there, and other hosts are
+  untouched.
+
+**Not done (yet).** A global `~/.gitconfig` entry that would cover clones not
+made or enabled through gitBuddy; OAuth token refresh (no stored refresh
+token is consumed anywhere yet, see `oauth.rs`).

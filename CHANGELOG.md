@@ -20,6 +20,14 @@ All notable changes to gitBuddy are documented here. The format follows
   only serves to a signed-in browser, opens in the browser instead.
   Downloaded files carry the same quarantine flag a browser download gets, so
   Gatekeeper checks them as usual.
+- **`git push` works from any terminal for clones made with gitBuddy.**
+  gitBuddy registers itself as the git credential helper in each clone it
+  makes, so pushing over HTTPS takes the token from the account you are
+  already signed in with — no SSH keys or separately stored token on a second
+  machine. Existing HTTPS clones get the same with "Enable push via gitBuddy"
+  in the repo's detail pane. Only the clone's own `.git/config` is touched,
+  and gitBuddy doesn't have to be running. Codeberg/Gitea/Forgejo tokens need
+  the `write:repository` scope for this.
 
 ### Changed
 
@@ -30,6 +38,10 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ### Fixed
 
+- **A fresh clone shows up right away.** After cloning, the main window
+  re-read the last poll's list of local clones instead of scanning again, so
+  the new clone only appeared with the next sync — up to a whole poll
+  interval later.
 - **Dark mode: the popover header, the main window's title bar and the three
   tinted stat cards now go dark too.** They were painted with fixed light
   colours, so at night the "git" of the wordmark, the window title and the

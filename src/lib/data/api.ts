@@ -190,6 +190,9 @@ export interface LocalRepo {
   ahead: number;
   behind: number;
   detached: boolean;
+  /** The clone's own git config routes HTTPS credentials through gitBuddy,
+   *  so `git push` works from any terminal. */
+  push_via_gitbuddy: boolean;
 }
 
 /** Notification settings. Three independently-toggleable gates, in
@@ -418,6 +421,15 @@ export const listCi = (): Promise<CiRun[]> => invoke('list_ci');
 
 /** Scan configured roots and report every local checkout with diagnostics. */
 export const listLocalRepos = (): Promise<LocalRepo[]> => invoke('list_local_repos');
+
+/** Walk the scan roots now (no network) and return the fresh list — for right
+ *  after the disk changed; `listLocalRepos` only reads the last poll's cache. */
+export const rescanLocalRepos = (): Promise<LocalRepo[]> => invoke('rescan_local_repos');
+
+/** Route an existing clone's HTTPS credentials through gitBuddy so `git push`
+ *  works from any terminal. New clones get this from `cloneRepo`. */
+export const enableGitPush = (path: string, accountId: string): Promise<void> =>
+  invoke('enable_git_push', { path, accountId });
 
 /** Load persisted user settings (scan roots, ignore patterns). */
 export const getSettings = (): Promise<Settings> => invoke('get_settings');

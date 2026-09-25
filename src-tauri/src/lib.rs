@@ -10,6 +10,7 @@ mod aggregator;
 mod codeberg;
 mod commands;
 mod downloads;
+mod git_credential;
 mod github;
 mod gitlab;
 mod keychain;
@@ -40,6 +41,14 @@ use tauri::{
 /// renderer (system-level SVG-to-PNG converters on macOS are unreliable for
 /// this kind of small template image).
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
+
+/// Command-line modes that run *instead of* the app. Today that is only the
+/// git credential helper (`gitbuddy credential …`, see `git_credential.rs`),
+/// which git runs from any terminal while the app itself may or may not be
+/// open. Returns the exit code when `args` selected such a mode.
+pub fn run_cli(args: &[String]) -> Option<i32> {
+    git_credential::run_from_args(args)
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -72,6 +81,8 @@ pub fn run() {
             commands::last_sync_info,
             commands::clone_repo,
             commands::download_release_asset,
+            commands::enable_git_push,
+            commands::rescan_local_repos,
             commands::get_settings,
             commands::save_settings,
             commands::export_config,

@@ -51,6 +51,9 @@ pub struct LocalRepo {
     /// Detached HEAD, no current branch — kept as a flag because branchless
     /// state is interesting enough to surface in the UI.
     pub detached: bool,
+    /// The clone's own config routes git credentials through gitBuddy, so
+    /// `git push` over HTTPS works in any terminal (see `git_credential.rs`).
+    pub push_via_gitbuddy: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,6 +201,7 @@ fn diagnose(path: &Path) -> Result<LocalRepo, git2::Error> {
         ahead,
         behind,
         detached,
+        push_via_gitbuddy: crate::git_credential::is_configured(&repo),
     })
 }
 

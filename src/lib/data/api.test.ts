@@ -41,6 +41,7 @@ function local(host: string, owner: string, name: string): LocalRepo {
     ahead: 0,
     behind: 0,
     detached: false,
+    push_via_gitbuddy: false,
   };
 }
 

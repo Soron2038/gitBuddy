@@ -46,6 +46,7 @@
     listReleases,
     listCi,
     listLocalRepos,
+    rescanLocalRepos,
     aggregatorRefreshNow,
     lastSyncInfo,
     getSettings,
@@ -986,7 +987,7 @@
 
   async function rescanLocals() {
     try {
-      locals = await listLocalRepos();
+      locals = await rescanLocalRepos();
     } catch (e) {
       error = `Local scan failed: ${e}`;
     }
@@ -1908,7 +1909,7 @@
             hasScanRoots={settings.scan_roots.length > 0}
             onclose={() => (selectedRepo = null)}
             onOpenSettings={() => (view = 'settings')}
-            onCloned={rescanLocals}
+            onLocalsChanged={rescanLocals}
             onItemContextMenu={openItemMenu}
             onActionError={(msg) => (error = msg)}
           />
@@ -2203,6 +2204,12 @@
                 >
                   Create a token on this Gitea/Forgejo →
                 </button>
+                <!-- Gitea's token page can't be pre-filled with scopes the way
+                     GitHub's and GitLab's links above are, so name them. -->
+                <p class="token-scopes">
+                  Scopes: <code>read:user</code> and <code>read:repository</code> —
+                  or <code>write:repository</code> to also push through gitBuddy.
+                </p>
                 <label class="token-input">
                   <span class="lbl">Personal access token</span>
                   <input
@@ -3509,6 +3516,17 @@
     text-decoration: none;
   }
   .token-link:hover { text-decoration: underline; }
+  .token-scopes {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+  .token-scopes code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-2);
+  }
   .token-input {
     display: flex;
     flex-direction: column;

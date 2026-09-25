@@ -141,12 +141,14 @@
       remote: { host: 'github.com', owner: 'Soron2038', name: 'gitBuddy',
                 raw_url: 'https://github.com/Soron2038/gitBuddy.git' },
       dirty_staged: 1, dirty_unstaged: 2, untracked: 1, ahead: 2, behind: 0, detached: false,
+      push_via_gitbuddy: false,
     },
     {
       path: '/Users/witt/Developer/scratch/orphan-notes', branch: 'master',
       remote: { host: 'gitlab.gwdg.de', owner: 'witt', name: 'notes',
                 raw_url: 'https://gitlab.gwdg.de/witt/notes.git' },
       dirty_staged: 0, dirty_unstaged: 0, untracked: 0, ahead: 0, behind: 3, detached: false,
+      push_via_gitbuddy: false,
     },
   ];
 
@@ -170,6 +172,13 @@
     list_releases: () => RELEASES,
     list_ci: () => CI,
     list_local_repos: () => LOCALS,
+    rescan_local_repos: () => LOCALS,
+    // Flips the flag so the next rescan shows the "push via gitBuddy" state.
+    enable_git_push: ({ path }) => {
+      const l = LOCALS.find((x) => x.path === path);
+      if (l) l.push_via_gitbuddy = true;
+      return null;
+    },
     download_release_asset: ({ assetName }) =>
       ({ kind: 'saved', path: `/Users/witt/Downloads/${assetName}` }),
     get_settings: () => SETTINGS,
