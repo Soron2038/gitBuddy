@@ -1013,7 +1013,7 @@
     background: var(--paper);
     border-radius: var(--r-xl);
     box-shadow:
-      0 0 0 0.5px rgba(46, 33, 27, 0.10),
+      0 0 0 0.5px var(--edge),
       0 6px 14px -4px rgba(60, 40, 20, 0.18);
     overflow: hidden;
     display: flex;
@@ -1156,102 +1156,6 @@
     font-size: 13.5px;
     line-height: 1.5;
   }
-  .token-link {
-    align-self: flex-start;
-    color: var(--terracotta);
-    font-size: 13px;
-    text-decoration: none;
-  }
-  .token-link:hover { text-decoration: underline; }
-  .token-input { display: flex; flex-direction: column; gap: 6px; }
-  .primary {
-    height: 38px;
-    background: var(--terracotta);
-    color: var(--paper);
-    border-radius: var(--r-sm);
-    font-weight: 600;
-    font-size: 13.5px;
-    transition: background 0.15s, opacity 0.15s;
-  }
-  .primary:hover:not(:disabled) { background: #B05738; }
-  .primary:disabled { opacity: 0.5; cursor: default; }
-  .secondary {
-    height: 38px;
-    padding: 0 14px;
-    background: var(--cream-2);
-    color: var(--ink-2);
-    border-radius: var(--r-sm);
-    font-weight: 500;
-    font-size: 13px;
-    transition: background 0.15s;
-  }
-  .secondary:hover:not(:disabled) { background: var(--cream-3); }
-  .setup-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 4px;
-  }
-
-  /* Provider segmented control — same shape as the in-list tab strip but a
-     little tighter and inline in the setup form. */
-  .provider-tabs {
-    display: flex;
-    gap: 4px;
-    padding: 4px;
-    background: var(--cream-2);
-    border-radius: var(--r-md);
-    font-size: 12.5px;
-    margin-bottom: 4px;
-  }
-
-  /* Quick-pick chips for hosts seen in local orphan clones — clicking one
-     fills the GitLab instance URL field so the user doesn't have to retype
-     a self-hosted host name. */
-  .host-hints {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-top: -4px;
-  }
-  .host-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .host-chip {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--ink);
-    background: var(--paper-2);
-    border: 1px solid var(--line-2);
-    padding: 3px 8px;
-    border-radius: 999px;
-    transition: background 0.12s, border-color 0.12s;
-  }
-  .host-chip:hover {
-    background: var(--terracotta-soft);
-    border-color: var(--terracotta);
-  }
-
-  /* "+ add provider" inline link in the greeting strip — shown only when at
-     least one provider slot is still empty. */
-  .add-provider {
-    margin-left: 6px;
-    font-size: 12px;
-    color: var(--terracotta);
-    font-style: italic;
-    font-family: var(--font-display);
-  }
-  .add-provider:hover { text-decoration: underline; }
-
-  .err {
-    margin: 0;
-    color: var(--plum-ink);
-    font-size: 12.5px;
-    background: var(--plum-soft);
-    padding: 8px 10px;
-    border-radius: var(--r-sm);
-  }
   .err-banner {
     margin: 8px 10px 0;
     color: var(--plum-ink);
@@ -1313,18 +1217,20 @@
     text-align: center;
   }
   .tab.on {
-    background: var(--paper);
+    background: var(--raised);
     color: var(--ink);
     font-weight: 600;
     box-shadow: var(--shadow-1);
   }
+  /* --ink-2, not --ink-3: the count sits on the --cream-2 track, where
+     --ink-3 is 4.0:1 in light mode. */
   .tab .n {
     margin-left: 5px;
     font-family: var(--font-mono);
     font-size: 10.5px;
-    color: var(--ink-3);
+    color: var(--ink-2);
   }
-  .tab.on .n { color: var(--terracotta); }
+  .tab.on .n { color: var(--terracotta-ink); }
 
   /* List ---------------------------------------------------------- */
   .list {
@@ -1359,9 +1265,12 @@
     margin-top: 1px;
     letter-spacing: 0.04em;
   }
-  .chip.pr { background: var(--sage-soft); color: #4A6048; }
-  .chip.is { background: var(--terracotta-soft); color: #A0431F; }
-  .chip.mr { background: var(--butter-soft); color: #9A6E1A; }
+  /* Each chip pairs an accent's soft tint with that accent's -ink token, which
+     is what keeps the pair legible in both schemes (literal dark text here
+     measured 2.0–3.0:1 on the dark tints). */
+  .chip.pr { background: var(--sage-soft); color: var(--sage-ink); }
+  .chip.is { background: var(--terracotta-soft); color: var(--terracotta-ink); }
+  .chip.mr { background: var(--butter-soft); color: var(--butter-ink); }
   /* Repo rows reuse the .row layout but the leading chip is the provider
      glyph instead of an item kind. Colour distinguishes provider type at
      a glance — black for GitHub, GitLab-orange for gitlab.com, plum for
@@ -1378,7 +1287,9 @@
     color: var(--paper);
     text-transform: lowercase;
   }
-  .repo-row .pchip.gh      { background: #2E211B; }
+  /* Ink-on-paper, so it flips with the scheme like the main window's chip —
+     a fixed espresso block would sit dark-on-dark at night. */
+  .repo-row .pchip.gh      { background: var(--ink); }
   .repo-row .pchip.gl      { background: linear-gradient(135deg, #E89C5C, #C66243); }
   .repo-row .pchip.gl-self { background: linear-gradient(135deg, #B6A5C9, #6E5E80); }
   .repo-row .pchip.cb      { background: linear-gradient(135deg, #8DBBC9, #4E7A8A); }
@@ -1501,7 +1412,7 @@
     border-radius: var(--r-sm);
     display: grid; place-items: center;
     background: var(--butter-soft);
-    color: #8A5C12;
+    color: var(--butter-ink);
   }
   .release-row .title {
     display: flex;
@@ -1515,7 +1426,7 @@
   .badge-pre {
     font-family: var(--font-mono);
     font-size: 9.5px;
-    color: var(--plum);
+    color: var(--plum-ink);
     background: var(--plum-soft);
     padding: 1px 5px;
     border-radius: 999px;
@@ -1528,7 +1439,7 @@
     margin-left: 5px;
     font-family: var(--font-mono);
     font-size: 9px;
-    color: var(--terracotta);
+    color: var(--terracotta-ink);
     background: var(--terracotta-soft);
     padding: 1px 5px;
     border-radius: 999px;

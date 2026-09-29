@@ -186,8 +186,8 @@
     border-radius: var(--r-md);
     border: 1px solid var(--line);
     box-shadow:
-      0 0 0 0.5px rgba(46, 33, 27, 0.10),
-      0 8px 24px -6px rgba(60, 40, 20, 0.28);
+      0 0 0 0.5px var(--edge),
+      var(--shadow-float);
     padding: 4px;
     font-size: 13px;
   }
@@ -217,7 +217,7 @@
     cursor: default;
   }
   .ctx-item.danger { color: var(--plum); }
-  .ctx-item.danger:hover:not(:disabled) { background: var(--plum-soft); }
+  .ctx-item.danger:hover:not(:disabled) { background: var(--plum-soft); color: var(--plum-ink); }
   .ctx-sep {
     height: 1px;
     margin: 4px 0;

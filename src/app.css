@@ -27,14 +27,16 @@
   --stat-b-to:      #F4E0AE;
 
   /* Ink.
-     ink-3 is the workhorse for 11–12.5px meta text and now clears WCAG AA
-     (4.52:1 on --paper; it was 4.15:1). ink-4 is deliberately *not* pushed to
+     ink-3 is the workhorse for 11–12.5px meta text and clears WCAG AA on both
+     paper tones (4.78:1 on --paper, 4.55:1 on --paper-2, where the settings
+     help text and the popover footer sit; #847264 passed on --paper only).
+     ink-4 is deliberately *not* pushed to
      4.5 — at that point it is indistinguishable from ink-3 and the tier stops
      meaning anything. It is a decorative tone only (separator dots, hairline
      glyphs) at 3.35:1; anything that is actually read uses ink-3 or darker. */
   --ink:          #2E211B;
   --ink-2:        #5C4A3F;
-  --ink-3:        #847264;
+  --ink-3:        #806E61;
   --ink-4:        #9A8877;
 
   /* Lines */
@@ -44,17 +46,20 @@
   /* Accents.
      terracotta carries both roles — link/label text on paper and the fill
      behind paper-coloured button text — and at #C66243 failed AA in both
-     directions (3.95:1 each way). #BB5738 clears 4.5:1 both ways with the
-     same hue, so nothing else has to change.
+     directions (3.95:1 each way). #B55436 clears 4.5:1 both ways with the
+     same hue, on --paper-2 too (4.59:1; #BB5738 was 4.34:1 there, under the
+     italic words in every settings heading).
      The *-ink tokens exist because an accent legible on paper is not legible
-     on its own soft tint: sage on sage-soft was 2.30:1. */
-  --terracotta:        #BB5738;
+     on its own soft tint: sage on sage-soft was 2.30:1, terracotta on
+     terracotta-soft 3.45:1. Text on a soft tint always uses the *-ink. */
+  --terracotta:        #B55436;
   --terracotta-soft:   #F4D9CC;
+  --terracotta-ink:    #A0431F;
   /* Hover fill for terracotta buttons. A token rather than a literal because
      the base lightens in dark mode, so a fixed darker shade would read as a
      *lighter* hover there. (color-mix() would express this in one line, but
      WebKit only got it in Safari 16.2 and the app supports macOS 11.) */
-  --terracotta-hover:  #B05738;
+  --terracotta-hover:  #A64A2E;
   --sage:              #80987B;
   --sage-soft:         #D6E0CF;
   --sage-ink:          #50684B;
@@ -70,6 +75,21 @@
   --shadow-2: 0 8px 20px -10px rgba(78, 50, 30, 0.15);
   --shadow-3: 0 30px 60px -20px rgba(78, 50, 30, 0.28),
               0 8px 16px -8px rgba(78, 50, 30, 0.15);
+  /* Drop shadow of floating menus (context menu), paired with --edge. */
+  --shadow-float: 0 8px 24px -6px rgba(60, 40, 20, 0.28);
+
+  /* Component surfaces that have to move differently from --paper between
+     schemes. --raised is the selected pill on a --cream-2 track (tabs,
+     segmented controls): paper in light, but in dark --paper is *darker*
+     than the track, so a paper pill read as pressed in rather than lifted.
+     --knob is a switch knob; --edge the hairline ring around floating panels
+     (the popover, context menus), which as dark-ink-at-low-alpha vanished
+     on a dark ground. */
+  --raised:       var(--paper);
+  --knob:         var(--paper);
+  --edge:         rgba(46, 33, 27, 0.10);
+  --scroll-thumb:       rgba(46, 33, 27, 0.18);
+  --scroll-thumb-hover: rgba(46, 33, 27, 0.30);
 
   /* Radii */
   --r-sm:  8px;
@@ -136,6 +156,7 @@
 
     --terracotta:        #E08363;
     --terracotta-soft:   #3B241B;
+    --terracotta-ink:    #E08363;
     /* Lighter on hover here, not darker — the direction of "more prominent"
        inverts with the scheme. */
     --terracotta-hover:  #E9977B;
@@ -155,6 +176,15 @@
     --shadow-2: 0 8px 20px -10px rgba(0, 0, 0, 0.6);
     --shadow-3: 0 30px 60px -20px rgba(0, 0, 0, 0.7),
                 0 8px 16px -8px rgba(0, 0, 0, 0.5);
+    --shadow-float: 0 8px 24px -6px rgba(0, 0, 0, 0.6);
+
+    /* The selected pill sits *above* its --cream-2 track here (--paper is
+       darker than the track in this scheme), the knob is a soft white. */
+    --raised:       #3B322A;
+    --knob:         #E9DFD3;
+    --edge:         rgba(242, 233, 223, 0.14);
+    --scroll-thumb:       rgba(242, 233, 223, 0.22);
+    --scroll-thumb-hover: rgba(242, 233, 223, 0.36);
   }
 }
 
@@ -237,6 +267,10 @@ a {
 }
 a:hover { text-decoration: underline; }
 
+/* WebKit's default placeholder grey is tuned for white fields and sinks
+   into the dark ones; --ink-3 is the meta tone measured for both. */
+::placeholder { color: var(--ink-3); }
+
 /* Utility tokens that we'll re-use ------------------------------ */
 .mono { font-family: var(--font-mono); }
 .display { font-family: var(--font-display); letter-spacing: -0.015em; }
@@ -282,13 +316,13 @@ a:hover { text-decoration: underline; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(46, 33, 27, 0.18);
+  background: var(--scroll-thumb);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(46, 33, 27, 0.30);
+  background: var(--scroll-thumb-hover);
   background-clip: padding-box;
   border: 2px solid transparent;
 }

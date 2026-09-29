@@ -2619,7 +2619,7 @@
   .search .sho {
     font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--ink-3);
+    color: var(--ink-2);
     background: var(--cream-2);
     padding: 2px 7px;
     border-radius: 5px;
@@ -2721,7 +2721,7 @@
     font-size: 11.5px;
     color: var(--ink-3);
   }
-  .pill.on .c { color: var(--terracotta); }
+  .pill.on .c { color: var(--terracotta-ink); }
   .pill.muted { opacity: 0.45; }
   .pill.muted .c { text-decoration: line-through; }
   .sw {
@@ -2786,7 +2786,7 @@
     left: 2px;
     width: 14px;
     height: 14px;
-    background: white;
+    background: var(--knob);
     border-radius: 50%;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
     transition: transform 0.18s ease;
@@ -2859,7 +2859,13 @@
     font-family: var(--font-display);
     flex-shrink: 0;
   }
-  .ava.gh-p { background: linear-gradient(135deg, #6B5A4D, #2E211B); }
+  /* Its dark end stop matches the dark sidebar, so a hairline ring keeps
+     the chip's shape at night; on the light sidebar the ring disappears
+     into the chip. */
+  .ava.gh-p {
+    background: linear-gradient(135deg, #6B5A4D, #2E211B);
+    box-shadow: inset 0 0 0 1px var(--line-2);
+  }
   .ava.gh-w { background: linear-gradient(135deg, #80987B, #4A5E48); }
   .ava.gl-p { background: linear-gradient(135deg, #E8A06A, #C66243); }
   .ava.gl-w { background: linear-gradient(135deg, #B6A5C9, #6E5E80); }
@@ -2977,7 +2983,7 @@
     font-size: 12.5px;
     color: var(--ink-3);
   }
-  .set-update-status.err { color: var(--plum); }
+  .set-update-status.err { color: var(--plum-ink); }
 
   .greet-row {
     display: flex;
@@ -3105,7 +3111,7 @@
   }
   .search-clear:hover {
     background: var(--terracotta-soft);
-    color: var(--terracotta);
+    color: var(--terracotta-ink);
   }
 
   /* Reason chips row ---------------------------------------------- */
@@ -3142,7 +3148,7 @@
   .chip-toggle:hover { border-color: var(--terracotta); color: var(--terracotta); }
   .chip-toggle.on {
     background: var(--terracotta-soft);
-    color: var(--terracotta);
+    color: var(--terracotta-ink);
     border-color: transparent;
     font-weight: 600;
   }
@@ -3284,7 +3290,7 @@
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: var(--paper);
+    background: var(--knob);
     transition: transform 0.18s ease;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   }
@@ -3421,7 +3427,7 @@
     transition: color 0.15s, background 0.15s, border-color 0.15s;
   }
   .prov-disconnect:hover {
-    color: var(--plum);
+    color: var(--plum-ink);
     background: var(--plum-soft);
     border-color: transparent;
   }
@@ -3467,7 +3473,7 @@
   }
   .path-remove:hover:not(:disabled) {
     background: var(--plum-soft);
-    color: var(--plum);
+    color: var(--plum-ink);
   }
   .path-remove:disabled { opacity: 0.4; cursor: default; }
 
@@ -3500,7 +3506,7 @@
     cursor: pointer;
   }
   .provider-tabs button.on {
-    background: var(--paper);
+    background: var(--raised);
     color: var(--ink);
     font-weight: 600;
     box-shadow: var(--shadow-1);
@@ -3576,7 +3582,7 @@
     cursor: pointer;
   }
   .auth-method button.on {
-    background: var(--paper);
+    background: var(--raised);
     color: var(--ink);
     font-weight: 600;
     box-shadow: var(--shadow-1);
@@ -3704,7 +3710,6 @@
   }
   .oauth-error .err {
     margin: 0;
-    color: var(--terracotta);
     font-size: 13px;
     line-height: 1.45;
   }

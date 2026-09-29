@@ -703,7 +703,7 @@
   font-family: var(--font-mono);
   font-size: 11px;
   background: var(--terracotta-soft);
-  color: var(--terracotta);
+  color: var(--terracotta-ink);
   padding: 1px 7px;
   border-radius: 999px;
   text-transform: none;
