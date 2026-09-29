@@ -539,3 +539,58 @@ to its usual prompt, nothing breaks.
 **Not done (yet).** A global `~/.gitconfig` entry that would cover clones not
 made or enabled through gitBuddy; OAuth token refresh (no stored refresh
 token is consumed anywhere yet, see `oauth.rs`).
+
+## 2026-09-29 — Appearance override through the native app appearance, not a `data-theme` attribute; "Warm graphite" dark palette
+
+**Context.** Dark mode (1.2.0) only followed macOS. The ask: a Settings choice
+of System / Light / Dark, and a dark palette that is visibly cleaner — the 1.2
+one met its contrast targets but read as muddy.
+
+**Options for the override.**
+- *A — native.* Rust calls `set_theme` on the windows, which on macOS sets
+  `NSApp.appearance`. WKWebView follows the effective appearance, so the
+  existing `@media (prefers-color-scheme: dark)` block flips by itself.
+- *B — CSS.* A `data-theme` attribute on `<html>`, set by each window from the
+  setting, with the dark token block duplicated under `[data-theme="dark"]`
+  and the media query guarded by `:not([data-theme="light"])`.
+
+**Decision: A.** One source of truth, applied in `setup` before either window
+is first shown, so a forced theme never flashes the other one at launch. The
+native parts follow as well — title bar, the tray menu, open/save panels,
+scrollbars and form controls — which B could only approximate. No second copy
+of the token block, and no `core:app:allow-set-app-theme` capability for the
+JS `setTheme`. Cost: the browser-only dev harness (`tauri-ipc-stub.js`) can't
+exercise the switch; screenshots there use Playwright's `emulateMedia`.
+
+**How.**
+- `settings::Appearance` (`system` | `light` | `dark`, default System,
+  unknown strings fall back to System via `#[serde(other)]`). Added *without*
+  bumping the settings version: the field has a serde default, so it isn't a
+  breaking change, while a bump would make 1.3.0 refuse the whole file after a
+  downgrade. A downgrade simply resets the choice to System on its next save.
+- `appearance::apply` calls `WebviewWindow::set_theme` on every window, not
+  `AppHandle::set_theme`. Both end in the app-wide `NSApp.appearance`, but only
+  the window-level call refreshes tao's cached per-window theme. With the
+  app-level call, "System" after a forced theme and a system switch in between
+  read a stale `main.theme()` and painted the window background in the wrong
+  scheme.
+- `save_settings` and `import_config` apply it only when the value changed.
+  tao emits `ThemeChanged` only for a system switch and only when the
+  *effective* appearance changes — never while an override is active — so the
+  main window's handler repaints straight from the payload. (Before this, a
+  live system switch left the frame around the title bar in the old scheme.)
+- Verified on the running app (macOS 27): System/Light/Dark against a light
+  and a dark system, a system flip under each override, and System after
+  flips during an override.
+
+**The palette.** Three directions were compared against the 1.2 palette on
+screenshots of the real app (`design-mockups/04-buddy-warm-dark.html` keeps
+all four as token blocks): *A — Espresso, refined*, *B — Ember* (redder,
+fuller tints) and *C — Warm graphite*. **C was chosen**: near-neutral surfaces
+(OKLCH chroma 0.004) in the register of macOS dark, the warmth carried by the
+cream ink and the accents, tints reduced to washes and nudged away from olive.
+Surfaces step up in even OKLCH lightness so sidebar, cards, tracks and the
+selected pill separate without borders. Contrast is checked by
+`scripts/check-contrast.mjs` and enforced by `src/app-contrast.test.ts`; the
+same pass fixed the few light-mode pairs that were just under AA (accent text
+on its own tint now always uses the `--*-ink` token).

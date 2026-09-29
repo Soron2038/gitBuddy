@@ -23,8 +23,9 @@ clones (branch, dirty/untracked, ahead/behind) via libgit2.
   you triggered, with per-event toggles and Do-Not-Disturb.
 - **Quick actions** — open in browser, clone, reveal in Finder, open in your
   editor or terminal, copy clone URLs.
-- **Quality-of-life** — start at login, configurable poll interval, and
-  export/import of your settings as JSON.
+- **Quality-of-life** — start at login, configurable poll interval, light /
+  dark / follow-the-system appearance, and export/import of your settings as
+  JSON.
 
 ## Install
 

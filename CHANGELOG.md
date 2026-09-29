@@ -7,6 +7,36 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Choose light or dark yourself.** Settings → Appearance switches between
+  System (follow macOS, as before), Light and Dark. It applies to the popover
+  and the main window at once, including the window frame and native parts
+  like scrollbars and file dialogs, and is part of the exported config.
+
+### Changed
+
+- **A reworked dark palette, "Warm graphite".** Near-neutral surfaces in the
+  register of macOS's own dark mode, with the warmth in the cream text and
+  the accents; the brown-olive tints of the previous palette read as muddy.
+  Sidebar, cards, tracks and the selected tab now step up in clearly
+  distinguishable shades.
+
+### Fixed
+
+- Dark mode: the PR/IS/MR chips and the release chip in the popover showed
+  dark text on dark tints, and the popover's GitHub chip was a dark block with
+  near-invisible text.
+- Dark mode: scrollbars, the edge of the popover and of context menus, and
+  switch knobs were barely visible; text fields and their placeholders
+  rendered in light-mode colours; a selected tab looked pressed in instead of
+  raised.
+- The main window's frame kept its old colour after switching macOS between
+  light and dark while the app was running.
+- Light mode: small grey text on the tinted cards (settings help, popover
+  footer), the italic words in settings headings, and a few badges (NEW,
+  pre-release, active filter chips) fell just short of WCAG AA contrast.
+
 ## [1.3.0] — 2026-09-25
 
 Release files one click away, and `git push` from any terminal without
