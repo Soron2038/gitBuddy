@@ -6,6 +6,7 @@ import {
   localKeyForRepo,
   indexLocalByRemote,
   defaultSettings,
+  APPEARANCE_OPTIONS,
 } from './api';
 import type { LocalRepo, Repo } from './api';
 
@@ -141,5 +142,17 @@ describe('defaultSettings', () => {
     expect(s.notifications.enabled).toBe(true);
     expect(s.poll_interval_minutes).toBeGreaterThanOrEqual(1);
     expect(s.poll_interval_minutes).toBeLessThanOrEqual(60);
+  });
+
+  it('follows the system appearance until the user picks one', () => {
+    expect(defaultSettings().appearance).toBe('system');
+  });
+});
+
+describe('appearance options', () => {
+  it('match the Rust enum serde names, System first', () => {
+    // A value the backend doesn't know deserialises to System, so a typo
+    // here would silently make that option do nothing.
+    expect(APPEARANCE_OPTIONS.map((o) => o.value)).toEqual(['system', 'light', 'dark']);
   });
 });

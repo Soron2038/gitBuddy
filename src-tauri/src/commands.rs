@@ -10,6 +10,7 @@
 use crate::{
     accounts, aggregator,
     aggregator::AggregatorCache,
+    appearance,
     codeberg::CodebergProvider,
     downloads::{self, Fetched},
     git_credential::{self, HelperScope},
@@ -1175,16 +1176,31 @@ pub fn save_settings(
     app: AppHandle,
     settings: Settings,
 ) -> Result<(), String> {
+    // Compare against what's on disk before writing, so the two settings with
+    // side effects beyond the file only trigger them when they actually
+    // changed. An unreadable old file counts as "changed" for both.
+    let old = settings::load(&app).ok();
     // Which scan roots are configured is the only setting that changes what a
-    // tick would *find*. Compare before writing so we can refresh for that
-    // one case and stay cheap for the rest — waking the loop no longer forces
-    // a tick (see `aggregator::run_loop`), so without this an added scan root
-    // wouldn't show up until the next poll interval elapsed.
-    let roots_changed = settings::load(&app)
-        .map(|old| old.scan_roots != settings.scan_roots || old.scan_ignore != settings.scan_ignore)
-        .unwrap_or(true);
+    // tick would *find*. Refresh for that one case and stay cheap for the
+    // rest — waking the loop no longer forces a tick (see
+    // `aggregator::run_loop`), so without this an added scan root wouldn't
+    // show up until the next poll interval elapsed.
+    let roots_changed = old.as_ref().is_none_or(|old| {
+        old.scan_roots != settings.scan_roots || old.scan_ignore != settings.scan_ignore
+    });
+    // Appearance is applied natively, not by the frontend. Every Settings
+    // toggle saves the whole struct, so skip the round of per-window
+    // `set_theme` calls and the background repaint when it didn't change.
+    let appearance_changed = old
+        .as_ref()
+        .is_none_or(|old| old.appearance != settings.appearance);
 
     settings::save(&app, &settings)?;
+    // Only once the choice is persisted, so the UI never shows an appearance
+    // that the next launch wouldn't restore.
+    if appearance_changed {
+        appearance::apply(&app, settings.appearance);
+    }
     let _ = app.emit(EVT_SETTINGS_CHANGED, ());
     // The aggregator loop reads poll-interval and the notification toggles
     // from settings — wake it so the new values take effect on the current
@@ -1199,9 +1215,9 @@ pub fn save_settings(
 /// Export portable configuration (settings only) to a user-chosen `path` as
 /// pretty-printed JSON — the `settings.json` content (scan roots + ignore
 /// patterns, editor/terminal commands, notification preferences, poll
-/// interval, provider base URLs). The frontend picks `path` via a native save
-/// dialog; the actual file write stays in the Rust core where the rest of the
-/// persistence lives, so no extra fs plugin/capability is needed.
+/// interval, appearance, provider base URLs). The frontend picks `path` via a
+/// native save dialog; the actual file write stays in the Rust core where the
+/// rest of the persistence lives, so no extra fs plugin/capability is needed.
 ///
 /// Accounts and tokens are deliberately excluded. Tokens live only in the
 /// Keychain and never leave it; an account record without its secret can't be
@@ -1252,6 +1268,11 @@ pub async fn import_config(
     let current = settings::load(&app)?;
     let settings = settings::merge_imported(&current, imported);
     settings::save(&app, &settings)?;
+    // Appearance is adopted from the import and applied natively, same as a
+    // change made in Settings (see `save_settings`).
+    if current.appearance != settings.appearance {
+        appearance::apply(&app, settings.appearance);
+    }
     let _ = app.emit(EVT_SETTINGS_CHANGED, ());
     state.settings_reload.notify_one();
     // Scan roots may have changed — kick an immediate tick so the local index

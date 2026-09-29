@@ -8,6 +8,14 @@
 //! cadence without rebuilding. v3 (M7) adds `terminal_command` for the
 //! "Open in terminal" quick action. The migration is silent and one-shot: on
 //! the first launch after upgrade, `load()` rewrites the file in v3 form.
+//!
+//! Not every new field is a new version. A field added with a serde default
+//! is backwards-compatible in both directions — an older build drops the
+//! unknown key, a newer build fills in the default when it's missing — so it
+//! lands in the current version without a bump. Bumping for it would be
+//! actively harmful: the "newer version" guard in `load` would make an older
+//! build (e.g. 1.3.0) refuse the *whole* file after a downgrade. v3 gained
+//! `appearance` this way.
 
 use crate::util::atomic_write;
 use serde::{Deserialize, Serialize};
@@ -15,8 +23,11 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 /// Current schema version. Bumped on every breaking change to the on-disk
-/// JSON layout. Migration logic in `migrate_from_value` covers v1→v2→v3; later
-/// bumps should add a `vN_to_vN_plus_1` step rather than rewriting history.
+/// JSON layout — a renamed/reshaped field, or one without a serde default.
+/// Adding a field *with* a serde default is not breaking and must not bump
+/// this (see the module doc: an older build would then reject the file).
+/// Migration logic in `migrate_from_value` covers v1→v2→v3; later bumps
+/// should add a `vN_to_vN_plus_1` step rather than rewriting history.
 pub const CURRENT_VERSION: u32 = 3;
 
 /// Sane band for the user-configurable polling cadence (minutes).
@@ -76,6 +87,29 @@ pub struct Settings {
     /// outside the band is silently corrected.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_minutes: u32,
+    /// Light/dark appearance: follow macOS, force light, or force dark.
+    /// Applied natively to every window by `appearance::apply`; the webviews
+    /// follow the effective appearance, so the CSS color-scheme media query
+    /// flips without the frontend reading this field.
+    #[serde(default)]
+    pub appearance: Appearance,
+}
+
+/// User-selected app appearance.
+///
+/// `System` must stay the *last* variant: `#[serde(other)]` is only allowed
+/// on the last unit variant. It makes an unknown string (a hand-edited
+/// `"sepia"`, or a variant from a newer build) fall back to `System` instead
+/// of failing the whole settings parse. A wrong JSON *type* (null, a number)
+/// still fails, same as for every other field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    Light,
+    Dark,
+    #[default]
+    #[serde(other)]
+    System,
 }
 
 /// Top-level notification config. `enabled` is the master switch;
@@ -149,6 +183,7 @@ impl Default for Settings {
             terminal_command: None,
             notifications: NotificationSettings::default(),
             poll_interval_minutes: POLL_INTERVAL_DEFAULT,
+            appearance: Appearance::System,
         }
     }
 }
@@ -309,6 +344,8 @@ fn migrate_v1_to_v2(value: serde_json::Value) -> Result<Settings, String> {
             ..Default::default()
         },
         poll_interval_minutes: POLL_INTERVAL_DEFAULT,
+        // Added within v3 (no bump) — v1 predates it; follow macOS.
+        appearance: Appearance::System,
     })
 }
 
@@ -349,6 +386,7 @@ mod tests {
         assert_eq!(s.editor_command.as_deref(), Some("code"));
         // v1 predates the terminal action — it lands at its default.
         assert_eq!(s.terminal_command, None);
+        assert_eq!(s.appearance, Appearance::System);
     }
 
     #[test]
@@ -393,6 +431,7 @@ mod tests {
         let s = migrate_from_value(v2, 2).expect("migration");
         assert_eq!(s.version, CURRENT_VERSION);
         assert_eq!(s.terminal_command, None);
+        assert_eq!(s.appearance, Appearance::System);
         // Existing v2 fields survive untouched.
         assert_eq!(s.editor_command.as_deref(), Some("code"));
         assert_eq!(s.gitlab_base_url.as_deref(), Some("https://gitlab.gwdg.de"));
@@ -445,6 +484,61 @@ mod tests {
         // Everything else is adopted from the import.
         assert_eq!(merged.scan_roots, vec![PathBuf::from("/Users/x/Code")]);
         assert_eq!(merged.poll_interval_minutes, 15);
+    }
+
+    #[test]
+    fn merge_imported_adopts_appearance() {
+        // Appearance is a portable preference, not something that executes —
+        // an import carries it over like the rest.
+        let current = Settings::default();
+        let imported = Settings {
+            appearance: Appearance::Dark,
+            ..Settings::default()
+        };
+        let merged = merge_imported(&current, imported);
+        assert_eq!(merged.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn v3_without_appearance_defaults_to_system() {
+        // A v3 file written by 1.3.0, before `appearance` existed. It's the
+        // current version, so `load` parses it directly — no migration step
+        // fills the field in, only its serde default.
+        let v3 = json!({
+            "version": 3,
+            "scan_roots": ["/Users/x/Developer"],
+            "terminal_command": "Terminal",
+            "poll_interval_minutes": 10,
+        });
+        let s: Settings = serde_json::from_value(v3).expect("parse");
+        assert_eq!(s.appearance, Appearance::System);
+        assert_eq!(s.terminal_command.as_deref(), Some("Terminal"));
+    }
+
+    #[test]
+    fn appearance_roundtrips_as_lowercase_string() {
+        let s: Settings =
+            serde_json::from_value(json!({ "version": 3, "appearance": "dark" })).expect("parse");
+        assert_eq!(s.appearance, Appearance::Dark);
+
+        let value = serde_json::to_value(&s).unwrap();
+        assert_eq!(value["appearance"], json!("dark"));
+        let back: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(back.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn unknown_appearance_falls_back_to_system_without_losing_other_fields() {
+        // `#[serde(other)]` on `System`: an unrecognised value degrades that
+        // one field instead of failing the parse and resetting everything.
+        let s: Settings = serde_json::from_value(json!({
+            "version": 3,
+            "appearance": "sepia",
+            "poll_interval_minutes": 10,
+        }))
+        .expect("an unknown appearance must not fail the whole parse");
+        assert_eq!(s.appearance, Appearance::System);
+        assert_eq!(s.poll_interval_minutes, 10);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 mod accounts;
 mod aggregator;
+mod appearance;
 mod codeberg;
 mod commands;
 mod downloads;
@@ -168,23 +169,29 @@ pub fn run() {
                 });
             }
 
+            // Apply the saved appearance (System / Light / Dark) before either
+            // window is first shown. It's app-wide, so it runs whether or not
+            // `main` exists, and it also paints the main window's background
+            // for the resulting theme — see `appearance::paint_main_background`
+            // for why the window beneath the webview needs that. An unreadable
+            // settings file falls back to following macOS.
+            appearance::apply(
+                app.handle(),
+                settings::load(app.handle())
+                    .map(|s| s.appearance)
+                    .unwrap_or_default(),
+            );
+
             // Close-to-hide on the main window. macOS convention for menu-bar
             // apps: Cmd+W (or red traffic light) shouldn't quit the app, it
             // should hide the window — the popover and tray stay live. We
             // also flip the activation policy back to Accessory so the dock
             // icon disappears, signalling "main window is closed".
             if let Some(main) = app.get_webview_window("main") {
-                // Match the *window's* background to the system appearance.
-                // The webview paints its own surface a moment later, but the
-                // window beneath is what shows during that moment and around
-                // the overlay title bar — with the hardcoded cream from
-                // tauri.conf.json it flashed white on every open in dark mode.
-                apply_window_background(&main);
-
                 let main_clone = main.clone();
                 let app_handle = app.handle().clone();
-                main.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
+                main.on_window_event(move |event| match event {
+                    WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         let _ = main_clone.hide();
                         #[cfg(target_os = "macos")]
@@ -193,6 +200,18 @@ pub fn run() {
                                 .set_activation_policy(tauri::ActivationPolicy::Accessory);
                         }
                     }
+                    // A live macOS appearance switch while "System" is
+                    // selected: repaint so the strip around the title bar
+                    // doesn't stay in the old scheme. tao only emits this for
+                    // the system notification, and compares against
+                    // NSApp.effectiveAppearance — which already reflects a
+                    // forced Light/Dark — so while an override is active
+                    // nothing fires and the payload is always the theme to
+                    // paint.
+                    WindowEvent::ThemeChanged(theme) => {
+                        appearance::paint_main_background(&main_clone, *theme);
+                    }
+                    _ => {}
                 });
             }
 
@@ -200,26 +219,6 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// Paint the window background to match the system appearance.
-///
-/// `tauri.conf.json` can only carry one literal `backgroundColor`, and it held
-/// the light paper tone — so opening the main window in dark mode flashed a
-/// white rectangle before the webview drew over it, and the strip around the
-/// overlay title bar stayed light. These two values are the `--paper` token
-/// from `app.css` in each scheme; keep them in sync with it.
-fn apply_window_background(window: &tauri::WebviewWindow) {
-    use tauri::{window::Color, Theme};
-    let color = match window.theme() {
-        Ok(Theme::Dark) => Color(0x1A, 0x15, 0x12, 0xFF),
-        // Light, or a theme this Tauri version doesn't know: the light tone is
-        // the safe default, since that's what the app looked like before.
-        _ => Color(0xFF, 0xFD, 0xF8, 0xFF),
-    };
-    if let Err(e) = window.set_background_color(Some(color)) {
-        eprintln!("gitbuddy: setting window background failed: {e}");
-    }
 }
 
 fn open_main_window(app: &tauri::AppHandle) {

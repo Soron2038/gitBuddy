@@ -163,6 +163,7 @@
     notifications: { enabled: true, do_not_disturb: false,
                      events: { waiting: true, releases: true, ci_failure: true } },
     poll_interval_minutes: 5,
+    appearance: 'system',
   };
 
   const RESPONSES = {

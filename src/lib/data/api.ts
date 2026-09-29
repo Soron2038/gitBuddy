@@ -234,7 +234,21 @@ export interface Settings {
    *  `[1, 60]`; the UI should also enforce that band so a user can't
    *  drag the slider to a silently-corrected value. */
   poll_interval_minutes: number;
+  /** Colour scheme. The backend applies it natively on save (the app-wide
+   *  macOS appearance), so the CSS keeps keying on `prefers-color-scheme`
+   *  and neither window has to act on this value itself. */
+  appearance: Appearance;
 }
+
+/** Mirrors the Rust `settings::Appearance` enum's serde names. */
+export type Appearance = 'system' | 'light' | 'dark';
+
+/** The segmented control's options, in display order. */
+export const APPEARANCE_OPTIONS: ReadonlyArray<{ value: Appearance; label: string }> = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+];
 
 /** Minimum / maximum / default for `poll_interval_minutes`, mirrored
  *  from the Rust `settings` module so the slider stays in sync without
@@ -243,7 +257,7 @@ export const POLL_INTERVAL_MIN = 1;
 export const POLL_INTERVAL_MAX = 60;
 export const POLL_INTERVAL_DEFAULT = 5;
 
-/** A fresh v2 Settings object with backend defaults. Both windows seed their
+/** A fresh Settings object with backend defaults. Both windows seed their
  *  `settings` state with this before the first `getSettings()` resolves, so
  *  the shape lives here instead of being copy-pasted into each route. */
 export function defaultSettings(): Settings {
@@ -261,6 +275,7 @@ export function defaultSettings(): Settings {
       events: { waiting: true, releases: true, ci_failure: true },
     },
     poll_interval_minutes: POLL_INTERVAL_DEFAULT,
+    appearance: 'system',
   };
 }
 

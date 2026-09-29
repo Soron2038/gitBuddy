@@ -54,6 +54,8 @@
     exportConfig,
     importConfig,
     defaultSettings,
+    APPEARANCE_OPTIONS,
+    type Appearance,
     runEditor,
     runTerminal,
     indexLocalByRemote,
@@ -1107,6 +1109,12 @@
     const clamped = Math.min(60, Math.max(1, Math.round(value)));
     if (clamped === settings.poll_interval_minutes) return;
     settings = { ...settings, poll_interval_minutes: clamped };
+    await persistSettings();
+  }
+
+  async function setAppearance(value: Appearance) {
+    if (value === settings.appearance) return;
+    settings = { ...settings, appearance: value };
     await persistSettings();
   }
 
@@ -2353,6 +2361,42 @@
           </label>
         </section>
 
+        <!-- Appearance -->
+        <section class="set-sec">
+          <h3 id="appearance-h"><em>Appearance</em></h3>
+          <p class="set-help">
+            Follow macOS, or keep gitBuddy light or dark whatever the system
+            does. Applies to the menu-bar popover and this window.
+          </p>
+          <div class="set-seg" role="radiogroup" aria-labelledby="appearance-h">
+            {#each APPEARANCE_OPTIONS as opt (opt.value)}
+              <label>
+                <input
+                  type="radio"
+                  name="appearance"
+                  value={opt.value}
+                  checked={settings.appearance === opt.value}
+                  onchange={() => setAppearance(opt.value)}
+                />
+                <span>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    {#if opt.value === 'system'}
+                      <circle cx="12" cy="12" r="8.5" />
+                      <path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" />
+                    {:else if opt.value === 'light'}
+                      <circle cx="12" cy="12" r="4" />
+                      <path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4" />
+                    {:else}
+                      <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" />
+                    {/if}
+                  </svg>
+                  {opt.label}
+                </span>
+              </label>
+            {/each}
+          </div>
+        </section>
+
         <!-- Notifications -->
         <section class="set-sec">
           <h3><em>Notifications</em></h3>
@@ -2449,7 +2493,8 @@
           <h3>Backup &amp; <em>restore</em></h3>
           <p class="set-help">
             Save your settings (scan roots, ignore patterns, editor/terminal
-            commands, notification preferences, sync interval, instance URLs)
+            commands, appearance, notification preferences, sync interval,
+            instance URLs)
             to a JSON file, or load them on another machine. Accounts and
             tokens are <strong>not</strong> included — reconnect those after an
             import.
@@ -3304,6 +3349,57 @@
     display: flex;
     margin-top: 6px;
   }
+  /* Appearance: a segmented control built from native radios, so arrow keys
+     and "1 of 3" announcements come for free. Same track-and-pill shape as
+     the provider tabs. `input:checked + span` rather than `:has()`, which
+     WebKit only gained with Safari 15.4 — the app supports macOS 11. The
+     same goes for `:focus-visible`, hence the plain `:focus` ring below it
+     as a fallback (WebKit doesn't focus radios on click, so it only shows
+     for keyboard focus anyway). */
+  .set-seg {
+    display: flex;
+    max-width: 330px;
+    gap: 4px;
+    padding: 4px;
+    background: var(--cream-2);
+    border-radius: var(--r-sm);
+    font-size: 12.5px;
+  }
+  .set-seg label {
+    flex: 1;
+    position: relative;
+    cursor: pointer;
+  }
+  .set-seg input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .set-seg span {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    color: var(--ink-2);
+    transition: background 0.15s, color 0.15s;
+  }
+  .set-seg label:hover input:not(:checked) + span { color: var(--ink); }
+  .set-seg input:checked + span {
+    background: var(--raised);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: var(--shadow-1);
+  }
+  .set-seg input:focus + span {
+    outline: 2px solid var(--terracotta);
+    outline-offset: 2px;
+  }
+  .set-seg input:focus:not(:focus-visible) + span { outline: none; }
   .set-toggle-muted {
     color: var(--ink-2);
     cursor: default;
