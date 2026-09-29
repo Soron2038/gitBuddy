@@ -15,7 +15,7 @@ use tauri::{window::Color, AppHandle, Manager, Theme, WebviewWindow};
 /// `@media (prefers-color-scheme: dark)` — and
 /// `window_background_matches_app_css_paper` fails when the two drift apart.
 pub const PAPER_LIGHT: Color = Color(0xFF, 0xFD, 0xF8, 0xFF);
-pub const PAPER_DARK: Color = Color(0x1A, 0x15, 0x12, 0xFF);
+pub const PAPER_DARK: Color = Color(0x1D, 0x1B, 0x1A, 0xFF);
 
 /// The theme to force for a preference; `None` means "follow macOS".
 pub fn forced_theme(pref: Appearance) -> Option<Theme> {

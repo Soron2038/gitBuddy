@@ -1,6 +1,7 @@
 /* ─────────────────────────────────────────────────────────────────
    gitBuddy — Buddy (Warm) design tokens
-   Reference: design-mockups/03-buddy-warm.html
+   Reference: design-mockups/03-buddy-warm.html (light),
+              design-mockups/04-buddy-warm-dark.html (dark)
    ───────────────────────────────────────────────────────────────── */
 
 :root {
@@ -104,18 +105,28 @@
 }
 
 /* Dark ---------------------------------------------------------------
-   Buddy Warm after dark, not a neutral greyscale: the paper goes to warm
-   espresso rather than black, the ink to cream, and terracotta / sage /
-   butter / plum keep their hue and simply move up in lightness. A
-   menu-bar popover sits directly under the system bar, so a hard white
-   panel at night is the single most jarring thing the app can do — and
-   the tray icon is already a template image that inverts correctly, so
-   the UI was the only part not following the system.
+   "Warm graphite" (design-mockups/04-buddy-warm-dark.html, 2026-09-29):
+   near-neutral surfaces in the register of native macOS dark, with the
+   warmth carried by the cream ink and the accents rather than by the
+   ground. The 1.2 palette put the warmth into the surfaces too — espresso
+   paper under brown-olive tints — which read as muddy; here the tints are
+   only washes, and sage/butter tints lean slightly away from olive (hue
+   150 / 76 instead of the accents' 138 / 86).
 
-   Every value below was computed against the dark --paper rather than
-   eyeballed: body ink 15.1:1, --ink-3 (the 11–12.5px meta workhorse)
-   5.97:1, the accents 6.5–10.8:1, and each accent on its own --*-soft
-   tint 5.2–8.2:1. --ink-4 stays decorative-only at 3.68:1.
+   A menu-bar popover sits directly under the system bar, so a hard white
+   panel at night is the single most jarring thing the app can do; the tray
+   icon is a template image that already inverts on its own.
+
+   Surfaces step up in even OKLCH lightness — paper 0.225, paper-2 0.25,
+   cream-2 0.30, cream-3 0.345, raised 0.38 — so the sidebar, cards,
+   tracks and the selected pill stay distinguishable without borders.
+   Accents keep their hue from the light palette and move up in lightness.
+
+   Every value was computed, not eyeballed (`node scripts/check-contrast.mjs`,
+   enforced by src/app-contrast.test.ts): body ink 15.2:1 on --paper,
+   --ink-3 6.8:1 on --paper and 6.3:1 on --paper-2, accents 7.1–11.3:1 on
+   --paper, each --*-ink on its own --*-soft 6.1–8.7:1, --paper on the
+   terracotta fill 7.1:1. --ink-4 stays decorative-only at 3.9:1.
 
    Note the *-soft / *-ink pair swaps roles here: in light mode `soft` is a
    pale tint carrying dark `ink` text; in dark mode `soft` is a muted dark
@@ -123,52 +134,57 @@
    raw colours, so they need no per-scheme branching. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --cream:        #252019;
-    --cream-2:      #2E2720;
-    --cream-3:      #3A322A;
-    --paper:        #1A1512;
-    --paper-2:      #211B17;
+    --cream:        #282624;
+    --cream-2:      #2F2D2C;
+    --cream-3:      #3B3937;
+    /* Mirrored by appearance::PAPER_DARK (the native window background);
+       a Rust test fails if the two drift apart. */
+    --paper:        #1D1B1A;
+    --paper-2:      #232120;
 
     /* Headers lift slightly off --paper; the stat cards run from each
-       accent's --*-soft tint to a shade darker. Measured like the rest:
-       --ink on the headers 13.4:1 or more, --ink-2 on the stat cards
-       7.6:1 or more, each card's number on its own tint 5.2:1 or more. */
-    --head-from:      #27201A;
-    --head-to:        #211B17;
-    --titlebar-from:  #241E19;
-    --titlebar-to:    #1E1915;
-    --stat-t-from:    #3B241B;
-    --stat-t-to:      #321F17;
-    --stat-s-from:    #25301F;
-    --stat-s-to:      #1F281A;
-    --stat-b-from:    #382C13;
-    --stat-b-to:      #2F2510;
+       accent's tint to a shade darker. --ink on the headers 13.4:1 or
+       more, --ink-2 on the stat cards 8.0:1 or more, each card's number
+       on its own tint 5.7:1 or more. */
+    --head-from:      #292623;
+    --head-to:        #232120;
+    --titlebar-from:  #282624;
+    --titlebar-to:    #201F1D;
+    --stat-t-from:    #3C2A23;
+    --stat-t-to:      #34251F;
+    --stat-s-from:    #263328;
+    --stat-s-to:      #222C23;
+    --stat-b-from:    #382D1E;
+    --stat-b-to:      #30271B;
 
-    --ink:          #F2E9DF;
-    --ink-2:        #CDBFB1;
-    --ink-3:        #A29184;
-    --ink-4:        #7C6E62;
+    --ink:          #F4F1EB;
+    --ink-2:        #CDC8C1;
+    --ink-3:        #A8A299;
+    --ink-4:        #7C776E;
 
     /* Light hairlines on a dark ground — the light-mode values are black at
        low alpha and vanish completely here. */
-    --line:         rgba(242, 233, 223, 0.10);
-    --line-2:       rgba(242, 233, 223, 0.17);
+    --line:         rgba(244, 241, 235, 0.10);
+    --line-2:       rgba(244, 241, 235, 0.17);
 
-    --terracotta:        #E08363;
-    --terracotta-soft:   #3B241B;
-    --terracotta-ink:    #E08363;
+    --terracotta:        #ED8F6A;
+    --terracotta-soft:   #402A22;
+    /* A step lighter than the accent: terracotta text also sits on the
+       --raised pill (the active tab's count), which is lighter than the
+       tint — #ED8F6A measured 4.17:1 there, this is 4.8:1. */
+    --terracotta-ink:    #F49F7E;
     /* Lighter on hover here, not darker — the direction of "more prominent"
        inverts with the scheme. */
-    --terracotta-hover:  #E9977B;
-    --sage:              #9DB897;
-    --sage-soft:         #25301F;
-    --sage-ink:          #9DB897;
-    --butter:            #E8C46B;
-    --butter-soft:       #382C13;
-    --butter-ink:        #E8C46B;
-    --plum:              #E58AA8;
-    --plum-soft:         #3A1F29;
-    --plum-ink:          #E58AA8;
+    --terracotta-hover:  #FBA07D;
+    --sage:              #A6CA9B;
+    --sage-soft:         #253528;
+    --sage-ink:          #A6CA9B;
+    --butter:            #F1CE80;
+    --butter-soft:       #3B2E1C;
+    --butter-ink:        #F1CE80;
+    --plum:              #E798B2;
+    --plum-soft:         #3D2A30;
+    --plum-ink:          #E798B2;
 
     /* Shadows read as depth against light surfaces and as mud against dark
        ones. Deepen and tighten them so cards still lift without haloing. */
@@ -180,11 +196,11 @@
 
     /* The selected pill sits *above* its --cream-2 track here (--paper is
        darker than the track in this scheme), the knob is a soft white. */
-    --raised:       #3B322A;
-    --knob:         #E9DFD3;
-    --edge:         rgba(242, 233, 223, 0.14);
-    --scroll-thumb:       rgba(242, 233, 223, 0.22);
-    --scroll-thumb-hover: rgba(242, 233, 223, 0.36);
+    --raised:       #44423F;
+    --knob:         #EAE7E1;
+    --edge:         rgba(244, 241, 235, 0.14);
+    --scroll-thumb:       rgba(244, 241, 235, 0.22);
+    --scroll-thumb-hover: rgba(244, 241, 235, 0.36);
   }
 }
 
