@@ -18,7 +18,10 @@ concurrency:
 jobs:
   frontend:
     name: Frontend (svelte-check)
-    runs-on: macos-latest
+    # svelte-check needs nothing macOS-specific, and Linux runners don't sit
+    # in the macOS arm64 capacity queue (the job was cancelled unstarted
+    # twice on 2026-11-03). The lockfile carries the linux-x64 natives.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
