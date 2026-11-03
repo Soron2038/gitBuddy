@@ -29,7 +29,7 @@ All commands run from repo root unless noted.
 | Tray icon regen | `python3 scripts/regenerate-tray-icon.py` |
 | Palette contrast check | `node scripts/check-contrast.mjs` (add `--html design-mockups/04-buddy-warm-dark.html` for the mockup's palettes) |
 
-There is no CI — the commands above are the local verification gate.
+CI (`.github/workflows/ci.yml`, push/PR to `main`) runs a minimal gate on `macos-latest`: `npm run check`, plus `cargo fmt --check`, `cargo clippy --all-targets -D warnings` and `cargo test --lib` — no Tauri bundle build, releases stay local and signed (see the 2026-06-10 entry in `docs/DECISIONS.md`). It installs the current `stable` Rust, which can be newer than your local one: new Clippy lints show up there first. Reproduce with that exact version side by side (`rustup toolchain install <ver> -c clippy` then `cargo +<ver> clippy …`) rather than bumping the default.
 
 **`npm run tauri build` requires `TAURI_SIGNING_PRIVATE_KEY`** since v1.0: `bundle.createUpdaterArtifacts` is enabled, so the bundle step fails without the updater signing key. For a local smoke-test without the key use `scripts/build-app.sh --unsigned` (skips updater artifacts and notarization). The full signed/notarized release flow is documented in `docs/RELEASING.md`.
 
