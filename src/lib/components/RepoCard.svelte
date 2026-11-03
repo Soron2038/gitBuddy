@@ -108,6 +108,9 @@
       {#if firstLocal && firstLocal.ahead > 0}
         <span class="warn">{firstLocal.ahead} unpushed</span>
       {/if}
+      {#if firstLocal && firstLocal.behind > 0}
+        <span class="behind" title="Commits on the remote that this clone doesn't have yet — git pull">↓{firstLocal.behind} behind</span>
+      {/if}
     </div>
   </div>
   <div class="rmeta">
@@ -188,6 +191,7 @@
   opacity: 0.5;
 }
 .rname .sub .warn { color: var(--terracotta); }
+.rname .sub .behind { color: var(--plum-ink); }
 .rmeta {
   text-align: right;
   display: flex;

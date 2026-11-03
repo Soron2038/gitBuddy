@@ -9,6 +9,7 @@ import {
   releaseKey,
   dedupeBy,
   formatBytes,
+  behindLocals,
 } from './format';
 import type { LocalRepo } from './data/api';
 
@@ -25,8 +26,25 @@ function local(host: string | null): LocalRepo {
     behind: 0,
     detached: false,
     push_via_gitbuddy: false,
+    last_fetched_at: null,
+    fetch_error: null,
   };
 }
+
+describe('behindLocals', () => {
+  const at = (path: string, behind: number): LocalRepo => ({ ...local('github.com'), path, behind });
+
+  it('keeps only clones that are behind, most commits first', () => {
+    const out = behindLocals([at('/a', 0), at('/b', 2), at('/c', 7), at('/d', 0)]);
+    expect(out.map((l) => l.path)).toEqual(['/c', '/b']);
+  });
+
+  it('orders ties by path and leaves the input untouched', () => {
+    const input = [at('/z', 3), at('/a', 3)];
+    expect(behindLocals(input).map((l) => l.path)).toEqual(['/a', '/z']);
+    expect(input.map((l) => l.path)).toEqual(['/z', '/a']);
+  });
+});
 
 describe('repoKey / releaseKey', () => {
   // C4: the aggregator emits one row per (account, repo) pair by design, so

@@ -54,6 +54,14 @@ pub struct LocalRepo {
     /// The clone's own config routes git credentials through gitBuddy, so
     /// `git push` over HTTPS works in any terminal (see `git_credential.rs`).
     pub push_via_gitbuddy: bool,
+    /// RFC 3339 time of the last fetch into this clone — gitBuddy's own or
+    /// one from a terminal, both rewrite `FETCH_HEAD`. `ahead`/`behind` are
+    /// only as fresh as this. `None` if the clone was never fetched.
+    pub last_fetched_at: Option<String>,
+    /// Why gitBuddy's most recent background fetch of this clone failed.
+    /// Never set by the scan itself — `remote_fetch::annotate` fills it in
+    /// from the fetch loop's results whenever a scan lands in the cache.
+    pub fetch_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,7 +210,18 @@ fn diagnose(path: &Path) -> Result<LocalRepo, git2::Error> {
         behind,
         detached,
         push_via_gitbuddy: crate::git_credential::is_configured(&repo),
+        last_fetched_at: last_fetched_at(&repo),
+        fetch_error: None,
     })
+}
+
+/// `FETCH_HEAD`'s mtime. It lives in the common gitdir, so a linked worktree
+/// reports the fetch time of the repository it belongs to.
+fn last_fetched_at(repo: &Repository) -> Option<String> {
+    let modified = std::fs::metadata(repo.commondir().join("FETCH_HEAD"))
+        .and_then(|m| m.modified())
+        .ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
 }
 
 fn current_branch(repo: &Repository) -> (Option<String>, bool) {
@@ -300,7 +319,7 @@ fn origin_remote(repo: &Repository) -> Option<RemoteRef> {
 ///
 /// Returns `None` if we can't extract all three pieces — callers fall back to
 /// surfacing the raw URL.
-fn parse_remote_url(url: &str) -> Option<RemoteRef> {
+pub(crate) fn parse_remote_url(url: &str) -> Option<RemoteRef> {
     let trimmed = url.trim().trim_end_matches('/');
     let stripped = trimmed.strip_suffix(".git").unwrap_or(trimmed);
 

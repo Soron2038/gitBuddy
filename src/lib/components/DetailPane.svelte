@@ -25,7 +25,7 @@
     type ReleaseAsset,
     type WaitingItem,
   } from '$lib/data/api';
-  import { formatBytes } from '$lib/format';
+  import { formatBytes, humaniseSync } from '$lib/format';
   import { getReleaseAsset } from '$lib/data/assets';
 
   interface Props {
@@ -408,13 +408,21 @@
               {l.branch ?? (l.detached ? 'detached' : '—')}
             </span>
             {#if l.ahead > 0}<span class="dp-clone-stat warn">{l.ahead} ahead</span>{/if}
-            {#if l.behind > 0}<span class="dp-clone-stat warn">{l.behind} behind</span>{/if}
+            {#if l.behind > 0}<span class="dp-clone-stat behind">↓{l.behind} behind</span>{/if}
             {#if dirty > 0}<span class="dp-clone-stat warn">{dirty} uncommitted</span>{/if}
             {#if l.untracked > 0}<span class="dp-clone-stat">{l.untracked} untracked</span>{/if}
             {#if l.ahead === 0 && l.behind === 0 && dirty === 0 && l.untracked === 0}
               <span class="dp-clone-stat clean">clean</span>
             {/if}
           </div>
+          <!-- "behind" is only as fresh as the last fetch, so say how old
+               that is — and why gitBuddy's own fetch failed, when it did. -->
+          <div class="dp-clone-fetch">
+            remote checked {l.last_fetched_at ? humaniseSync(new Date(l.last_fetched_at), Date.now()) : 'never'}
+          </div>
+          {#if l.fetch_error}
+            <div class="dp-clone-fetch err" role="status">Couldn't check the remote: {l.fetch_error}</div>
+          {/if}
           {#if l.push_via_gitbuddy}
             <div class="dp-clone-push" title="git push over HTTPS takes its token from gitBuddy">
               <span class="d on"></span>push via gitBuddy
@@ -914,6 +922,13 @@
 .dp-clone-push-btn:disabled { cursor: progress; opacity: 0.6; }
 .dp-clone-stat.warn { color: var(--terracotta); }
 .dp-clone-stat.clean { color: var(--sage-ink); }
+.dp-clone-stat.behind { color: var(--plum-ink); }
+.dp-clone-fetch {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.dp-clone-fetch.err { color: var(--terracotta-ink); overflow-wrap: anywhere; }
 
 .dp-ci {
   display: flex;

@@ -20,6 +20,7 @@ use crate::{
     local_index::LocalRepo,
     oauth::{self, DeviceCodeResponse, PollOutcome},
     provider_util::ProviderBackend,
+    remote_fetch,
     settings::{self, Settings},
     types::*,
 };
@@ -73,6 +74,15 @@ pub struct AppState {
     /// Notified by `save_settings`. Same race as `refresh_trigger`: lets the
     /// loop re-read the poll interval mid-sleep.
     pub settings_reload: Arc<Notify>,
+    /// The `remote_fetch` loop's counterparts of the two above. Separate
+    /// `Notify`s because `notify_one` wakes a single waiter — shared ones
+    /// would let each loop swallow the other's wake-up.
+    pub fetch_trigger: Arc<Notify>,
+    pub fetch_reload: Arc<Notify>,
+    /// Path → why the last background fetch of that clone failed. Replaced
+    /// wholesale by each fetch round; merged into every scan by
+    /// [`AppState::store_locals`].
+    pub fetch_errors: RwLock<HashMap<String, String>>,
     /// Gates the one-time account migrations so commands can wait for them
     /// before reporting "no providers connected". Restoring the providers
     /// themselves is deliberately *not* gated by this — see
@@ -94,6 +104,9 @@ impl Default for AppState {
             cache: RwLock::new(AggregatorCache::default()),
             refresh_trigger: Arc::new(Notify::new()),
             settings_reload: Arc::new(Notify::new()),
+            fetch_trigger: Arc::new(Notify::new()),
+            fetch_reload: Arc::new(Notify::new()),
+            fetch_errors: RwLock::new(HashMap::new()),
             migrations_done: tokio::sync::Mutex::new(false),
             accounts_lock: tokio::sync::Mutex::new(()),
         }
@@ -101,6 +114,16 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Put a fresh local scan into the cache. Every scan — the tick's, the
+    /// fetch round's, `rescan_local_repos` — lands here, so each one carries
+    /// the last fetch errors and updates the tray badge.
+    pub async fn store_locals(&self, app: &AppHandle, mut locals: Vec<LocalRepo>) {
+        remote_fetch::annotate(&mut locals, &*self.fetch_errors.read().await);
+        let behind = remote_fetch::behind_count(&locals);
+        self.cache.write().await.locals = locals;
+        crate::set_tray_badge(app, behind);
+    }
+
     /// On the first command call after launch:
     ///   1. Migrate `accounts.json` from v1 ids (`<provider>:<login>`, M6.3)
     ///      to v2 ids (`<provider>:<host>:<login>`, M6.4), moving each
@@ -974,6 +997,12 @@ pub async fn clone_repo(
         }
         let mut fo = FetchOptions::new();
         fo.remote_callbacks(callbacks);
+        if token.is_some() {
+            // libgit2 asks the credentials callback with the original URL even
+            // after following a redirect, so the host pin above would not cover
+            // a redirect target — don't follow any while a token is attached.
+            fo.follow_redirects(git2::RemoteRedirect::None);
+        }
 
         let mut builder = git2::build::RepoBuilder::new();
         builder.fetch_options(fo);
@@ -1074,8 +1103,8 @@ pub async fn rescan_local_repos(
     let locals = tokio::task::spawn_blocking(move || crate::local_index::scan(&settings))
         .await
         .map_err(|e| format!("Local scan task panicked: {e}"))?;
-    state.cache.write().await.locals = locals.clone();
-    Ok(locals)
+    state.store_locals(&app, locals).await;
+    Ok(state.cache.read().await.locals.clone())
 }
 
 /// Result of [`download_release_asset`]. Tagged so the frontend can switch on
@@ -1194,6 +1223,10 @@ pub fn save_settings(
     let appearance_changed = old
         .as_ref()
         .is_none_or(|old| old.appearance != settings.appearance);
+    let fetch_changed = old.as_ref().is_none_or(|old| {
+        old.remote_fetch_enabled != settings.remote_fetch_enabled
+            || old.remote_fetch_interval_minutes != settings.remote_fetch_interval_minutes
+    });
 
     settings::save(&app, &settings)?;
     // Only once the choice is persisted, so the UI never shows an appearance
@@ -1206,6 +1239,9 @@ pub fn save_settings(
     // from settings — wake it so the new values take effect on the current
     // sleep cycle rather than after the next tick.
     state.settings_reload.notify_one();
+    if fetch_changed {
+        state.fetch_reload.notify_one();
+    }
     if roots_changed {
         aggregator::refresh_now(&state);
     }

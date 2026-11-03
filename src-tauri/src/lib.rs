@@ -19,6 +19,7 @@ mod local_index;
 mod notifications;
 mod oauth;
 mod provider_util;
+mod remote_fetch;
 mod settings;
 mod types;
 mod util;
@@ -106,14 +107,8 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
-            // Spawn the aggregator polling task. The first thing it does is
-            // call `ensure_initialized` (keychain restore + account
-            // migrations), so all subsequent ticks see fully-hydrated
-            // provider HashMaps. Both windows subscribe to the `data-updated`
-            // event the loop emits and re-read their views via the
-            // `list_*` commands, which are cache reads.
-            let state = app.state::<Arc<AppState>>().inner().clone();
-            aggregator::spawn_loop(app.handle().clone(), state);
+            // Before anything can open a libgit2 connection.
+            remote_fetch::init_libgit2_timeouts();
 
             // ── Tray menu (right-click) ─────────────────────────────────
             // Deliberately NOT passed to `TrayIconBuilder::menu`. A menu that
@@ -154,6 +149,16 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            // Spawn the aggregator polling task — after the tray exists, since
+            // every tick updates its badge. The first thing it does is
+            // call `ensure_initialized` (keychain restore + account
+            // migrations), so all subsequent ticks see fully-hydrated
+            // provider HashMaps. Both windows subscribe to the `data-updated`
+            // event the loop emits and re-read their views via the
+            // `list_*` commands, which are cache reads.
+            let state = app.state::<Arc<AppState>>().inner().clone();
+            aggregator::spawn_loop(app.handle().clone(), state);
 
             // Auto-hide the popover when it loses focus, the way a native
             // NSPopover behaves on macOS. Disabled in debug builds so that
@@ -219,6 +224,25 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Show how many local clones are behind their upstream next to the tray
+/// icon (`↓3`, the arrow git clients use for "behind"), and say so in the
+/// tooltip. Nothing behind clears both.
+pub(crate) fn set_tray_badge(app: &tauri::AppHandle, behind: usize) {
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
+    let title = (behind > 0).then(|| format!("↓{behind}"));
+    let tooltip = match behind {
+        0 => "gitBuddy".to_string(),
+        1 => "gitBuddy — 1 local clone is behind its remote".to_string(),
+        n => format!("gitBuddy — {n} local clones are behind their remotes"),
+    };
+    if let Err(e) = tray.set_title(title.as_deref()) {
+        eprintln!("gitbuddy: setting the tray badge failed: {e}");
+    }
+    let _ = tray.set_tooltip(Some(tooltip));
 }
 
 fn open_main_window(app: &tauri::AppHandle) {

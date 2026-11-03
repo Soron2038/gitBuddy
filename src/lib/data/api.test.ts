@@ -43,6 +43,8 @@ function local(host: string, owner: string, name: string): LocalRepo {
     behind: 0,
     detached: false,
     push_via_gitbuddy: false,
+    last_fetched_at: null,
+    fetch_error: null,
   };
 }
 

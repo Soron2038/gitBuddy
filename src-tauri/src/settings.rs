@@ -15,7 +15,7 @@
 //! lands in the current version without a bump. Bumping for it would be
 //! actively harmful: the "newer version" guard in `load` would make an older
 //! build (e.g. 1.3.0) refuse the *whole* file after a downgrade. v3 gained
-//! `appearance` this way.
+//! `appearance` and the `remote_fetch_*` pair this way.
 
 use crate::util::atomic_write;
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,13 @@ pub const CURRENT_VERSION: u32 = 3;
 pub const POLL_INTERVAL_MIN: u32 = 1;
 pub const POLL_INTERVAL_MAX: u32 = 60;
 pub const POLL_INTERVAL_DEFAULT: u32 = 5;
+
+/// Band for the background `git fetch` of local clones (minutes). A fetch
+/// round touches every clone's remote, so it runs on its own, slower cadence
+/// than the API poll. Same clamp-on-load contract as the poll interval.
+pub const FETCH_INTERVAL_MIN: u32 = 5;
+pub const FETCH_INTERVAL_MAX: u32 = 120;
+pub const FETCH_INTERVAL_DEFAULT: u32 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -93,6 +100,15 @@ pub struct Settings {
     /// flips without the frontend reading this field.
     #[serde(default)]
     pub appearance: Appearance,
+    /// Fetch every local clone's upstream in the background so the
+    /// "behind" counts reflect the forge, not the last manual `git fetch`.
+    /// Only remote-tracking refs are written — see `remote_fetch.rs`.
+    #[serde(default = "default_true")]
+    pub remote_fetch_enabled: bool,
+    /// Cadence of that background fetch, clamped to
+    /// `[FETCH_INTERVAL_MIN, FETCH_INTERVAL_MAX]` on every load.
+    #[serde(default = "default_fetch_interval")]
+    pub remote_fetch_interval_minutes: u32,
 }
 
 /// User-selected app appearance.
@@ -170,6 +186,9 @@ fn default_version() -> u32 {
 fn default_poll_interval() -> u32 {
     POLL_INTERVAL_DEFAULT
 }
+fn default_fetch_interval() -> u32 {
+    FETCH_INTERVAL_DEFAULT
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -184,6 +203,8 @@ impl Default for Settings {
             notifications: NotificationSettings::default(),
             poll_interval_minutes: POLL_INTERVAL_DEFAULT,
             appearance: Appearance::System,
+            remote_fetch_enabled: true,
+            remote_fetch_interval_minutes: FETCH_INTERVAL_DEFAULT,
         }
     }
 }
@@ -195,6 +216,9 @@ impl Settings {
         self.poll_interval_minutes = self
             .poll_interval_minutes
             .clamp(POLL_INTERVAL_MIN, POLL_INTERVAL_MAX);
+        self.remote_fetch_interval_minutes = self
+            .remote_fetch_interval_minutes
+            .clamp(FETCH_INTERVAL_MIN, FETCH_INTERVAL_MAX);
     }
 }
 
@@ -346,6 +370,8 @@ fn migrate_v1_to_v2(value: serde_json::Value) -> Result<Settings, String> {
         poll_interval_minutes: POLL_INTERVAL_DEFAULT,
         // Added within v3 (no bump) — v1 predates it; follow macOS.
         appearance: Appearance::System,
+        remote_fetch_enabled: true,
+        remote_fetch_interval_minutes: FETCH_INTERVAL_DEFAULT,
     })
 }
 
@@ -461,6 +487,34 @@ mod tests {
         };
         s.clamp();
         assert_eq!(s.poll_interval_minutes, 7);
+    }
+
+    #[test]
+    fn clamp_pins_fetch_interval_into_band() {
+        let mut s = Settings {
+            remote_fetch_interval_minutes: 0,
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.remote_fetch_interval_minutes, FETCH_INTERVAL_MIN);
+
+        let mut s = Settings {
+            remote_fetch_interval_minutes: 9_999,
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.remote_fetch_interval_minutes, FETCH_INTERVAL_MAX);
+    }
+
+    #[test]
+    fn v3_without_remote_fetch_fields_defaults_to_on_every_15_min() {
+        // A 1.4.0 file predates the background fetch. Added within v3 with
+        // serde defaults, so it parses without a migration step.
+        let v3 = json!({ "version": 3, "poll_interval_minutes": 10 });
+        let s: Settings = serde_json::from_value(v3).expect("parse");
+        assert!(s.remote_fetch_enabled);
+        assert_eq!(s.remote_fetch_interval_minutes, FETCH_INTERVAL_DEFAULT);
+        assert_eq!(s.poll_interval_minutes, 10);
     }
 
     #[test]

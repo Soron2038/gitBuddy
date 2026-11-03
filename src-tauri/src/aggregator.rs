@@ -30,6 +30,7 @@ use crate::{
     local_index::{self, LocalRepo},
     notifications::{self, Kind, SeenStore},
     provider_util::{cmp_newest_first, ProviderBackend, ProviderError},
+    remote_fetch,
     settings::{self, NotificationSettings, Settings},
     types::{CiRun, CiStatus, ItemReason, Release, Repo, WaitingItem},
 };
@@ -65,14 +66,18 @@ pub fn spawn_loop(app: AppHandle, state: Arc<AppState>) {
         // and emits a useless empty snapshot, and the frontend sees nothing
         // until the user opens a window and triggers a lazy init.
         state.ensure_initialized(&app).await;
-        run_loop(&app, &state).await;
+        let first = tick(&app, &state).await;
+        // The fetch loop picks tokens by matching clones against the repo
+        // cache, so it starts once the first tick has filled that.
+        tauri::async_runtime::spawn(remote_fetch::run_loop(app.clone(), state.clone()));
+        run_loop(&app, &state, first).await;
     });
 }
 
 /// The polling task body. Loops forever, alternating ticks and sleeps,
 /// breaking out only if the runtime shuts down.
-async fn run_loop(app: &AppHandle, state: &AppState) {
-    let (mut settings, mut backoff) = tick(app, state).await;
+async fn run_loop(app: &AppHandle, state: &AppState, first: (Settings, Option<u64>)) {
+    let (mut settings, mut backoff) = first;
     loop {
         // When a forge told us how long to wait, respect it — polling the same
         // endpoints again on the user's normal cadence while being throttled
@@ -111,6 +116,8 @@ async fn run_loop(app: &AppHandle, state: &AppState) {
 /// the polling task and surfaces its result via `data-updated`.
 pub fn refresh_now(state: &AppState) {
     state.refresh_trigger.notify_one();
+    // A manual refresh should also bring the "behind" counts up to date.
+    state.fetch_trigger.notify_one();
 }
 
 /// Run a single fetch + cache write + diff + notify + event emit.
@@ -235,10 +242,6 @@ async fn tick(app: &AppHandle, state: &AppState) -> (Settings, Option<u64>) {
         cache.repos = snapshot.repos;
         cache.releases = snapshot.releases;
         cache.ci = snapshot.ci;
-        // `None` = the scan didn't run; keep whatever the last good tick found.
-        if let Some(locals) = snapshot.locals {
-            cache.locals = locals;
-        }
         if authoritative {
             cache.last_synced_at = Some(synced_at.clone());
         }
@@ -247,6 +250,11 @@ async fn tick(app: &AppHandle, state: &AppState) -> (Settings, Option<u64>) {
         } else {
             Some(snapshot.errors.join(" · "))
         };
+    }
+
+    // `None` = the scan didn't run; keep whatever the last good tick found.
+    if let Some(locals) = snapshot.locals {
+        state.store_locals(app, locals).await;
     }
 
     if let Err(e) = app.emit("data-updated", DataUpdatedPayload { synced_at }) {

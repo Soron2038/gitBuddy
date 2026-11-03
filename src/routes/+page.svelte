@@ -55,6 +55,8 @@
     importConfig,
     defaultSettings,
     APPEARANCE_OPTIONS,
+    FETCH_INTERVAL_MIN,
+    FETCH_INTERVAL_MAX,
     type Appearance,
     runEditor,
     runTerminal,
@@ -109,6 +111,11 @@
   let pollIntervalDraft = $state(defaultSettings().poll_interval_minutes);
   $effect(() => {
     pollIntervalDraft = settings.poll_interval_minutes;
+  });
+  /** Same drag-vs-persisted split for the clone-fetch interval slider. */
+  let fetchIntervalDraft = $state(defaultSettings().remote_fetch_interval_minutes);
+  $effect(() => {
+    fetchIntervalDraft = settings.remote_fetch_interval_minutes;
   });
 
   // ── UI state ──────────────────────────────────────────────────────────
@@ -1109,6 +1116,19 @@
     const clamped = Math.min(60, Math.max(1, Math.round(value)));
     if (clamped === settings.poll_interval_minutes) return;
     settings = { ...settings, poll_interval_minutes: clamped };
+    await persistSettings();
+  }
+
+  async function setRemoteFetchEnabled(enabled: boolean) {
+    if (enabled === settings.remote_fetch_enabled) return;
+    settings = { ...settings, remote_fetch_enabled: enabled };
+    await persistSettings();
+  }
+
+  async function setFetchInterval(value: number) {
+    const clamped = Math.min(FETCH_INTERVAL_MAX, Math.max(FETCH_INTERVAL_MIN, Math.round(value)));
+    if (clamped === settings.remote_fetch_interval_minutes) return;
+    settings = { ...settings, remote_fetch_interval_minutes: clamped };
     await persistSettings();
   }
 
@@ -2488,13 +2508,51 @@
           </div>
         </section>
 
+        <!-- Background fetch of local clones -->
+        <section class="set-sec">
+          <h3>Check <em>local clones</em></h3>
+          <p class="set-help">
+            gitBuddy fetches each clone's upstream in the background, so you
+            see which ones are behind before you start working — as a count
+            next to the menu-bar icon and in the popover. It only updates the
+            remote-tracking branches, exactly like <code>git fetch</code>;
+            your branches and working tree are never touched. SSH remotes are
+            fetched over HTTPS with the matching account's token.
+          </p>
+          <label class="set-toggle">
+            <input
+              type="checkbox"
+              checked={settings.remote_fetch_enabled}
+              onchange={(e) => setRemoteFetchEnabled((e.target as HTMLInputElement).checked)}
+            />
+            <span>Fetch local clones in the background</span>
+          </label>
+          <div class="set-slider-row">
+            <input
+              type="range"
+              min={FETCH_INTERVAL_MIN}
+              max={FETCH_INTERVAL_MAX}
+              step="5"
+              value={fetchIntervalDraft}
+              disabled={!settings.remote_fetch_enabled}
+              oninput={(e) => (fetchIntervalDraft = Number((e.target as HTMLInputElement).value))}
+              onchange={(e) => setFetchInterval(Number((e.target as HTMLInputElement).value))}
+              class="set-slider"
+              aria-label="Clone fetch interval in minutes"
+            />
+            <span class="set-slider-value">
+              every {fetchIntervalDraft}&nbsp;min
+            </span>
+          </div>
+        </section>
+
         <!-- Backup & restore configuration -->
         <section class="set-sec">
           <h3>Backup &amp; <em>restore</em></h3>
           <p class="set-help">
             Save your settings (scan roots, ignore patterns, editor/terminal
-            commands, appearance, notification preferences, sync interval,
-            instance URLs)
+            commands, appearance, notification preferences, sync and fetch
+            intervals, instance URLs)
             to a JSON file, or load them on another machine. Accounts and
             tokens are <strong>not</strong> included — reconnect those after an
             import.

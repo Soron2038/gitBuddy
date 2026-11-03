@@ -22,6 +22,7 @@
     repoKey,
     releaseKey,
     dedupeBy,
+    behindLocals,
   } from '$lib/format';
   import { deriveProviderHeads } from '$lib/data/auth';
   import { assetLabel, getReleaseAsset } from '$lib/data/assets';
@@ -118,6 +119,11 @@
   });
 
   let localByKey = $derived(indexLocalByRemote(locals));
+
+  /** Clones whose branch is behind its upstream — the same set the tray
+   *  badge counts. Listed above the waiting items: pulling them is the
+   *  first thing to do before starting work. */
+  let behind = $derived(behindLocals(locals));
 
   /** Local repos whose `origin` doesn't match any of the user's known remote
    *  accounts — typically scratch clones, abandoned forks, or repos hosted
@@ -749,6 +755,56 @@
         {/if}
 
         {#if activeTab === 'waiting'}
+          {#if behind.length > 0}
+            <div class="section-h">
+              Behind <em>remote</em>
+              <span class="section-h-count">{behind.length}</span>
+            </div>
+            {#each behind as l (l.path)}
+              {@const dirty = l.dirty_staged + l.dirty_unstaged}
+              {@const label = l.remote ? `${l.remote.owner}/${l.remote.name}` : shortenPath(l.path)}
+              <!-- Same actions as an orphan row (Finder / editor / terminal),
+                   which is where the `git pull` happens. A real button, so
+                   Enter and Space open the menu too. -->
+              <button
+                type="button"
+                class="row behind-row"
+                title={l.path}
+                aria-label={`${label}, ${l.behind} ${l.behind === 1 ? 'commit' : 'commits'} behind on ${l.branch ?? 'its branch'}`}
+                onclick={(e) =>
+                  buildLocalRepoMenu(
+                    l,
+                    e.currentTarget.getBoundingClientRect().left + 12,
+                    e.currentTarget.getBoundingClientRect().bottom - 4,
+                  )}
+                oncontextmenu={(e) => openLocalRepoMenu(e, l)}
+              >
+                <span class="chip behind" aria-hidden="true">↓{l.behind > 99 ? '99+' : l.behind}</span>
+                <span class="body">
+                  <span class="title">{label}</span>
+                  <span class="meta">
+                    {l.branch}
+                    <span class="dot">·</span>
+                    {l.behind} {l.behind === 1 ? 'commit' : 'commits'} behind
+                    {#if l.ahead > 0}
+                      <span class="dot">·</span>
+                      <span class="warn">{l.ahead} unpushed</span>
+                    {/if}
+                    {#if dirty > 0}
+                      <span class="dot">·</span>
+                      <span class="warn">{dirty} uncommitted</span>
+                    {/if}
+                  </span>
+                </span>
+              </button>
+            {/each}
+            {#if items.length > 0}
+              <div class="section-h">
+                Waiting <em>on you</em>
+                <span class="section-h-count">{items.length}</span>
+              </div>
+            {/if}
+          {/if}
           {#if items.length === 0}
             <div class="empty">
               <Buddy size={48} />
@@ -823,6 +879,10 @@
                         <span class="dot">·</span>
                         <span class="warn">{o.ahead} unpushed</span>
                       {/if}
+                      {#if o.behind > 0}
+                        <span class="dot">·</span>
+                        <span class="behind-ink">↓{o.behind} behind</span>
+                      {/if}
                     </span>
                   </span>
                 </button>
@@ -891,6 +951,10 @@
                     {#if localDiag && localDiag.ahead > 0}
                       <span class="dot">·</span>
                       <span class="warn">{localDiag.ahead} unpushed</span>
+                    {/if}
+                    {#if localDiag && localDiag.behind > 0}
+                      <span class="dot">·</span>
+                      <span class="behind-ink">↓{localDiag.behind} behind</span>
                     {/if}
                   </span>
                 </span>
@@ -1271,6 +1335,7 @@
   .chip.pr { background: var(--sage-soft); color: var(--sage-ink); }
   .chip.is { background: var(--terracotta-soft); color: var(--terracotta-ink); }
   .chip.mr { background: var(--butter-soft); color: var(--butter-ink); }
+  .chip.behind { background: var(--plum-soft); color: var(--plum-ink); letter-spacing: 0; }
   /* Repo rows reuse the .row layout but the leading chip is the provider
      glyph instead of an item kind. Colour distinguishes provider type at
      a glance — black for GitHub, GitLab-orange for gitlab.com, plum for
@@ -1347,6 +1412,10 @@
   }
   .meta .warn {
     color: var(--terracotta);
+    font-weight: 500;
+  }
+  .meta .behind-ink {
+    color: var(--plum-ink);
     font-weight: 500;
   }
 

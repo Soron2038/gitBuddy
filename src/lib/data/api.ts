@@ -193,6 +193,12 @@ export interface LocalRepo {
   /** The clone's own git config routes HTTPS credentials through gitBuddy,
    *  so `git push` works from any terminal. */
   push_via_gitbuddy: boolean;
+  /** RFC 3339 time of the last fetch into this clone (gitBuddy's background
+   *  fetch or one from a terminal). `ahead`/`behind` are only this fresh;
+   *  null if it was never fetched. */
+  last_fetched_at: string | null;
+  /** Why gitBuddy's last background fetch of this clone failed, if it did. */
+  fetch_error: string | null;
 }
 
 /** Notification settings. Three independently-toggleable gates, in
@@ -238,6 +244,11 @@ export interface Settings {
    *  macOS appearance), so the CSS keeps keying on `prefers-color-scheme`
    *  and neither window has to act on this value itself. */
   appearance: Appearance;
+  /** Background `git fetch` of every local clone, so "behind" counts track
+   *  the forge. Writes remote-tracking refs only. */
+  remote_fetch_enabled: boolean;
+  /** Cadence of that fetch, clamped backend-side to `[5, 120]`. */
+  remote_fetch_interval_minutes: number;
 }
 
 /** Mirrors the Rust `settings::Appearance` enum's serde names. */
@@ -256,6 +267,11 @@ export const APPEARANCE_OPTIONS: ReadonlyArray<{ value: Appearance; label: strin
 export const POLL_INTERVAL_MIN = 1;
 export const POLL_INTERVAL_MAX = 60;
 export const POLL_INTERVAL_DEFAULT = 5;
+
+/** Same mirror for `remote_fetch_interval_minutes`. */
+export const FETCH_INTERVAL_MIN = 5;
+export const FETCH_INTERVAL_MAX = 120;
+export const FETCH_INTERVAL_DEFAULT = 15;
 
 /** A fresh Settings object with backend defaults. Both windows seed their
  *  `settings` state with this before the first `getSettings()` resolves, so
@@ -276,6 +292,8 @@ export function defaultSettings(): Settings {
     },
     poll_interval_minutes: POLL_INTERVAL_DEFAULT,
     appearance: 'system',
+    remote_fetch_enabled: true,
+    remote_fetch_interval_minutes: FETCH_INTERVAL_DEFAULT,
   };
 }
 

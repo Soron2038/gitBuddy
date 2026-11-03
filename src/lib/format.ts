@@ -33,6 +33,15 @@ export function repoAge(pushed_at: string | null, nowMs: number): string {
   return `${Math.floor(mins / (60 * 24 * 365))}y`;
 }
 
+/** Local clones whose checked-out branch is behind its upstream, most
+ *  commits behind first (ties by path, so the order is stable between
+ *  refreshes). What the tray badge counts and the popover lists. */
+export function behindLocals(locals: LocalRepo[]): LocalRepo[] {
+  return locals
+    .filter((l) => l.behind > 0)
+    .sort((a, b) => b.behind - a.behind || a.path.localeCompare(b.path));
+}
+
 /** Shorten an absolute path for compact display: trim to the last two path
  *  components if it's longer. The Rust side returns absolute paths and we
  *  don't know $HOME on the JS side, so this is cosmetic only. */
