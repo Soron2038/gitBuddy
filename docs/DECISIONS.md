@@ -594,3 +594,70 @@ selected pill separate without borders. Contrast is checked by
 `scripts/check-contrast.mjs` and enforced by `src/app-contrast.test.ts`; the
 same pass fixed the few light-mode pairs that were just under AA (accent text
 on its own tint now always uses the `--*-ink` token).
+
+## 2026-11-03 — "Behind" counts via a background libgit2 fetch over HTTPS
+
+**Context.** `local_index` has always reported `behind`, but against the
+clone's remote-tracking ref, which only moves when something fetches. A clone
+nobody runs `git fetch` in showed "0 behind" no matter how far the forge had
+moved — exactly the clones the user forgets to pull. The goal: see before
+starting work which clones are behind (tray badge, popover, main window).
+
+**Options.**
+- *A — background fetch.* Fetch every clone with libgit2 and keep the existing
+  ahead/behind computation. Exact counts; a terminal's `git status` is fresh
+  afterwards too. Writes into the user's repos (refs and objects only).
+- *B — forge API only.* Compare the branch head SHA from the API with the
+  local one. Writes nothing, but only works for repos of connected accounts,
+  often yields "outdated" without a count, and costs API calls per tick.
+- *C — fetch with SSH support.* Like A, but build libgit2 with libssh2 and
+  use the ssh-agent. Uses the real remotes, but a bigger build, and keys with
+  a passphrase but no agent fail silently.
+
+**Decision: A, over HTTPS.** libgit2 here is built without SSH, so an SSH
+remote (`git@host:o/n`, `ssh://…`, `git://…`) is fetched from its HTTPS twin
+— onto the matching account's base URL when one is connected (it carries an
+instance's port or URL root), else `https://<host>` — through an anonymous
+remote with the named remote's refspecs, so the result lands in the same
+`refs/remotes/<name>/*`. HTTPS remotes go through an anonymous remote too:
+fetching the *named* remote makes libgit2 re-apply its configured refspecs
+"opportunistically", which would undo the refspec filter below.
+
+**How.**
+- `remote_fetch.rs` runs its own loop, spawned after the aggregator's first
+  tick (it picks tokens by matching clones to the repo cache). Default every
+  15 min, `remote_fetch_enabled` / `remote_fetch_interval_minutes` in
+  settings (within v3, serde defaults, no version bump). A manual refresh
+  forces a round if the last one is over a minute old. It has its own
+  `Notify`s: `notify_one` wakes one waiter, so sharing the aggregator's would
+  let either loop swallow the other's wake-up.
+- Only clones whose checked-out branch tracks an upstream are fetched, and
+  only that upstream's remote. What is written equals `git fetch <remote>`:
+  objects, remote-tracking refs, auto-followed tags, `FETCH_HEAD`. Refspecs
+  whose destination isn't under `refs/remotes/<name>/` or `refs/tags/` are
+  dropped — libgit2, unlike git, would force-update the checked-out branch
+  from a mirror-style `+refs/heads/*:refs/heads/*`.
+- Token rule as for `clone_repo`/`asset_request`: an account's own token, only
+  to its origin, only on a server challenge, once per fetch. With several
+  accounts on one host, the one whose repo list contains the repo is
+  preferred. Remote URLs come from unvetted `.git/config` files, and
+  `same_origin` (WHATWG parsing) and libgit2 disagree on URLs like
+  `https://github.com\@evil.example/…` (github.com to one, evil.example to
+  the other). So a token is attached only to a URL in a shape both parsers
+  read identically (`credential_safe_url`: `https://host[:port]/path`, ASCII,
+  no userinfo, `\`, `?`, `#`), the callback hands it out only for exactly that
+  URL, and redirects are disabled while a token is attached — libgit2 passes
+  the callback the original URL, not the redirect target. `clone_repo` got the
+  same redirect setting. Found by the security review of this change.
+- A fetch is aborted after 10 min of downloading, a round waits at most
+  5 min per clone, and a clone whose previous fetch thread is still running
+  is skipped (`InFlight`), so one hung remote can't stall the loop.
+- libgit2 gets process-wide connect (10 s) and read (30 s) timeouts at
+  startup; without them a server that goes quiet pins a fetch thread forever.
+- Every scan now goes through `AppState::store_locals`, which merges the last
+  round's per-clone errors (`LocalRepo::fetch_error`) and sets the tray title
+  to `↓N` (N clones behind; nothing when 0). `LocalRepo::last_fetched_at` is
+  `FETCH_HEAD`'s mtime, so the UI can say how fresh "behind" is regardless of
+  who fetched.
+- Known gap: an SSH host alias from `~/.ssh/config` (`git@github-work:…`) has
+  no HTTPS twin; the fetch fails and the detail pane shows why.

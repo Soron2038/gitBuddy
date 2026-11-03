@@ -7,6 +7,17 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **See which local clones are behind.** gitBuddy now fetches your clones in
+  the background (every 15 min by default, adjustable or off in Settings →
+  Check local clones) and shows how many are behind their remote as `↓N` next
+  to the menu-bar icon. The popover lists them at the top with the commit
+  count, the main window's cards and detail pane show it per repo, along with
+  when the remote was last checked. Only remote-tracking branches are updated,
+  like `git fetch` — your branches and working tree are never touched. SSH
+  remotes are fetched over HTTPS with the matching account's token.
+
 ## [1.4.0] — 2026-09-29
 
 Light or dark on your terms, and a calmer dark mode.
