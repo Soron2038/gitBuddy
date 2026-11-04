@@ -7,6 +7,10 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-11-04
+
+The `↓N` badge now goes away when it should.
+
 ### Fixed
 
 - **The `↓N` next to the menu-bar icon now disappears** once nothing is behind
@@ -336,7 +340,8 @@ First signed and notarized release.
   config export/import.
 - In-app auto-update via signed `latest.json` on GitHub Releases.
 
-[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/Soron2038/gitBuddy/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/Soron2038/gitBuddy/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/Soron2038/gitBuddy/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/Soron2038/gitBuddy/compare/v1.2.1...v1.3.0
