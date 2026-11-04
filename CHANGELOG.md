@@ -7,6 +7,12 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The count of clones behind is now a small terracotta badge** on the lower
+  right of the menu-bar icon, replacing the `↓N` text next to it. Counts above
+  nine show as `9+`.
+
 ## [1.5.1] — 2026-11-04
 
 The `↓N` badge now goes away when it should.

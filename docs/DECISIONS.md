@@ -661,3 +661,15 @@ fetching the *named* remote makes libgit2 re-apply its configured refspecs
   who fetched.
 - Known gap: an SSH host alias from `~/.ssh/config` (`git@github-work:…`) has
   no HTTPS twin; the fetch fails and the detail pane shows why.
+
+## 2026-11-04 — Tray count is a native badge view on a template icon
+
+**Context:** the 2026-11-03 entry put the behind count next to the icon as a `↓N` title. Björn wanted a number in a small circle overlapping the icon's lower right, and picked the terracotta variant from four mockups.
+
+**Decision:** keep the robot a template image and draw the badge as an `NSView` subclass on the status item's button (`tray_badge.rs`). While a count shows, the icon swaps to `tray-icon-badged.png`, the same robot on a wider canvas with a round gap for the badge.
+
+**Why not one coloured image:** a template image can't carry colour, and a plain image means tinting the robot ourselves. The menu bar's tint follows the wallpaper too, not just the system appearance: on the development Mac the bar was dark in light mode. macOS keeps getting that right for a template, so the robot stays one. A wrong guess for the badge's colours is harmless, since both palettes read on both bars.
+
+**Sizes:** tray-icon draws the icon 18 pt tall, not 22, so the 9 pt badge from the mockups came out at 7 pt. The badge is 10 pt across instead and hangs into the button's lower margin. Anything smaller stops being readable on a 1× external display. `9+` is the weakest case there.
+
+**Costs:** direct `objc2` and `objc2-app-kit` dependencies that have to track the versions tray-icon uses, and geometry kept in two places (the Rust module and the icon script). The first appearance read right after adding the view can report the wrong scheme; `viewDidChangeEffectiveAppearance` repaints when it settles.

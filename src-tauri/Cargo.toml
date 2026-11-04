@@ -57,6 +57,14 @@ git2 = { version = "0.20", default-features = false, features = ["vendored-libgi
 walkdir = "2"
 dirs = "6"
 
+# The tray count badge is a native view on the status item (tray_badge.rs): a
+# template image can't carry colour. Same versions tray-icon pulls in, since
+# `ns_status_item()` hands us its types.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAttributedString", "NSDictionary", "NSGeometry", "NSObject", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSAppearance", "NSAttributedString", "NSBezierPath", "NSButton", "NSCell", "NSColor", "NSControl", "NSFont", "NSGraphics", "NSResponder", "NSStatusBarButton", "NSStatusItem", "NSStringDrawing", "NSView"] }
+
 [dev-dependencies]
 # Local-index tests build real git repos in a throwaway temp dir and run the
 # libgit2 diagnostics against them; tempfile handles creation + cleanup.

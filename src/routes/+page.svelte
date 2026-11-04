@@ -2514,7 +2514,7 @@
           <p class="set-help">
             gitBuddy fetches each clone's upstream in the background, so you
             see which ones are behind before you start working — as a count
-            next to the menu-bar icon and in the popover. It only updates the
+            on the menu-bar icon and in the popover. It only updates the
             remote-tracking branches, exactly like <code>git fetch</code>;
             your branches and working tree are never touched. SSH remotes are
             fetched over HTTPS with the matching account's token.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Regenerate the macOS tray icon as a 44×44 RGBA PNG.
+Regenerate the macOS tray icon as a 44×44 RGBA PNG, plus the wider variant
+used while the count badge is showing.
 
 The PNG is loaded at runtime by `include_bytes!` in src-tauri/src/lib.rs and
 used as the menu-bar template image. macOS automatically tints the silhouette
@@ -25,7 +26,7 @@ Requires Pillow:
 """
 
 from pathlib import Path
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 # Output is a 44×44 PNG. On Retina it gets sampled to 22 logical pixels,
 # hence the 22-unit design grid. Supersampling 8× gives smooth round caps
@@ -39,7 +40,17 @@ SCALE = CANVAS / DESIGN_GRID
 BLACK = (0, 0, 0, 255)
 TRANSPARENT = (0, 0, 0, 0)
 
-OUT = Path(__file__).resolve().parent.parent / "src-tauri" / "icons" / "tray-icon.png"
+# The badged variant, in design units. Keep in sync with the constants in
+# src-tauri/src/tray_badge.rs, which draws the badge at this position.
+BADGED_GRID_WIDTH = 27
+BADGE_CX = 20.8
+BADGE_CY = 18.3
+BADGE_R = 6.1
+BADGE_GAP = 1
+
+ICONS = Path(__file__).resolve().parent.parent / "src-tauri" / "icons"
+OUT = ICONS / "tray-icon.png"
+OUT_BADGED = ICONS / "tray-icon-badged.png"
 
 
 def s(v: float) -> float:
@@ -141,11 +152,33 @@ def main() -> None:
     head.putalpha(mask)
     img.alpha_composite(head)
 
+    write_badged(img)
+
     img = img.resize((SIZE, SIZE), Image.LANCZOS)
     img.save(OUT, "PNG", optimize=True)
     # Absolute path on purpose: relative_to(Path.cwd()) raises ValueError
     # when the script is run from anywhere but the repo root.
     print(f"wrote {OUT} ({SIZE}×{SIZE}, RGBA)")
+
+
+def write_badged(robot: Image.Image) -> None:
+    """The same robot on a wider canvas with a round bite out of its lower
+    right corner. `tray_badge.rs` draws the coloured count into that bite;
+    the robot itself stays a template image macOS tints on its own."""
+    wide = Image.new("RGBA", (int(s(BADGED_GRID_WIDTH)), CANVAS), TRANSPARENT)
+    wide.alpha_composite(robot)
+
+    keep = Image.new("L", wide.size, 255)
+    r = BADGE_R + BADGE_GAP
+    ImageDraw.Draw(keep).ellipse(
+        (s(BADGE_CX - r), s(BADGE_CY - r), s(BADGE_CX + r), s(BADGE_CY + r)),
+        fill=0,
+    )
+    wide.putalpha(ImageChops.multiply(wide.getchannel("A"), keep))
+
+    size = (BADGED_GRID_WIDTH * SIZE // DESIGN_GRID, SIZE)
+    wide.resize(size, Image.LANCZOS).save(OUT_BADGED, "PNG", optimize=True)
+    print(f"wrote {OUT_BADGED} ({size[0]}×{size[1]}, RGBA)")
 
 
 if __name__ == "__main__":
