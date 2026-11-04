@@ -7,6 +7,10 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-11-04
+
+A proper badge for the clones that are behind.
+
 ### Changed
 
 - **The count of clones behind is now a small terracotta badge** on the lower
@@ -346,7 +350,8 @@ First signed and notarized release.
   config export/import.
 - In-app auto-update via signed `latest.json` on GitHub Releases.
 
-[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/Soron2038/gitBuddy/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/Soron2038/gitBuddy/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/Soron2038/gitBuddy/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/Soron2038/gitBuddy/compare/v1.3.0...v1.4.0
