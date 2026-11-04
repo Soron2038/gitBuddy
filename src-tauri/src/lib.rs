@@ -226,6 +226,17 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+/// The tray title for `behind` clones. Empty, not absent, when there are none:
+/// on macOS `tray-icon` ignores `set_title(None)`, so the last `↓N` would stay
+/// next to the icon until the app restarts.
+fn badge_title(behind: usize) -> String {
+    if behind == 0 {
+        String::new()
+    } else {
+        format!("↓{behind}")
+    }
+}
+
 /// Show how many local clones are behind their upstream next to the tray
 /// icon (`↓3`, the arrow git clients use for "behind"), and say so in the
 /// tooltip. Nothing behind clears both.
@@ -233,13 +244,13 @@ pub(crate) fn set_tray_badge(app: &tauri::AppHandle, behind: usize) {
     let Some(tray) = app.tray_by_id("main") else {
         return;
     };
-    let title = (behind > 0).then(|| format!("↓{behind}"));
+    let title = badge_title(behind);
     let tooltip = match behind {
         0 => "gitBuddy".to_string(),
         1 => "gitBuddy — 1 local clone is behind its remote".to_string(),
         n => format!("gitBuddy — {n} local clones are behind their remotes"),
     };
-    if let Err(e) = tray.set_title(title.as_deref()) {
+    if let Err(e) = tray.set_title(Some(title)) {
         eprintln!("gitbuddy: setting the tray badge failed: {e}");
     }
     let _ = tray.set_tooltip(Some(tooltip));
@@ -306,4 +317,15 @@ fn toggle_popover(app: &tauri::AppHandle, tray_rect: tauri::Rect) {
     let _ = popover.set_position(Position::Physical(PhysicalPosition { x, y }));
     let _ = popover.show();
     let _ = popover.set_focus();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::badge_title;
+
+    #[test]
+    fn badge_shows_the_count_and_is_empty_at_zero() {
+        assert_eq!(badge_title(2), "↓2");
+        assert_eq!(badge_title(0), "");
+    }
 }

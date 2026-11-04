@@ -7,6 +7,11 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `↓N` next to the menu-bar icon now disappears** once nothing is behind
+  any more. It used to keep showing the last count until gitBuddy restarted.
+
 ## [1.5.0] — 2026-11-03
 
 Know which local clones are behind before you start working.
