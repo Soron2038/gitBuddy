@@ -59,6 +59,7 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "publisher": "Soron2038",
     "category": "DeveloperTool",
     "shortDescription": "Menu-bar overview of your Git repositories.",
     "longDescription": "gitBuddy aggregates repositories, issues, pull/merge requests, releases, and CI status across GitHub, GitLab, and Codeberg into a single calm menu-bar companion.",
