@@ -74,6 +74,24 @@ scripts/build-app.sh --unsigned    # produce a local .dmg (no updater key needed
 
 The first `cargo build` is slow — `git2` compiles libgit2 and OpenSSL in-tree.
 
+### Windows (local, unsigned)
+
+On a Windows x64 machine, this builds an unsigned NSIS installer without the
+updater key (`src-tauri/tauri.windows.conf.json` holds the Windows bundle
+settings). Run it from Git Bash: Windows PowerShell 5.1 strips the inner double
+quotes from the JSON. `--config` also takes the path to a JSON file holding the
+same object.
+
+```bash
+npm install
+npm run tauri build -- --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+```
+
+Prerequisites: the MSVC Build Tools with the "Desktop development with C++"
+workload, WebView2 (preinstalled on Windows 11), Rust stable with the MSVC
+toolchain, and Node ≥ 20. Perl and OpenSSL are not needed: on Windows libgit2
+uses WinHTTP for HTTPS, so nothing compiles OpenSSL there.
+
 ## Releasing
 
 Cutting a signed, notarized, auto-updatable release is documented step by step
