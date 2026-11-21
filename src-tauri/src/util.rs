@@ -42,12 +42,12 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     })();
     if let Err(e) = write_result {
         // Don't leave the temp file behind: nothing else ever cleans
-        // `~/Library/Application Support/dev.soron2038.gitbuddy/*.tmp`.
+        // `*.tmp` out of the app's config directory.
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("writing {tmp:?}: {e}"));
     }
 
-    if let Err(e) = std::fs::rename(&tmp, path) {
+    if let Err(e) = rename_replacing(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("renaming {tmp:?} → {path:?}: {e}"));
     }
@@ -62,6 +62,31 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `std::fs::rename` over an existing file, retried briefly on Windows.
+///
+/// There a replace fails with `PermissionDenied` while some other handle has
+/// the target open without delete sharing: an antivirus scanner or the
+/// search indexer inspecting the file that was just written, or a concurrent
+/// replace of the same target. Those holds last milliseconds, so a few short
+/// retries (≈310 ms in all) turn a failed save into a slightly slower one.
+/// Elsewhere a rename over an existing file never fails that way.
+fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut delay = std::time::Duration::from_millis(10);
+        for _ in 0..5 {
+            match std::fs::rename(from, to) {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+                other => return other,
+            }
+        }
+    }
+    std::fs::rename(from, to)
 }
 
 #[cfg(test)]

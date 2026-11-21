@@ -333,10 +333,10 @@ pub(crate) fn behind_count(locals: &[LocalRepo]) -> usize {
 /// root, and onto `https://<host>` otherwise (enough for public repos).
 pub(crate) fn fetch_url(raw: &str, origins: &[&str]) -> Option<String> {
     let raw = raw.trim();
-    if ["https://", "http://", "file://", "/"]
+    let passes_through = ["https://", "http://", "file://"]
         .iter()
-        .any(|p| raw.starts_with(p))
-    {
+        .any(|p| raw.starts_with(p));
+    if passes_through || is_local_path(raw) {
         return Some(raw.to_string());
     }
     let r = local_index::parse_remote_url(raw)?;
@@ -351,6 +351,20 @@ pub(crate) fn fetch_url(raw: &str, origins: &[&str]) -> Option<String> {
         .map(|o| o.trim_end_matches('/').to_string())
         .unwrap_or_else(|| format!("https://{}", r.host));
     Some(format!("{base}/{}/{}.git", r.owner, r.name))
+}
+
+/// Whether a remote URL names a local path: a Unix absolute path, or one of
+/// the forms Git for Windows writes — a drive-letter path (`C:\…`, `C:/…`)
+/// or a UNC share (`\\host\share\…`). Checked before `parse_remote_url`,
+/// which would read `C:\x` as an SCP-style remote on host `C`. The Windows
+/// forms are accepted on every platform: elsewhere they are never a real
+/// remote, and a fetch that then fails beats rewriting them onto `https://C/`.
+fn is_local_path(raw: &str) -> bool {
+    let drive_letter = match raw.as_bytes() {
+        [letter, b':', b'\\' | b'/', ..] => letter.is_ascii_alphabetic(),
+        _ => false,
+    };
+    raw.starts_with('/') || raw.starts_with(r"\\") || drive_letter
 }
 
 /// `url` if it may carry a token: `https://host[:port]/path` with nothing in
@@ -557,9 +571,26 @@ mod tests {
             "http://git.local/o/r",
             "file:///srv/git/r.git",
             "/srv/git/r.git",
+            // What Git for Windows records for a clone of a local repo.
+            r"C:\Users\me\repos\r.git",
+            "C:/Users/me/repos/r.git",
+            r"\\nas\git\r.git",
+            "//nas/git/r.git",
         ] {
             assert_eq!(fetch_url(raw, o).as_deref(), Some(raw));
         }
+    }
+
+    #[test]
+    fn a_drive_letter_is_not_an_ssh_host() {
+        // Without the path check, `C:\x` parses as SCP-style `host:path`.
+        assert!(is_local_path(r"D:\work\r"));
+        assert!(!is_local_path("git@github.com:owner/repo.git"));
+        assert!(!is_local_path("gh:owner/repo"));
+        // Too short to be a drive path, and a drive-relative `C:x` is no
+        // absolute path either.
+        assert!(!is_local_path("C:"));
+        assert!(!is_local_path("C:x"));
     }
 
     #[test]

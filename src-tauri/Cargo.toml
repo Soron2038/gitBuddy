@@ -38,7 +38,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # `fs` + `io-util`: release-asset downloads stream to disk without blocking a
 # runtime thread (see downloads.rs).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util"] }
-keyring = { version = "3", features = ["apple-native"] }
+# One store feature per platform: without one, keyring falls back to its
+# in-memory mock store and tokens vanish on restart (see keychain.rs).
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "2"
 # Lets the per-forge providers share one object-safe `ProviderBackend` trait

@@ -76,3 +76,35 @@ jobs:
 
       - name: Tests
         run: cargo test --lib
+
+  backend-windows:
+    name: Backend on Windows (clippy + test)
+    # The Windows side of every macOS cfg gate only compiles here — see
+    # docs/plans/2026-11-21-windows-port.md. fmt is platform-independent and
+    # stays in the macOS job, as does the rustup-shim workaround (a macOS
+    # runner quirk; $GITHUB_PATH isn't a variable in PowerShell anyway). No
+    # OpenSSL/Perl needed: libgit2-sys uses WinHTTP on Windows. Still no
+    # bundle build.
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --lib

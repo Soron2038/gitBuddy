@@ -196,6 +196,10 @@ pub fn run() {
             // icon disappears, signalling "main window is closed".
             if let Some(main) = app.get_webview_window("main") {
                 let main_clone = main.clone();
+                // Only the activation-policy flip below needs it; elsewhere
+                // it would be an unused variable (clippy -D warnings on the
+                // Windows CI job).
+                #[cfg(target_os = "macos")]
                 let app_handle = app.handle().clone();
                 main.on_window_event(move |event| match event {
                     WindowEvent::CloseRequested { api, .. } => {

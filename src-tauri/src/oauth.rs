@@ -482,6 +482,27 @@ mod tests {
         assert!(rendered.contains("redacted"));
     }
 
+    /// The blob `gh_oauth_poll` stores must fit a Windows Credential Manager
+    /// secret: keyring's `windows-native` store refuses anything over
+    /// `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2560 bytes of UTF-16, i.e. 1280 code
+    /// units) with `Error::TooLong`. GitHub advises allowing for tokens of up
+    /// to 255 characters, so this is the worst case.
+    #[test]
+    fn the_largest_token_blob_fits_windows_credential_manager() {
+        let t = OAuthTokens {
+            access_token: "a".repeat(255),
+            token_type: "bearer".into(),
+            scope: "repo,read:org,read:user".into(),
+            obtained_at: "2026-07-28T00:00:00.000000000+00:00".into(),
+            refresh_token: Some("r".repeat(255)),
+            expires_in: Some(u64::MAX),
+            refresh_token_expires_in: Some(u64::MAX),
+        };
+        let blob = serde_json::to_string(&t).unwrap();
+        let units = blob.encode_utf16().count();
+        assert!(units * 2 <= 2560, "{units} UTF-16 code units");
+    }
+
     #[test]
     fn rejects_success_missing_fields() {
         let body = r#"{"access_token":"gho_abc"}"#;

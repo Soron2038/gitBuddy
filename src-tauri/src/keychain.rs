@@ -1,9 +1,18 @@
-//! Credential storage backed by the macOS Keychain (via the `keyring` crate).
+//! Credential storage in the OS secret store, via the `keyring` crate: the
+//! macOS Keychain (`apple-native`) or the Windows Credential Manager
+//! (`windows-native`). A platform without its store feature enabled silently
+//! gets keyring's in-memory mock store — saves "succeed" and are gone after a
+//! restart — so a new target needs its feature in `Cargo.toml` first.
 //!
 //! All operations are wrapped in `spawn_blocking` because the underlying
-//! Security framework calls are synchronous and can prompt the user — we
-//! mustn't block Tauri's async runtime threads waiting for a Keychain
-//! permission dialog.
+//! calls are synchronous, and on macOS they can prompt the user — we mustn't
+//! block Tauri's async runtime threads waiting for a Keychain permission
+//! dialog.
+//!
+//! On Windows there is no such prompt: a generic credential named
+//! `<account>.dev.soron2038.gitbuddy` is readable by any process of the same
+//! user, and its secret is capped at 1280 UTF-16 code units (see the size
+//! test in `oauth.rs`).
 
 use keyring::Entry;
 
@@ -163,5 +172,25 @@ pub(crate) mod test_support {
             self.entries.lock().expect("lock").remove(key);
             Ok(())
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    /// Guards against keyring silently falling back to its in-memory mock
+    /// store (no Windows store feature enabled): a fresh `Entry` must see what
+    /// another one saved. Touches the real Credential Manager of the user
+    /// running the tests, so it only runs on CI.
+    #[test]
+    fn credential_manager_round_trips_through_a_fresh_entry() {
+        if std::env::var_os("CI").is_none() {
+            return;
+        }
+        let key = format!("test:roundtrip:{}", std::process::id());
+        let entry = || keyring::Entry::new(super::SERVICE, &key).unwrap();
+        entry().set_password("s3cret").unwrap();
+        let got = super::load_blocking(&key);
+        let _ = entry().delete_credential();
+        assert_eq!(got.unwrap().as_deref(), Some("s3cret"));
     }
 }

@@ -212,10 +212,28 @@ impl HelperScope {
 pub fn helper_command(exe: &Path, account_id: &str, host: &str) -> String {
     format!(
         "!{} {SUBCOMMAND} --account {} --host {}",
-        shell_quote(&exe.to_string_lossy()),
+        shell_quote(&shell_path(exe)),
         shell_quote(account_id),
         shell_quote(host)
     )
+}
+
+/// `path` spelled for the shell git runs a `!` helper in. Git for Windows
+/// hands the command to its MSYS `sh`, where `C:/…` is the reliable spelling
+/// (the form git's own docs use): backslashes only survive there thanks to
+/// the single quotes, and inside a double-quoted gitconfig value they are
+/// escape sequences. On Unix a backslash is an ordinary file-name character,
+/// so paths pass through unchanged.
+pub(crate) fn shell_path(path: &Path) -> String {
+    shell_path_for(&path.to_string_lossy(), cfg!(windows))
+}
+
+fn shell_path_for(path: &str, windows: bool) -> String {
+    if windows {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    }
 }
 
 fn shell_quote(s: &str) -> String {
@@ -460,6 +478,18 @@ mod tests {
     }
 
     #[test]
+    fn windows_paths_are_spelled_with_slashes_for_the_shell() {
+        // Git for Windows runs the helper through MSYS `sh`; the per-user
+        // NSIS install lands under a path that may contain spaces.
+        assert_eq!(
+            shell_path_for(r"C:\Users\Jane Doe\AppData\Local\gitBuddy\gitbuddy.exe", true),
+            "C:/Users/Jane Doe/AppData/Local/gitBuddy/gitbuddy.exe"
+        );
+        // On Unix a backslash is part of the file name and must survive.
+        assert_eq!(shell_path_for(r"/tmp/odd\name", false), r"/tmp/odd\name");
+    }
+
+    #[test]
     fn translocated_apps_are_refused() {
         assert!(unusable_exe(Path::new(
             "/private/var/folders/x/T/AppTranslocation/ABC/d/gitBuddy.app/Contents/MacOS/gitbuddy"
@@ -547,7 +577,7 @@ mod tests {
         );
         std::fs::write(
             home.path().join(".gitconfig"),
-            format!("[credential]\n\thelper = \"!{}\"\n", global.display()),
+            format!("[credential]\n\thelper = \"!{}\"\n", shell_path(&global)),
         )
         .unwrap();
 
