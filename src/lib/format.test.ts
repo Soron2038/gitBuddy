@@ -3,6 +3,8 @@ import {
   humaniseSync,
   repoAge,
   shortenPath,
+  pathSeparator,
+  joinPath,
   connectedHosts,
   hostSuggestions,
   repoKey,
@@ -190,6 +192,62 @@ describe('shortenPath', () => {
   it('keeps short paths whole and trims long ones to the last two parts', () => {
     expect(shortenPath('/Users/witt')).toBe('/Users/witt');
     expect(shortenPath('/Users/witt/Developer/gitBuddy')).toBe('…/Developer/gitBuddy');
+  });
+
+  it('keeps a backslash inside a POSIX file name as part of the name', () => {
+    expect(shortenPath('/Users/witt/odd\\name')).toBe('…/witt/odd\\name');
+  });
+
+  it('shortens Windows drive paths with backslashes', () => {
+    expect(shortenPath('C:\\Users\\witt')).toBe('C:\\Users\\witt');
+    expect(shortenPath('C:\\Users\\witt\\Developer\\gitBuddy')).toBe('…\\Developer\\gitBuddy');
+    expect(shortenPath('C:\\Users\\witt\\Developer\\gitBuddy\\')).toBe('…\\Developer\\gitBuddy');
+  });
+
+  it('shortens UNC paths', () => {
+    expect(shortenPath('\\\\nas\\share')).toBe('\\\\nas\\share');
+    expect(shortenPath('\\\\nas\\share\\code\\gitBuddy')).toBe('…\\code\\gitBuddy');
+  });
+
+  it('handles Windows paths written with forward or mixed slashes', () => {
+    expect(shortenPath('C:/Users/witt/Developer/gitBuddy')).toBe('…/Developer/gitBuddy');
+    expect(shortenPath('C:/Users/witt/Developer\\gitBuddy')).toBe('…/Developer/gitBuddy');
+  });
+});
+
+describe('pathSeparator', () => {
+  it('reads the separator the path is written with', () => {
+    expect(pathSeparator('/Users/witt')).toBe('/');
+    expect(pathSeparator('/Users/odd\\name')).toBe('/');
+    expect(pathSeparator('~/Developer')).toBe('/');
+    expect(pathSeparator('C:\\Users')).toBe('\\');
+    expect(pathSeparator('\\\\nas\\share')).toBe('\\');
+    expect(pathSeparator('C:/Users')).toBe('/');
+  });
+
+  it('falls back when the path has no separator yet', () => {
+    expect(pathSeparator('~')).toBe('/');
+    expect(pathSeparator('%USERPROFILE%', '\\')).toBe('\\');
+    expect(pathSeparator('', '\\')).toBe('\\');
+  });
+});
+
+describe('joinPath', () => {
+  it('joins with the parent separator and drops trailing ones', () => {
+    expect(joinPath('/Users/witt/Developer', 'api')).toBe('/Users/witt/Developer/api');
+    expect(joinPath('/Users/witt/Developer/', 'api')).toBe('/Users/witt/Developer/api');
+    expect(joinPath('/', 'api')).toBe('/api');
+    expect(joinPath('~', 'api')).toBe('~/api');
+    expect(joinPath('C:\\Users\\witt\\Developer', 'api')).toBe('C:\\Users\\witt\\Developer\\api');
+    expect(joinPath('C:\\Users\\witt\\Developer\\', 'api')).toBe('C:\\Users\\witt\\Developer\\api');
+    expect(joinPath('C:\\', 'api')).toBe('C:\\api');
+    expect(joinPath('\\\\nas\\share', 'api')).toBe('\\\\nas\\share\\api');
+    expect(joinPath('D:/code', 'api')).toBe('D:/code/api');
+  });
+
+  it('uses the fallback separator for a bare root', () => {
+    expect(joinPath('%USERPROFILE%', 'api', '\\')).toBe('%USERPROFILE%\\api');
+    expect(joinPath('D:', 'api', '\\')).toBe('D:\\api');
   });
 });
 

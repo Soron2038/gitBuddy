@@ -29,6 +29,7 @@
     dedupeBy,
   } from '$lib/format';
   import { deriveProviderHeads } from '$lib/data/auth';
+  import { isWindows, strings } from '$lib/platform';
   import { assetLabel, getReleaseAsset } from '$lib/data/assets';
   // Window-wide visual vocabulary shared with the extracted components
   // (.row family, chips, badges) — see the note at the top of the file.
@@ -868,7 +869,7 @@
     const m: MenuItem[] = [{ label: 'Open in browser', onclick: () => openExternal(r.html_url) }];
     if (localDiag) {
       m.push({ separator: true });
-      m.push({ label: 'Show in Finder', onclick: () => act(() => revealItemInDir(localDiag.path)) });
+      m.push({ label: strings.showInFileManager, onclick: () => act(() => revealItemInDir(localDiag.path)) });
       const editorCmd = settings.editor_command?.trim() ?? '';
       if (editorCmd.length > 0) {
         m.push({ label: `Open in ${editorCmd}`, onclick: () => act(() => runEditor(localDiag.path)) });
@@ -1152,7 +1153,7 @@
     // rather than `window.confirm`: the latter is a blocking WebKit panel
     // that looks nothing like the rest of the app.
     const confirmed = await askDialog(
-      `The stored token will be removed from your Keychain.`,
+      `The stored token will be removed from ${strings.tokenStore}.`,
       {
         title: `Disconnect ${account.login} (${where})?`,
         kind: 'warning',
@@ -1384,9 +1385,17 @@
 
   <!-- Custom title bar. data-tauri-drag-region="deep" makes the whole bar a drag
        handle (clickable children auto-excluded); needs core:window:allow-start-dragging
-       in capabilities/default.json. titleBarStyle:'Overlay' overlays the traffic lights. -->
-  <header class="titlebar" data-tauri-drag-region="deep">
-    <span class="tb-spacer"></span>
+       in capabilities/default.json. titleBarStyle:'Overlay' overlays the traffic lights.
+       Windows keeps its native title bar (Snap Layouts, resize borders), so
+       there this is a plain in-content header: no spacer, no drag region. -->
+  <header
+    class="titlebar"
+    class:native-chrome={isWindows}
+    data-tauri-drag-region={isWindows ? undefined : 'deep'}
+  >
+    {#if !isWindows}
+      <span class="tb-spacer"></span>
+    {/if}
     <Buddy size={20} />
     <span class="brand">gitBuddy</span>
     {#if view === 'settings'}
@@ -1464,7 +1473,7 @@
             ×
           </button>
         {/if}
-        <span class="sho">⌘ K</span>
+        <span class="sho">{strings.mod} K</span>
       </label>
       <button
         class="iconbtn"
@@ -1657,7 +1666,7 @@
             <Buddy size={64} />
             <h2 class="empty-title">Connect a provider to get started.</h2>
             <p class="empty-sub">
-              Open the popover from the menu bar and connect a GitHub, GitLab,
+              Open the popover from the {strings.trayArea} and connect a GitHub, GitLab,
               or Codeberg account — or jump straight into
               <button type="button" class="link-inline" onclick={() => (view = 'settings')}>
                 Settings
@@ -1883,7 +1892,7 @@
               <p class="section-note">
                 {orphanLocalCount}
                 {orphanLocalCount === 1 ? 'clone isn\'t' : 'clones aren\'t'} linked to a
-                connected account — the menu-bar popover lists
+                connected account — the {strings.trayPopover} lists
                 {orphanLocalCount === 1 ? 'it' : 'them'} under <em>Local orphans</em>.
               </p>
             {/if}
@@ -1894,7 +1903,7 @@
                   No local clones found in your scan roots. Add a folder in Settings.
                 {:else}
                   None of your {localCount} local clones match a repo from a connected
-                  account. The menu-bar popover lists them under <em>Local orphans</em>.
+                  account. The {strings.trayPopover} lists them under <em>Local orphans</em>.
                 {/if}
               </p>
             {:else if filteredLocals.length === 0}
@@ -2285,7 +2294,7 @@
           <h3>Scan <em>roots</em></h3>
           <p class="set-help">
             gitBuddy walks these folders looking for <code>.git</code> checkouts.
-            <code>node_modules</code>, build outputs and macOS junk are skipped.
+            <code>node_modules</code>, {strings.scanSkips}.
           </p>
           {#if settings.scan_roots.length === 0}
             <p class="set-empty">No scan roots yet.</p>
@@ -2321,14 +2330,26 @@
         <!-- Open-in-editor command -->
         <section class="set-sec">
           <h3>Open in <em>editor</em></h3>
-          <p class="set-help">
-            Command run when you pick <em>Open in editor</em> from a repo's
-            right-click menu. The repo's local path is appended. Common
-            values: <code>code</code>, <code>cursor</code>, <code>zed</code>,
-            <code>idea</code>. A macOS application name works too, including
-            names with spaces — e.g. <code>Visual Studio Code</code> or an
-            <code>.app</code> name. Leave empty to hide that menu entry.
-          </p>
+          {#if isWindows}
+            <p class="set-help">
+              Command run when you pick <em>Open in editor</em> from a repo's
+              right-click menu. The repo's local path is appended. Common
+              values: <code>code</code>, <code>code --new-window</code>,
+              <code>cursor</code>. A full path to the program works too — put
+              it in quotes when it contains spaces, e.g.
+              <code>"C:\Program Files\Microsoft VS Code\Code.exe"</code>. Leave
+              empty to hide that menu entry.
+            </p>
+          {:else}
+            <p class="set-help">
+              Command run when you pick <em>Open in editor</em> from a repo's
+              right-click menu. The repo's local path is appended. Common
+              values: <code>code</code>, <code>cursor</code>, <code>zed</code>,
+              <code>idea</code>. A macOS application name works too, including
+              names with spaces — e.g. <code>Visual Studio Code</code> or an
+              <code>.app</code> name. Leave empty to hide that menu entry.
+            </p>
+          {/if}
           <input
             type="text"
             class="set-input"
@@ -2344,20 +2365,31 @@
         <!-- Open-in-terminal application -->
         <section class="set-sec">
           <h3>Open in <em>terminal</em></h3>
-          <p class="set-help">
-            macOS application opened when you pick <em>Open in terminal</em> from
-            a repo's right-click menu — a new window opens in the repo folder.
-            Use the app's name: <code>Terminal</code>, <code>iTerm</code>,
-            <code>Warp</code>, <code>Ghostty</code>. Leave empty to hide that
-            menu entry.
-          </p>
+          {#if isWindows}
+            <p class="set-help">
+              Terminal opened when you pick <em>Open in terminal</em> from a
+              repo's right-click menu — a new window opens in the repo folder.
+              Use <code>wt</code> (Windows Terminal), <code>pwsh</code>,
+              <code>powershell</code>, <code>cmd</code> or
+              <code>Git Bash</code>, or the name of another terminal program.
+              Leave empty to hide that menu entry.
+            </p>
+          {:else}
+            <p class="set-help">
+              macOS application opened when you pick <em>Open in terminal</em> from
+              a repo's right-click menu — a new window opens in the repo folder.
+              Use the app's name: <code>Terminal</code>, <code>iTerm</code>,
+              <code>Warp</code>, <code>Ghostty</code>. Leave empty to hide that
+              menu entry.
+            </p>
+          {/if}
           <input
             type="text"
             class="set-input"
             bind:value={terminalInput}
             onblur={persistTerminalCommand}
             onkeydown={(e) => e.key === 'Enter' && persistTerminalCommand()}
-            placeholder="Terminal"
+            placeholder={strings.terminalPlaceholder}
             spellcheck="false"
             autocomplete="off"
           />
@@ -2367,8 +2399,8 @@
         <section class="set-sec">
           <h3>Start at <em>login</em></h3>
           <p class="set-help">
-            Launch gitBuddy automatically when you log in to macOS. It starts
-            straight into the menu bar — no window pops up.
+            Launch gitBuddy automatically when you {strings.signIn}. It starts
+            straight into the {strings.trayArea} — no window pops up.
           </p>
           <label class="set-toggle">
             <input
@@ -2385,8 +2417,8 @@
         <section class="set-sec">
           <h3 id="appearance-h"><em>Appearance</em></h3>
           <p class="set-help">
-            Follow macOS, or keep gitBuddy light or dark whatever the system
-            does. Applies to the menu-bar popover and this window.
+            {strings.followSystem}, or keep gitBuddy light or dark whatever the system
+            does. Applies to the {strings.trayPopover} and this window.
           </p>
           <div class="set-seg" role="radiogroup" aria-labelledby="appearance-h">
             {#each APPEARANCE_OPTIONS as opt (opt.value)}
@@ -2421,9 +2453,9 @@
         <section class="set-sec">
           <h3><em>Notifications</em></h3>
           <p class="set-help">
-            Fire a macOS notification when a poll surfaces something new.
-            The actual permission is controlled by macOS — check
-            <em>System Settings → Notifications → gitBuddy</em> if nothing
+            Fire a {strings.os} notification when a poll surfaces something new.
+            The actual permission is controlled by {strings.os} — check
+            <em>{strings.notificationSettings}</em> if nothing
             shows up despite the master switch being on.
           </p>
           <label class="set-toggle">
@@ -2513,8 +2545,8 @@
           <h3>Check <em>local clones</em></h3>
           <p class="set-help">
             gitBuddy fetches each clone's upstream in the background, so you
-            see which ones are behind before you start working — as a count
-            on the menu-bar icon and in the popover. It only updates the
+            see which ones are behind before you start working —
+            {strings.behindBadge}. It only updates the
             remote-tracking branches, exactly like <code>git fetch</code>;
             your branches and working tree are never touched. SSH remotes are
             fetched over HTTPS with the matching account's token.
@@ -2633,6 +2665,8 @@
     -webkit-user-select: none;
     user-select: none;
   }
+  /* Windows: the OS draws the title bar above this header. */
+  .titlebar.native-chrome { height: 40px; }
   .tb-spacer { width: 60px; }
   .tb-flex   { flex: 1; }
   .brand {

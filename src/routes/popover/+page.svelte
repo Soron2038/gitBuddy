@@ -26,6 +26,7 @@
   } from '$lib/format';
   import { deriveProviderHeads } from '$lib/data/auth';
   import { assetLabel, getReleaseAsset } from '$lib/data/assets';
+  import { strings } from '$lib/platform';
   import {
     accountsList,
     openMainWindow,
@@ -261,7 +262,7 @@
       { label: 'Open in browser', onclick: () => void openUrl(r.html_url) },
     ];
     if (localPath) {
-      items.push({ label: 'Show in Finder', onclick: () => void revealItemInDir(localPath) });
+      items.push({ label: strings.showInFileManager, onclick: () => void revealItemInDir(localPath) });
       if (hasEditor) {
         items.push({
           label: `Open in editor (${settings.editor_command?.trim()})`,
@@ -329,7 +330,7 @@
     const hasEditor = !!(settings.editor_command && settings.editor_command.trim());
     const hasTerminal = !!(settings.terminal_command && settings.terminal_command.trim());
     const items: MenuItem[] = [
-      { label: 'Show in Finder', onclick: () => void revealItemInDir(l.path) },
+      { label: strings.showInFileManager, onclick: () => void revealItemInDir(l.path) },
     ];
     if (hasEditor) {
       items.push({
@@ -662,7 +663,7 @@
         <h2>Hi — let's <em>meet</em>.</h2>
         <p class="lede">
           Connect a Git forge and gitBuddy starts watching it. Tokens go into
-          your macOS Keychain and are never sent anywhere else.
+          {strings.tokenStoreLong} and are never sent anywhere else.
         </p>
 
         <div class="handoff-choices">
@@ -750,7 +751,7 @@
         {#if notificationPermission === 'denied' && settings.notifications.enabled}
           <div class="err-banner notif-hint">
             Notifications are blocked for gitBuddy. Turn them on in
-            <em>System Settings → Notifications → gitBuddy</em>.
+            <em>{strings.notificationSettings}</em>.
           </div>
         {/if}
 
@@ -1053,8 +1054,6 @@
           Synced {syncText}
         {/if}
       </span>
-      <span class="spc"></span>
-      <span class="kbd">⌘⇧G</span>
     </footer>
   </div>
 </div>
@@ -1604,11 +1603,5 @@
     0%   { box-shadow: 0 0 0 0 rgba(128, 152, 123, 0.5); }
     70%  { box-shadow: 0 0 0 7px rgba(128, 152, 123, 0); }
     100% { box-shadow: 0 0 0 0 rgba(128, 152, 123, 0); }
-  }
-  .kbd {
-    background: var(--cream-2);
-    padding: 2px 6px;
-    border-radius: 5px;
-    color: var(--ink-2);
   }
 </style>
