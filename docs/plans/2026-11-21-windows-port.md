@@ -51,22 +51,34 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS0 | SignPath application (maintainer action) | open |
 | WS1 | Windows CI gate + the fixes it forces | code written, **not yet compiled** (see below) |
 | WS2 | Secret storage (Credential Manager) | code written, **not yet compiled** (see below) |
-| WS3 | Config and bundling | open (independent of WS1/WS2) |
+| WS3 | Config and bundling | partly done: `tauri.windows.conf.json`, publisher, README build note. **Open:** CLI bump |
 | WS4 | Tray, popover, lifecycle | open |
 | WS5 | External programs + credential helper | open |
 | WS6 | Filesystem hardening | open |
-| WS7 | Frontend | open (independent of WS1/WS2) |
+| WS7 | Frontend | code written, **not yet type-checked or tested** (see below) |
 | WS8 | Release pipeline | open (needs WS3) |
 | WS9 | Docs | open (last) |
 | WS10 | End-to-end on the Windows PC | open (last) |
 
-**Pick up here (2026-11-21):** WS1 and WS2 were written on a Mac with no Rust
-toolchain, so nothing has been compiled, formatted or tested yet. On the next
-machine, in `src-tauri/`:
-1. `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`,
-   `cargo test --lib`. The first build also refreshes `Cargo.lock` for
-   keyring's `windows-native` dependencies; commit the lockfile.
-2. Open a (draft) PR to `main` so the new `backend-windows` job runs. That job
+**Pick up here (2026-11-21):** WS1, WS2, WS3 (partly) and WS7 were written on
+a Mac with neither Rust nor Node, and merged into `feat/windows-port`. Nothing
+has been compiled, formatted, type-checked or tested yet. On the next machine:
+1. In `src-tauri/`: `cargo fmt --all`, `cargo clippy --all-targets -- -D
+   warnings`, `cargo test --lib`. The first build also refreshes `Cargo.lock`
+   for keyring's `windows-native` dependencies; commit the lockfile.
+2. From the repo root: `npm ci`, then `npm run verify`. Check that the macOS
+   main window and popover render and read exactly as before (WS7 keeps the
+   macOS strings byte for byte).
+3. Finish WS3:
+   - Bump `@tauri-apps/cli` to ≥ 2.12 through npm, so the lockfile follows.
+     Don't hand-edit `package.json`, or `npm ci` fails on the mismatch.
+   - Confirm that `npm run tauri -- bundle --help` lists
+     `--no-binary-patching`, and that `signer sign --help` lists
+     `--app-version`.
+   - Check the CLI doesn't warn about a version mismatch with the `tauri`
+     2.11 crate.
+   - Run `scripts/build-app.sh --unsigned` on macOS.
+4. Open a (draft) PR to `main` so the new `backend-windows` job runs. That job
    is the only place the Windows side of the `cfg` gates compiles before WS10.
    Expect a few more Windows-only clippy or test findings on its first run.
 
