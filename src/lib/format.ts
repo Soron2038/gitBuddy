@@ -42,13 +42,40 @@ export function behindLocals(locals: LocalRepo[]): LocalRepo[] {
     .sort((a, b) => b.behind - a.behind || a.path.localeCompare(b.path));
 }
 
+/** The separator a path is written with: `/` for a POSIX path, otherwise
+ *  whichever of `\` / `/` comes first (`C:\Users\…`, a UNC `\\server\share`,
+ *  or Windows written with forward slashes). `fallback` when there is none. */
+export function pathSeparator(p: string, fallback: '/' | '\\' = '/'): '/' | '\\' {
+  if (p.startsWith('/')) return '/';
+  const first = p.match(/[\\/]/)?.[0];
+  return first === '\\' || first === '/' ? first : fallback;
+}
+
 /** Shorten an absolute path for compact display: trim to the last two path
- *  components if it's longer. The Rust side returns absolute paths and we
- *  don't know $HOME on the JS side, so this is cosmetic only. */
+ *  components if it's longer, rejoined with the separator the path uses. A
+ *  POSIX path (leading `/`) splits on `/` only, since `\` is a legal
+ *  file-name character there; anything else splits on both, because Rust's
+ *  `Path::join` on Windows happily produces `C:/Users/x\repo`. A drive letter
+ *  counts as the root, like `/` does, so `C:\Users\witt` stays whole the way
+ *  `/Users/witt` does. The Rust side returns absolute paths and we don't know
+ *  $HOME on the JS side, so this is cosmetic only. */
 export function shortenPath(p: string): string {
-  const parts = p.split('/').filter(Boolean);
+  const sep = pathSeparator(p);
+  const parts = p.startsWith('/')
+    ? p.split('/').filter(Boolean)
+    : p.replace(/^[A-Za-z]:/, '').split(/[\\/]/).filter(Boolean);
   if (parts.length <= 2) return p;
-  return `…/${parts.slice(-2).join('/')}`;
+  return `…${sep}${parts.slice(-2).join(sep)}`;
+}
+
+/** Append `name` to `parent` with the parent's own separator, dropping any
+ *  trailing separators first (`C:\` + `repo` → `C:\repo`, `/` + `repo` →
+ *  `/repo`). `fallback` is the separator for a parent that has none yet,
+ *  such as `~` or `%USERPROFILE%`. */
+export function joinPath(parent: string, name: string, fallback: '/' | '\\' = '/'): string {
+  const sep = pathSeparator(parent, fallback);
+  const trimmed = parent.replace(parent.startsWith('/') ? /\/+$/ : /[\\/]+$/, '');
+  return `${trimmed}${sep}${name}`;
 }
 
 /** Stable, collision-free key for a repo row.

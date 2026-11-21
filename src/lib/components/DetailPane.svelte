@@ -25,8 +25,9 @@
     type ReleaseAsset,
     type WaitingItem,
   } from '$lib/data/api';
-  import { formatBytes, humaniseSync } from '$lib/format';
+  import { formatBytes, humaniseSync, joinPath } from '$lib/format';
   import { getReleaseAsset } from '$lib/data/assets';
+  import { nativeSeparator, strings } from '$lib/platform';
 
   interface Props {
     repo: Repo;
@@ -256,9 +257,9 @@
         type="button"
         class="dp-action"
         onclick={() => act(() => revealItemInDir(firstLocal.path))}
-        data-tip="Reveal in Finder"
+        data-tip={strings.revealInFileManager}
       >
-        Show in Finder
+        {strings.showInFileManager}
       </button>
       {#if editorCmd.length > 0}
         <button
@@ -337,7 +338,7 @@
               <input
                 type="text"
                 bind:value={cloneParentDir}
-                placeholder="~/Developer"
+                placeholder={strings.cloneParentPlaceholder}
                 spellcheck="false"
                 autocomplete="off"
                 disabled={cloneStatus === 'cloning'}
@@ -365,7 +366,7 @@
           </label>
           <p class="dp-clone-target">
             Target:
-            <code>{(cloneParentDir || '~').replace(/\/$/, '')}/{cloneFolderName || r.name}</code>
+            <code>{joinPath(cloneParentDir || strings.homeDir, cloneFolderName || r.name, nativeSeparator)}</code>
           </p>
 
           {#if cloneStatus === 'error'}
