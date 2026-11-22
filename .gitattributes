@@ -1,0 +1,10 @@
+# LF in every working tree, whatever core.autocrlf says. Git for Windows and
+# the windows-latest runners default to autocrlf=true, and a CRLF checkout
+# breaks things that work on macOS: Vitest doesn't strip a `#!...\r` shebang
+# (scripts/check-contrast.mjs fails to parse under `npm run test`), and the
+# shell scripts don't run under Git Bash with `\r` line ends.
+* text=auto eol=lf
+
+*.png  binary
+*.ico  binary
+*.icns binary
