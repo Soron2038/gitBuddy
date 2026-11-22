@@ -927,13 +927,7 @@ pub async fn clone_repo(
         return Err("Clone URL must use https://.".into());
     }
 
-    let folder_name = folder_name.trim();
-    if folder_name.is_empty() {
-        return Err("Folder name must not be empty.".into());
-    }
-    if folder_name.contains('/') || folder_name.contains('\\') {
-        return Err("Folder name must not contain path separators.".into());
-    }
+    let folder_name = clone_folder_name(&folder_name)?;
     let parent = std::path::PathBuf::from(parent_dir.trim());
     if !parent.is_dir() {
         return Err(format!("Parent directory doesn't exist: {parent:?}"));
@@ -1021,6 +1015,29 @@ pub async fn clone_repo(
     })
     .await
     .map_err(|e| format!("clone task panicked: {e}"))?
+}
+
+/// The clone's folder name, trimmed, or why it can't be one. Rejected rather
+/// than rewritten: the user typed it and sees the result. It has to be valid
+/// on every platform (`util::file_name_problem`), which also rules out `..`,
+/// a drive prefix like `D:evil` and device names like `CON`, and it has to be
+/// exactly one plain path component, so the clone lands directly in the
+/// parent folder.
+fn clone_folder_name(raw: &str) -> Result<&str, String> {
+    use std::path::{Component, Path};
+
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("Folder name must not be empty.".into());
+    }
+    if let Some(problem) = crate::util::file_name_problem(name) {
+        return Err(format!("The folder name {problem}."));
+    }
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(name),
+        _ => Err("The folder name must be a single folder, not a path.".into()),
+    }
 }
 
 /// The credential-helper config for `account_id`, or `None` when this binary
@@ -1177,7 +1194,7 @@ pub async fn download_release_asset(
     };
     let dir = dirs::download_dir().ok_or("Couldn't locate your Downloads folder.")?;
 
-    match downloads::fetch_to(request, &dir, &asset.name).await? {
+    match downloads::fetch_to(request, &dir, &asset.name, Some(&asset.browser_url)).await? {
         Fetched::Saved(path) => Ok(AssetDownload::Saved {
             path: path.to_string_lossy().into_owned(),
         }),
@@ -1661,6 +1678,18 @@ mod tests {
             url_host("https://codeberg.org").as_deref(),
             Some("codeberg.org")
         );
+    }
+
+    #[test]
+    fn clone_folders_are_one_valid_name() {
+        assert_eq!(clone_folder_name("  gitBuddy "), Ok("gitBuddy"));
+        assert_eq!(clone_folder_name("my repo.v2"), Ok("my repo.v2"));
+        for bad in [
+            "", "   ", "..", ".", "D:evil", "a/b", r"a\b", "/abs", r"C:\abs", "CON", "aux.git",
+            "name.", "what?",
+        ] {
+            assert!(clone_folder_name(bad).is_err(), "{bad:?} must be rejected");
+        }
     }
 
     #[test]

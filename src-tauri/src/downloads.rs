@@ -43,8 +43,14 @@ pub fn download_client() -> reqwest::Result<Client> {
 ///
 /// The body is written to a hidden part file next to the target and renamed
 /// into place only once complete, so an interrupted download never leaves a
-/// truncated file that looks finished.
-pub async fn fetch_to(req: RequestBuilder, dir: &Path, file_name: &str) -> Result<Fetched, String> {
+/// truncated file that looks finished. `source_url` is the asset's public
+/// address, recorded with the Windows download mark (see `mark_quarantined`).
+pub async fn fetch_to(
+    req: RequestBuilder,
+    dir: &Path,
+    file_name: &str,
+    source_url: Option<&str>,
+) -> Result<Fetched, String> {
     let mut resp = req
         .send()
         .await
@@ -88,7 +94,7 @@ pub async fn fetch_to(req: RequestBuilder, dir: &Path, file_name: &str) -> Resul
         let _ = tokio::fs::remove_file(&part).await;
         return Err(format!("Couldn't save {}: {e}", target.display()));
     }
-    mark_quarantined(&target);
+    mark_quarantined(&target, source_url);
     Ok(Fetched::Saved(target))
 }
 
@@ -128,14 +134,11 @@ fn is_sign_in_page(resp: &Response, file_name: &str) -> bool {
 /// Reduce a publisher-supplied asset name to a plain file name. Asset names
 /// come from the forge and are not trusted to be one: a `../` or an absolute
 /// path must not steer the write out of the Downloads folder, and a leading
-/// dot would hide the file.
+/// dot would hide the file. The rest is `util::sanitize_file_name`: no
+/// character Windows forbids, no trailing dot or space, no device name.
 pub(crate) fn safe_file_name(raw: &str) -> String {
     let last = raw.rsplit(['/', '\\']).next().unwrap_or("");
-    let cleaned: String = last
-        .chars()
-        .map(|c| if c.is_control() || c == ':' { '_' } else { c })
-        .collect();
-    let cleaned = cleaned.trim().trim_start_matches('.').to_string();
+    let cleaned = crate::util::sanitize_file_name(last.trim().trim_start_matches('.').trim_start());
     if cleaned.is_empty() {
         "download".into()
     } else {
@@ -173,7 +176,7 @@ pub(crate) fn unique_target(dir: &Path, name: &str) -> PathBuf {
 /// check for anything published as a release asset in any repo the account
 /// can see. Best-effort: a failure is logged, not surfaced.
 #[cfg(target_os = "macos")]
-fn mark_quarantined(path: &Path) {
+fn mark_quarantined(path: &Path, _source_url: Option<&str>) {
     let stamp = format!(
         "0081;{:08x};gitBuddy;",
         std::time::SystemTime::now()
@@ -193,8 +196,48 @@ fn mark_quarantined(path: &Path) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn mark_quarantined(_path: &Path) {}
+/// The Windows counterpart: the Mark-of-the-Web a browser writes, a
+/// `Zone.Identifier` stream on the file saying it came from the Internet
+/// (zone 3). SmartScreen and Office's Protected View check a downloaded
+/// installer or document exactly as after a browser download. Best-effort
+/// as on macOS; a volume without alternate data streams (FAT, exFAT) can't
+/// hold the mark.
+#[cfg(windows)]
+fn mark_quarantined(path: &Path, source_url: Option<&str>) {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    if let Err(e) = std::fs::write(&stream, zone_identifier(source_url)) {
+        eprintln!(
+            "gitbuddy: couldn't mark {} as downloaded from the Internet: {e}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn mark_quarantined(_path: &Path, _source_url: Option<&str>) {}
+
+/// The `Zone.Identifier` contents. `HostUrl` is only informative (Windows
+/// shows it in the file's properties), so it is left out unless the URL is
+/// plain http(s); query, fragment and any user info are dropped, so a
+/// signed or credentialed link never ends up on disk.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn zone_identifier(source_url: Option<&str>) -> String {
+    let host_url = source_url
+        .and_then(|raw| reqwest::Url::parse(raw).ok())
+        .filter(|url| matches!(url.scheme(), "https" | "http"))
+        .map(|mut url| {
+            url.set_query(None);
+            url.set_fragment(None);
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url
+        });
+    match host_url {
+        Some(url) => format!("[ZoneTransfer]\r\nZoneId=3\r\nHostUrl={url}\r\n"),
+        None => "[ZoneTransfer]\r\nZoneId=3\r\n".to_owned(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -212,6 +255,68 @@ mod tests {
         assert_eq!(safe_file_name("a:b\u{7}.txt"), "a_b_.txt");
         assert_eq!(safe_file_name(".."), "download");
         assert_eq!(safe_file_name(""), "download");
+    }
+
+    #[test]
+    fn file_names_are_valid_on_windows_too() {
+        assert_eq!(safe_file_name("setup?.exe"), "setup_.exe");
+        assert_eq!(safe_file_name("notes.txt. "), "notes.txt");
+        assert_eq!(safe_file_name("CON.exe"), "_CON.exe");
+        assert_eq!(safe_file_name("a<b>|c\"d*"), "a_b__c_d_");
+    }
+
+    #[test]
+    fn the_zone_identifier_names_the_page_but_no_secrets() {
+        assert_eq!(
+            zone_identifier(Some(
+                "https://user:pw@gitlab.example/o/r/-/releases/v1/downloads/app.exe?private_token=x#top"
+            )),
+            "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://gitlab.example/o/r/-/releases/v1/downloads/app.exe\r\n"
+        );
+        // Without a usable web address the mark still says "Internet".
+        for url in [None, Some("file:///C:/x.exe"), Some("not a url")] {
+            assert_eq!(
+                zone_identifier(url),
+                "[ZoneTransfer]\r\nZoneId=3\r\n",
+                "{url:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_saved_file_carries_the_mark_of_the_web() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"MZ".to_vec()))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+
+        let out = fetch_to(
+            get(server.uri()).bearer_auth("tok"),
+            dir.path(),
+            "setup.exe",
+            Some("https://github.com/o/r/releases/download/v1/setup.exe"),
+        )
+        .await
+        .unwrap();
+
+        let Fetched::Saved(path) = out else {
+            panic!("expected a saved file, got {out:?}");
+        };
+        let mut stream = path.into_os_string();
+        stream.push(":Zone.Identifier");
+        let mark = std::fs::read_to_string(stream).expect("the Zone.Identifier stream exists");
+        assert!(mark.contains("ZoneId=3"), "{mark}");
+        assert!(
+            mark.contains("HostUrl=https://github.com/o/r/releases/download/v1/setup.exe"),
+            "{mark}"
+        );
+        assert!(
+            !mark.contains("tok"),
+            "the token must not reach the mark: {mark}"
+        );
     }
 
     #[test]
@@ -249,9 +354,14 @@ mod tests {
             .await;
         let dir = TempDir::new().unwrap();
 
-        let out = fetch_to(get(format!("{}/f", server.uri())), dir.path(), "app.dmg")
-            .await
-            .unwrap();
+        let out = fetch_to(
+            get(format!("{}/f", server.uri())),
+            dir.path(),
+            "app.dmg",
+            None,
+        )
+        .await
+        .unwrap();
 
         let saved = dir.path().join("app.dmg");
         assert_eq!(out, Fetched::Saved(saved.clone()));
@@ -278,9 +388,14 @@ mod tests {
             .await;
         let dir = TempDir::new().unwrap();
 
-        let out = fetch_to(get(format!("{}/f", server.uri())), dir.path(), "app.dmg")
-            .await
-            .unwrap();
+        let out = fetch_to(
+            get(format!("{}/f", server.uri())),
+            dir.path(),
+            "app.dmg",
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(out, Fetched::NeedsBrowser);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -295,7 +410,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let dir = TempDir::new().unwrap();
-            let out = fetch_to(get(server.uri()), dir.path(), "app.dmg").await;
+            let out = fetch_to(get(server.uri()), dir.path(), "app.dmg", None).await;
             assert_eq!(out, Ok(Fetched::NeedsBrowser), "HTTP {status}");
         }
     }
@@ -315,9 +430,21 @@ mod tests {
             .await;
         let dir = TempDir::new().unwrap();
 
-        let limited = fetch_to(get(format!("{}/limited", server.uri())), dir.path(), "a").await;
+        let limited = fetch_to(
+            get(format!("{}/limited", server.uri())),
+            dir.path(),
+            "a",
+            None,
+        )
+        .await;
         assert!(limited.unwrap_err().contains("rate-limiting"));
-        let broken = fetch_to(get(format!("{}/broken", server.uri())), dir.path(), "a").await;
+        let broken = fetch_to(
+            get(format!("{}/broken", server.uri())),
+            dir.path(),
+            "a",
+            None,
+        )
+        .await;
         assert!(broken.unwrap_err().contains("502"));
     }
 
@@ -350,7 +477,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         let req = get(format!("{}/asset", api.uri())).bearer_auth("tok");
-        let out = fetch_to(req, dir.path(), "app.dmg").await.unwrap();
+        let out = fetch_to(req, dir.path(), "app.dmg", None).await.unwrap();
 
         assert_eq!(out, Fetched::Saved(dir.path().join("app.dmg")));
         assert_eq!(std::fs::read(dir.path().join("app.dmg")).unwrap(), b"bytes");

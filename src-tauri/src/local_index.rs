@@ -14,10 +14,14 @@ use walkdir::WalkDir;
 use crate::settings::Settings;
 
 /// Names that are never descended into. Catches the obvious heavy folders
-/// (`node_modules`, build outputs, vendored deps) plus macOS junk that can't
-/// contain a repo we'd want to surface. Augmented at runtime by
-/// `settings.scan_ignore`.
+/// (`node_modules`, build outputs, vendored deps) plus macOS and Windows junk
+/// that can't contain a repo we'd want to surface. Augmented at runtime by
+/// `settings.scan_ignore`. OneDrive is deliberately not here: Windows often
+/// redirects Documents into it. Compared per [`is_skipped`].
 const SKIP_DIRS: &[&str] = &[
+    "AppData",
+    "$Recycle.Bin",
+    "System Volume Information",
     "node_modules",
     ".Trash",
     ".Trashes",
@@ -164,7 +168,7 @@ fn should_descend(e: &walkdir::DirEntry, skip: &[&str]) -> bool {
     let Some(name) = e.file_name().to_str() else {
         return false; // non-UTF8 dir name — skip rather than choke on it
     };
-    if skip.contains(&name) {
+    if is_skipped(name, skip) {
         return false;
     }
     // Dot-prefixed dirs can't contain a user-level repo and tend to be
@@ -173,6 +177,24 @@ fn should_descend(e: &walkdir::DirEntry, skip: &[&str]) -> bool {
         return false;
     }
     true
+}
+
+/// Whether the folder `name` is on the skip list. Windows folder names are
+/// case-insensitive (`Node_Modules` is `node_modules`), so the comparison is
+/// too; elsewhere it stays exact, so a `library` folder full of repos on a
+/// Mac isn't mistaken for `~/Library`.
+fn is_skipped(name: &str, skip: &[&str]) -> bool {
+    is_skipped_with(name, skip, cfg!(windows))
+}
+
+fn is_skipped_with(name: &str, skip: &[&str], ignore_case: bool) -> bool {
+    if ignore_case {
+        let lower = |s: &str| s.chars().flat_map(char::to_lowercase).collect::<String>();
+        let name = lower(name);
+        skip.iter().any(|s| lower(s) == name)
+    } else {
+        skip.contains(&name)
+    }
 }
 
 fn is_repo_root(p: &Path) -> bool {
@@ -379,6 +401,37 @@ fn split_owner_name(path: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_list_ignores_case_only_where_the_filesystem_does() {
+        let skip = SKIP_DIRS;
+        // Windows semantics.
+        for name in ["node_modules", "Node_Modules", "appdata", "$RECYCLE.BIN"] {
+            assert!(is_skipped_with(name, skip, true), "{name:?}");
+        }
+        assert!(!is_skipped_with("OneDrive", skip, true));
+        assert!(!is_skipped_with("Documents", skip, true));
+        // Exact elsewhere: a `library` of repos isn't `~/Library`.
+        assert!(is_skipped_with("Library", skip, false));
+        assert!(!is_skipped_with("library", skip, false));
+        // User entries from `scan_ignore` follow the same rule.
+        assert!(is_skipped_with("ARCHIVE", &["archive"], true));
+        assert!(!is_skipped_with("ARCHIVE", &["archive"], false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_scan_skips_windows_system_folders_in_any_case() {
+        let root = tempfile::tempdir().unwrap();
+        for dir in [r"appdata\Local\clone", r"Projects\clone"] {
+            let path = root.path().join(dir);
+            std::fs::create_dir_all(&path).unwrap();
+            git2::Repository::init(&path).unwrap();
+        }
+        let mut found = Vec::new();
+        find_repos_in(root.path(), SKIP_DIRS, &mut found);
+        assert_eq!(found, vec![root.path().join(r"Projects\clone")]);
+    }
 
     #[test]
     fn parses_https_url() {

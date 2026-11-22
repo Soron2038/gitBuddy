@@ -89,9 +89,141 @@ fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
+/// Characters Windows doesn't allow in a file name. `/` and `\` are among
+/// them, so a name without them can't be a path either.
+const FORBIDDEN_IN_NAMES: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+/// Whether `name` is one of the device names Windows reserves in every
+/// folder: `CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9`, `LPT0`–`LPT9` (and the
+/// superscript `COM¹` …), in any case and with any extension — `nul.txt` is
+/// the device too, as is `NUL .txt`.
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    let upper = stem.to_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => ["COM", "LPT"].iter().any(|prefix| {
+            upper.strip_prefix(prefix).is_some_and(|n| {
+                let mut chars = n.chars();
+                matches!(
+                    (chars.next(), chars.next()),
+                    (Some('0'..='9' | '¹' | '²' | '³'), None)
+                )
+            })
+        }),
+    }
+}
+
+/// Why `name` can't be a file or folder name everywhere gitBuddy runs, or
+/// `None` when it can. The rules are Windows' (the strictest of the three
+/// platforms) and apply on every platform, so a name that works on one works
+/// on all — and the tests run the same everywhere. Phrased to follow
+/// "The name …".
+pub(crate) fn file_name_problem(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("is empty");
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || FORBIDDEN_IN_NAMES.contains(&c))
+    {
+        return Some(
+            r#"contains a character that isn't allowed in file names (< > : " / \ | ? * or a control character)"#,
+        );
+    }
+    if name.ends_with(['.', ' ']) {
+        return Some("ends with a dot or a space");
+    }
+    if is_reserved_device_name(name) {
+        return Some("is reserved by Windows for a device (CON, NUL, COM1, …)");
+    }
+    None
+}
+
+/// `raw` rewritten into a name [`file_name_problem`] accepts, or into the
+/// empty string when nothing usable is left (the caller picks a fallback).
+/// Forbidden and control characters become `_`, trailing dots and spaces go,
+/// and a reserved device name gets a leading `_`.
+pub(crate) fn sanitize_file_name(raw: &str) -> String {
+    let replaced: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || FORBIDDEN_IN_NAMES.contains(&c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = replaced.trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        String::new()
+    } else if is_reserved_device_name(trimmed) {
+        format!("_{trimmed}")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_device_names_are_reserved_with_any_extension() {
+        for name in [
+            "CON", "con", "Prn", "aux", "NUL", "nul.txt", "NUL .txt", "COM1", "com9.log", "LPT0",
+            "lpt5", "COM¹", "lpt³.x",
+        ] {
+            assert!(is_reserved_device_name(name), "{name:?}");
+        }
+        for name in [
+            "console", "CONS", "nul_", "COM", "COM10", "LPT", "xcon", "_CON", "COMa",
+        ] {
+            assert!(!is_reserved_device_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn file_name_problems_follow_the_windows_rules() {
+        assert_eq!(file_name_problem("gitBuddy"), None);
+        assert_eq!(file_name_problem("my repo.v2"), None);
+        assert_eq!(file_name_problem(".dotfiles"), None);
+        assert!(file_name_problem("").is_some());
+        for bad in [
+            "a:b", "D:evil", "a/b", r"a\b", "a|b", "what?", "*", "<x>", "q\"", "tab\t",
+        ] {
+            assert!(
+                file_name_problem(bad).unwrap().contains("character"),
+                "{bad:?}"
+            );
+        }
+        for bad in ["..", ".", "name.", "name "] {
+            assert!(
+                file_name_problem(bad).unwrap().contains("ends with"),
+                "{bad:?}"
+            );
+        }
+        assert!(file_name_problem("CON").unwrap().contains("reserved"));
+        assert!(file_name_problem("aux.git").unwrap().contains("reserved"));
+    }
+
+    #[test]
+    fn sanitized_names_pass_the_check() {
+        assert_eq!(
+            sanitize_file_name("app_1.2_x64-setup.exe"),
+            "app_1.2_x64-setup.exe"
+        );
+        assert_eq!(sanitize_file_name("a:b|c?.txt"), "a_b_c_.txt");
+        assert_eq!(sanitize_file_name("report. . ."), "report");
+        assert_eq!(sanitize_file_name("CON"), "_CON");
+        assert_eq!(sanitize_file_name("nul.tar.gz"), "_nul.tar.gz");
+        assert_eq!(sanitize_file_name(" . "), "");
+        for raw in ["a:b|c?.txt", "report. . .", "CON", "lpt1.zip", "x\u{7}y"] {
+            let clean = sanitize_file_name(raw);
+            assert_eq!(file_name_problem(&clean), None, "{raw:?} -> {clean:?}");
+        }
+    }
 
     /// Two concurrent saves (e.g. settings UI + aggregator) must never race
     /// on a shared temp file: every call succeeds and the target always holds
