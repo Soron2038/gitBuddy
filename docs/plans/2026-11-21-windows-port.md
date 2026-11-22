@@ -49,18 +49,42 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS | Package | Status |
 |---|---|---|
 | WS0 | SignPath application (maintainer action) | open |
-| WS1 | Windows CI gate + the fixes it forces | code written, **not yet compiled** (see below) |
-| WS2 | Secret storage (Credential Manager) | code written, **not yet compiled** (see below) |
-| WS3 | Config and bundling | partly done: `tauri.windows.conf.json`, publisher, README build note. **Open:** CLI bump |
+| WS1 | Windows CI gate + the fixes it forces | done locally (clippy + 173 tests green on the PC); **open:** first `backend-windows` CI run |
+| WS2 | Secret storage (Credential Manager) | done: the round-trip test passes against the real Credential Manager |
+| WS3 | Config and bundling | done on Windows: CLI 2.12.6, flags present, unsigned NSIS build. **Open:** `build-app.sh --unsigned` on macOS |
 | WS4 | Tray, popover, lifecycle | open |
 | WS5 | External programs + credential helper | open |
 | WS6 | Filesystem hardening | open |
-| WS7 | Frontend | code written, **not yet type-checked or tested** (see below) |
+| WS7 | Frontend | type-checked and tested (`npm run verify` green on the PC). **Open:** visual check on macOS |
 | WS8 | Release pipeline | open (needs WS3) |
 | WS9 | Docs | open (last) |
 | WS10 | End-to-end on the Windows PC | open (last) |
 
-**Pick up here (2026-11-21):** WS1, WS2, WS3 (partly) and WS7 were written on
+**Pick up here (2026-11-22):** the 2026-11-21 list below was worked through on
+the Windows PC (Windows 11, MSVC, Rust 1.99.1, Node 26):
+- `cargo fmt` reflowed one test. clippy `-D warnings` is clean, and all 173 lib
+  tests pass, including the Credential Manager round trip.
+- `Cargo.lock` gained keyring's `windows-native` dependencies.
+- `npm run verify` is green: svelte-check reports 0 errors, Vitest 69 passed.
+- `@tauri-apps/cli` is at 2.12.6. `bundle --no-binary-patching` and
+  `signer sign --app-version` exist.
+- An unsigned `tauri build --bundles nsis` (updater artifacts off) produced
+  `gitBuddy_1.6.0_x64-setup.exe` without a version-mismatch warning.
+- New `.gitattributes` (`* text=auto eol=lf`). With Git for Windows' default
+  `core.autocrlf=true`, the `#!…\r` shebang of `scripts/check-contrast.mjs`
+  broke `app-contrast.test.ts` under Vitest. A clone made **before** this
+  change keeps its CRLF files until they are checked out again.
+
+Still open from that list:
+- On macOS, `scripts/build-app.sh --unsigned`.
+- On macOS, a visual check that the main window and popover look as before.
+- The first run of the `backend-windows` CI job, on the draft PR.
+
+After that, WS4 (tray/popover) is the next big package. The installer built
+here is good for the WS4 spike (risk 3), but the tray still behaves like the
+macOS build.
+
+**Pick-up list of 2026-11-21:** WS1, WS2, WS3 (partly) and WS7 were written on
 a Mac with neither Rust nor Node, and merged into `feat/windows-port`. Nothing
 has been compiled, formatted, type-checked or tested yet. On the next machine:
 1. In `src-tauri/`: `cargo fmt --all`, `cargo clippy --all-targets -- -D
