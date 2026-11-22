@@ -56,9 +56,57 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS5 | External programs + credential helper | done, tested on the PC (see below). **Open:** `code`, `pwsh` and a real `git push` in WS10 |
 | WS6 | Filesystem hardening | done, tested on the PC (see below). **Open:** a real release download and SmartScreen in WS10 |
 | WS7 | Frontend | type-checked and tested (`npm run verify` green on the PC). **Open:** visual check on macOS |
-| WS8 | Release pipeline | open (needs WS3) |
+| WS8 | Release pipeline | written; the unsigned path runs on the PR. **Open:** the SignPath steps (need WS0), a real `release.sh` run on the Mac |
 | WS9 | Docs | open (last) |
 | WS10 | End-to-end on the Windows PC | open (last) |
+
+**WS8 (2026-11-22), as built:**
+- `.github/workflows/release-windows.yml`:
+  - Triggers: `v*` tags, `workflow_dispatch` with `signing-policy`, and
+    `pull_request` when the workflow file itself changes. That last one is
+    always unsigned and has no secrets; it lets the pipeline test itself on
+    a PR, since `workflow_dispatch` only exists once the file is on `main`.
+  - Policy: the dispatch input, otherwise the repo variable
+    `WINDOWS_SIGNING_POLICY`, otherwise `none`. Turning on signing after
+    SignPath's approval is just setting that variable to `release-signing`.
+  - The job uses the `release` environment only when it signs: an empty
+    environment name means none. No caches.
+  - Steps: check that the tag matches `tauri.conf.json`, `tauri build
+    --no-bundle`, then SignPath (action v2, pinned by commit; artifact config
+    `tauri-app-exe`), then `scripts/check-authenticode.ps1`, then `tauri
+    bundle --bundles nsis --no-binary-patching` without updater artifacts,
+    then SignPath again (`tauri-installer`) and the check.
+  - The artifact `windows-installer` holds the setup exe, `SHA256SUMS` (LF,
+    the format `shasum -c` reads) and `SIGNING_POLICY`.
+- `scripts/check-authenticode.ps1`: for release-signing the signature must
+  be valid; for test-signing any signature is enough. A timestamp is always
+  required.
+- `scripts/generate-latest-json.sh`:
+  - It maps `release/*_x64-setup.exe` to `windows-x86_64`, the plain key,
+    because without binary patching the app can't name its installer type.
+  - It refuses when any of darwin-aarch64, darwin-x86_64 or windows-x86_64
+    is missing, or when an installer is stale.
+  - `--no-windows` leaves Windows out deliberately.
+  - Tested in Git Bash with fake artifacts: all three present, a missing
+    installer, a missing `.sig`, a stale installer, `--no-windows`.
+- `scripts/release.sh`:
+  - New options `--windows-run <id>` and `--no-windows`.
+  - After the credential checks it asks, pushes the tag and finds the
+    workflow run. The `jq` lookup was tested against real runs.
+  - After the Mac build it runs `gh run watch` and `gh run download`, checks
+    `shasum -c`, copies the installer to `release/` with its `.policy`, and
+    runs `tauri signer sign --app-version` (an empty passphrase is passed
+    explicitly).
+  - An unsigned installer puts a "Windows preview" note at the top of the
+    release notes; a test-signed one is refused.
+  - It creates a draft with all assets, compares the asset list, then runs
+    `gh release edit --draft=false --latest`.
+  - The stale sweep keeps `gitBuddy_<version>_x64-setup.exe*`.
+  - `--dry-run` without `--windows-run` pushes no tag and leaves Windows
+    out.
+  - Only `bash -n`, `--help` and the argument checks could run on the PC;
+    the rest needs the Mac.
+- RELEASING.md isn't updated yet (WS9).
 
 **WS6 (2026-11-22), as built:**
 - `util.rs` has the shared name rules, the same on every platform:
@@ -203,9 +251,10 @@ Still open from that list:
 - On macOS, a visual check that the main window and popover look as before.
 - The first run of the `backend-windows` CI job, on the draft PR.
 
-WS4, WS5 and WS6 followed the same day (above). Left: WS0 (SignPath, the
-maintainer's application), WS8 (release pipeline), WS9 (docs), WS10
-(end-to-end, which needs a connected account on the PC).
+WS4, WS5, WS6 and WS8 followed the same day (above). Left: WS0 (SignPath,
+the maintainer's application), WS9 (docs, including RELEASING.md for the
+new flow), WS10 (end-to-end, which needs a connected account on the PC),
+and a first real `release.sh` run on the Mac.
 
 **Pick-up list of 2026-11-21:** WS1, WS2, WS3 (partly) and WS7 were written on
 a Mac with neither Rust nor Node, and merged into `feat/windows-port`. Nothing
