@@ -54,11 +54,44 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS3 | Config and bundling | done on Windows: CLI 2.12.6, flags present, unsigned NSIS build. **Open:** `build-app.sh --unsigned` on macOS |
 | WS4 | Tray, popover, lifecycle | done on Windows, tested on the PC (see below). **Open:** the WS10 cases the PC can't show, the macOS regression check |
 | WS5 | External programs + credential helper | done, tested on the PC (see below). **Open:** `code`, `pwsh` and a real `git push` in WS10 |
-| WS6 | Filesystem hardening | open |
+| WS6 | Filesystem hardening | done, tested on the PC (see below). **Open:** a real release download and SmartScreen in WS10 |
 | WS7 | Frontend | type-checked and tested (`npm run verify` green on the PC). **Open:** visual check on macOS |
 | WS8 | Release pipeline | open (needs WS3) |
 | WS9 | Docs | open (last) |
 | WS10 | End-to-end on the Windows PC | open (last) |
+
+**WS6 (2026-11-22), as built:**
+- `util.rs` has the shared name rules, the same on every platform:
+  - `file_name_problem` covers forbidden `<>:"/\|?*`, control characters, a
+    trailing dot or space, and reserved device names (`CON`, `PRN`, `AUX`,
+    `NUL`, `COM0–9`, `LPT0–9`, also `COM¹–³`/`LPT¹–³`, any case, any
+    extension, `NUL .txt` too).
+  - `sanitize_file_name` rewrites a name to pass those rules: `_` for bad
+    characters, trailing dots and spaces stripped, a `_` prefix for device
+    names.
+- `downloads.rs`:
+  - `safe_file_name` uses `sanitize_file_name`.
+  - On Windows, `mark_quarantined` writes the Mark-of-the-Web
+    (`<file>:Zone.Identifier`, `ZoneId=3`). Its `HostUrl` is the asset's
+    browser URL without query, fragment or user info, never the token.
+  - `fetch_to` takes that URL as a new parameter.
+- `clone_repo`: the folder name goes through `clone_folder_name`, which
+  rejects instead of rewriting. It must pass `file_name_problem` and be
+  exactly one `Component::Normal`. `D:evil`, `..`, `CON`, `a/b` are refused.
+  - This also applies on macOS: a repo cloned into a folder named `aux` now
+    has to be renamed.
+- `local_index.rs`:
+  - `SKIP_DIRS` adds `AppData`, `$Recycle.Bin` and
+    `System Volume Information`. OneDrive is not skipped.
+  - `is_skipped` ignores case on Windows only; on macOS a `library` folder
+    of repos stays visible.
+
+Checked on the PC: 200 lib tests, including a fetch into a temp folder on
+NTFS whose `Zone.Identifier` holds `ZoneId=3` and the `HostUrl`, without the
+token, and a scan that skips `appdata\…` but finds `Projects\…`.
+
+Not covered yet (WS10): a real release download, SmartScreen's warning on
+launching it, and a clone into a folder with spaces from the UI.
 
 **WS5 (2026-11-22), as built:**
 - New `launcher.rs`, Windows only at runtime. The parsing is pure and tested
@@ -170,8 +203,9 @@ Still open from that list:
 - On macOS, a visual check that the main window and popover look as before.
 - The first run of the `backend-windows` CI job, on the draft PR.
 
-WS4 and WS5 followed the same day (above). Next is WS6 (filesystem
-hardening), then WS8.
+WS4, WS5 and WS6 followed the same day (above). Left: WS0 (SignPath, the
+maintainer's application), WS8 (release pipeline), WS9 (docs), WS10
+(end-to-end, which needs a connected account on the PC).
 
 **Pick-up list of 2026-11-21:** WS1, WS2, WS3 (partly) and WS7 were written on
 a Mac with neither Rust nor Node, and merged into `feat/windows-port`. Nothing
