@@ -1,0 +1,179 @@
+# The Windows installer for a release, built here because the Mac that cuts
+# releases can't build it (docs/plans/2026-11-21-windows-port.md, WS8).
+# `scripts/release.sh` pushes the tag early, so this runs while the Mac
+# builds and notarises, then downloads the `windows-installer` artifact,
+# adds the updater signature locally (the minisign key never leaves the Mac,
+# as in the 2026-06-10 entry of docs/DECISIONS.md) and publishes everything
+# as one release.
+#
+# Authenticode signing goes through SignPath Foundation, twice: the app exe
+# before bundling, then the NSIS installer. `bundle.windows.signCommand`
+# can't be used for that (it runs mid-bundle, where SignPath's origin
+# verification can't see a workflow artifact), which is also why the
+# uninstaller stays unsigned. Until SignPath has approved the project the
+# policy is `none`: an unsigned build, which release.sh publishes as a
+# labelled preview.
+name: Release (Windows)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      signing-policy:
+        description: "SignPath signing policy (none = unsigned preview)"
+        type: choice
+        options: [none, test-signing, release-signing]
+        default: none
+  # The pipeline checks itself whenever it changes: unsigned, no secrets.
+  pull_request:
+    branches: [main]
+    paths: [".github/workflows/release-windows.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # A tag push takes the repo variable, so switching signing on once SignPath
+  # has approved needs no edit here. Pull requests never sign.
+  SIGNING_POLICY: ${{ github.event_name == 'pull_request' && 'none' || inputs.signing-policy || vars.WINDOWS_SIGNING_POLICY || 'none' }}
+
+jobs:
+  installer:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 120
+    # The SignPath token lives in the `release` environment, which only `v*`
+    # tags may use. An unsigned build needs neither (an empty name means no
+    # environment). Same expression as SIGNING_POLICY: `env` isn't available
+    # here.
+    environment: ${{ (github.event_name != 'pull_request' && (inputs.signing-policy || vars.WINDOWS_SIGNING_POLICY || 'none') != 'none') && 'release' || '' }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check the version
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME doesn't match version $version in tauri.conf.json."
+          }
+          "VERSION=$version" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "gitBuddy $version, signing policy: $env:SIGNING_POLICY"
+
+      # No caches anywhere in this job: a release build starts from nothing,
+      # which SignPath's origin verification expects and which keeps a
+      # poisoned cache out of a signed binary.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+
+      - name: Build the app
+        run: npm run tauri -- build --no-bundle
+
+      # ── Sign the app exe ────────────────────────────────────────────────
+      - name: Upload the exe for signing
+        id: exe
+        if: env.SIGNING_POLICY != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitbuddy-exe
+          path: src-tauri/target/release/gitbuddy.exe
+          if-no-files-found: error
+
+      - name: Sign the exe (SignPath)
+        if: env.SIGNING_POLICY != 'none'
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: gitBuddy
+          signing-policy-slug: ${{ env.SIGNING_POLICY }}
+          artifact-configuration-slug: tauri-app-exe
+          github-artifact-id: ${{ steps.exe.outputs.artifact-id }}
+          wait-for-completion: true
+          # A release-signing request waits for a manual approval.
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: src-tauri/target/release
+
+      - name: Check the exe's signature
+        if: env.SIGNING_POLICY != 'none'
+        run: ./scripts/check-authenticode.ps1 src-tauri/target/release/gitbuddy.exe $env:SIGNING_POLICY
+
+      # ── Bundle ──────────────────────────────────────────────────────────
+      # `--no-binary-patching`: the bundler would otherwise write the bundle
+      # type into the exe and break the signature just applied. Without that
+      # marker the updater looks up `windows-x86_64` in latest.json, which is
+      # the key generate-latest-json.sh writes. No updater artifacts: the
+      # .sig is made on the Mac.
+      - name: Bundle the installer
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'no-updater.json'
+          '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content -Encoding utf8 $config
+          npm run tauri -- bundle --bundles nsis --no-binary-patching --config $config
+          $setup = "src-tauri/target/release/bundle/nsis/gitBuddy_$($env:VERSION)_x64-setup.exe"
+          if (-not (Test-Path $setup)) { throw "Expected $setup" }
+
+      # ── Sign the installer ──────────────────────────────────────────────
+      - name: Upload the installer for signing
+        id: setup
+        if: env.SIGNING_POLICY != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitbuddy-setup
+          path: src-tauri/target/release/bundle/nsis/gitBuddy_${{ env.VERSION }}_x64-setup.exe
+          if-no-files-found: error
+
+      - name: Sign the installer (SignPath)
+        if: env.SIGNING_POLICY != 'none'
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: gitBuddy
+          signing-policy-slug: ${{ env.SIGNING_POLICY }}
+          artifact-configuration-slug: tauri-installer
+          github-artifact-id: ${{ steps.setup.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: src-tauri/target/release/bundle/nsis
+
+      - name: Check the installer's signature
+        if: env.SIGNING_POLICY != 'none'
+        run: ./scripts/check-authenticode.ps1 "src-tauri/target/release/bundle/nsis/gitBuddy_$($env:VERSION)_x64-setup.exe" $env:SIGNING_POLICY
+
+      # ── Hand over to release.sh ─────────────────────────────────────────
+      - name: Collect the installer and its checksum
+        run: |
+          $name = "gitBuddy_$($env:VERSION)_x64-setup.exe"
+          $out = Join-Path $env:RUNNER_TEMP 'windows-installer'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item "src-tauri/target/release/bundle/nsis/$name" $out
+          $hash = (Get-FileHash (Join-Path $out $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+          # LF and two spaces: the format `shasum -a 256 -c` on the Mac reads.
+          [IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS'), "$hash  $name`n")
+          # Tells release.sh whether to label the release a Windows preview.
+          [IO.File]::WriteAllText((Join-Path $out 'SIGNING_POLICY'), "$($env:SIGNING_POLICY)`n")
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: ${{ runner.temp }}/windows-installer/
+          if-no-files-found: error
