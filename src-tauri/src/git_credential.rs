@@ -482,7 +482,10 @@ mod tests {
         // Git for Windows runs the helper through MSYS `sh`; the per-user
         // NSIS install lands under a path that may contain spaces.
         assert_eq!(
-            shell_path_for(r"C:\Users\Jane Doe\AppData\Local\gitBuddy\gitbuddy.exe", true),
+            shell_path_for(
+                r"C:\Users\Jane Doe\AppData\Local\gitBuddy\gitbuddy.exe",
+                true
+            ),
             "C:/Users/Jane Doe/AppData/Local/gitBuddy/gitbuddy.exe"
         );
         // On Unix a backslash is part of the file name and must survive.
