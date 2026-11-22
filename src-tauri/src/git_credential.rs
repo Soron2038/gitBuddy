@@ -240,14 +240,27 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Why the running binary can't serve as the helper, if it can't. macOS runs
-/// an app that was opened straight from Downloads from a randomised,
-/// read-only copy ("App Translocation"); a helper path pointing there stops
-/// working at the next launch.
+/// Why the running binary can't serve as the helper, if it can't. A helper
+/// path pointing at a temporary copy stops working once the copy is gone:
+/// - macOS runs an app that was opened straight from Downloads from a
+///   randomised, read-only copy ("App Translocation");
+/// - Windows Explorer runs an exe opened from inside a zip from an extracted
+///   copy under `%TEMP%`, and a downloaded exe may be run from there too.
 pub fn unusable_exe(exe: &Path) -> Option<&'static str> {
-    exe.to_string_lossy()
-        .contains("/AppTranslocation/")
-        .then_some("Move gitBuddy into your Applications folder and reopen it first — macOS is running it from a temporary copy.")
+    unusable_exe_for(exe, cfg!(windows).then(std::env::temp_dir).as_deref())
+}
+
+fn unusable_exe_for(exe: &Path, windows_temp: Option<&Path>) -> Option<&'static str> {
+    if exe.to_string_lossy().contains("/AppTranslocation/") {
+        return Some("Move gitBuddy into your Applications folder and reopen it first — macOS is running it from a temporary copy.");
+    }
+    // Windows paths compare case-insensitively.
+    let lower = |p: &Path| p.to_string_lossy().to_lowercase();
+    let temp = windows_temp.map(lower).filter(|t| !t.is_empty())?;
+    let temp = temp.trim_end_matches(['\\', '/']);
+    let exe = lower(exe);
+    (exe.starts_with(temp) && exe[temp.len()..].starts_with(['\\', '/']))
+        .then_some("Install gitBuddy and start the installed app first — Windows is running it from a temporary folder.")
 }
 
 /// Make `repo` ask gitBuddy for credentials for `scope`.
@@ -264,8 +277,11 @@ pub fn unusable_exe(exe: &Path) -> Option<&'static str> {
 /// system config for this URL — otherwise the macOS Keychain helper Apple's
 /// git ships with would answer first with whatever it has stored for the
 /// host, and would also copy gitBuddy's token into its own Keychain item on
-/// every successful push. Re-running replaces the previous entries, so it is
-/// safe to call for a clone that is already set up.
+/// every successful push. On Windows the same reset silences Git Credential
+/// Manager, which Git for Windows configures system-wide, for the same
+/// reasons — intended: this clone pushes with the account it was cloned
+/// with, without a GCM sign-in prompt. Re-running replaces the previous
+/// entries, so it is safe to call for a clone that is already set up.
 pub fn configure(
     repo: &git2::Repository,
     scope: &HelperScope,
@@ -502,6 +518,30 @@ mod tests {
             "/Applications/gitBuddy.app/Contents/MacOS/gitbuddy"
         ))
         .is_none());
+    }
+
+    #[test]
+    fn copies_in_the_windows_temp_folder_are_refused() {
+        let temp = Path::new(r"C:\Users\Jane\AppData\Local\Temp\");
+        // Explorer's copy of an exe opened inside a zip; case doesn't matter.
+        assert!(unusable_exe_for(
+            Path::new(r"c:\users\jane\appdata\local\temp\Temp1_gitBuddy.zip\gitbuddy.exe"),
+            Some(temp)
+        )
+        .is_some());
+        assert!(unusable_exe_for(
+            Path::new(r"C:\Users\Jane\AppData\Local\gitBuddy\gitbuddy.exe"),
+            Some(temp)
+        )
+        .is_none());
+        // A sibling whose name merely starts like the temp folder.
+        assert!(unusable_exe_for(
+            Path::new(r"C:\Users\Jane\AppData\Local\Temporary Apps\gitbuddy.exe"),
+            Some(Path::new(r"C:\Users\Jane\AppData\Local\Temp"))
+        )
+        .is_none());
+        // Not on Windows: only translocation counts.
+        assert!(unusable_exe_for(Path::new("/tmp/gitbuddy"), None).is_none());
     }
 
     fn helper_values(repo: &git2::Repository, key: &str) -> Vec<String> {

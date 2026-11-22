@@ -82,6 +82,8 @@ pub struct Settings {
     /// launched via `open -a "<name>" <repo-path>` so a GUI terminal opens a
     /// new window in the repo directory (e.g. `"Terminal"`, `"iTerm"`,
     /// `"Warp"`). Whitespace- or empty-string disables the menu entry.
+    /// On Windows this and `editor_command` are command lines instead; see
+    /// `launcher.rs` (`wt`, `pwsh`, `cmd`, `Git Bash`, a quoted path …).
     #[serde(default)]
     pub terminal_command: Option<String>,
     /// Notification preferences. The frontend gates UI on these; the backend
@@ -222,19 +224,36 @@ impl Settings {
     }
 }
 
+/// Where clones conventionally live below the home directory, most likely
+/// first. Windows adds Visual Studio's `source\repos` and GitHub Desktop's
+/// `Documents\GitHub`, after the cross-platform names.
+const SCAN_ROOT_CANDIDATES: &[&str] = &[
+    "Developer",
+    "Code",
+    "src",
+    "Projects",
+    "code",
+    #[cfg(windows)]
+    r"source\repos",
+    #[cfg(windows)]
+    r"Documents\GitHub",
+];
+
 /// First-launch scan roots — picks the first one of the common conventions
 /// that actually exists on the user's home directory.
 fn default_scan_roots() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-    for candidate in ["Developer", "Code", "src", "Projects", "code"] {
-        let p = home.join(candidate);
-        if p.is_dir() {
-            return vec![p];
-        }
-    }
-    Vec::new()
+    dirs::home_dir()
+        .map(|home| default_scan_roots_in(&home))
+        .unwrap_or_default()
+}
+
+fn default_scan_roots_in(home: &std::path::Path) -> Vec<PathBuf> {
+    SCAN_ROOT_CANDIDATES
+        .iter()
+        .map(|candidate| home.join(candidate))
+        .find(|p| p.is_dir())
+        .into_iter()
+        .collect()
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -603,5 +622,35 @@ mod tests {
         assert_eq!(parsed.version, CURRENT_VERSION);
         assert_eq!(parsed.poll_interval_minutes, POLL_INTERVAL_DEFAULT);
         assert!(parsed.notifications.enabled);
+    }
+
+    #[test]
+    fn the_first_existing_convention_becomes_the_scan_root() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(default_scan_roots_in(home.path()).is_empty());
+
+        std::fs::create_dir_all(home.path().join("Projects")).unwrap();
+        std::fs::create_dir_all(home.path().join("Code")).unwrap();
+        // "Code" comes before "Projects" in the list.
+        assert_eq!(
+            default_scan_roots_in(home.path()),
+            vec![home.path().join("Code")]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_finds_visual_studio_and_github_desktop_folders() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(r"Documents\GitHub")).unwrap();
+        assert_eq!(
+            default_scan_roots_in(home.path()),
+            vec![home.path().join(r"Documents\GitHub")]
+        );
+        std::fs::create_dir_all(home.path().join(r"source\repos")).unwrap();
+        assert_eq!(
+            default_scan_roots_in(home.path()),
+            vec![home.path().join(r"source\repos")]
+        );
     }
 }

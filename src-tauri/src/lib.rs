@@ -15,6 +15,7 @@ mod git_credential;
 mod github;
 mod gitlab;
 mod keychain;
+mod launcher;
 mod local_index;
 mod notifications;
 mod oauth;

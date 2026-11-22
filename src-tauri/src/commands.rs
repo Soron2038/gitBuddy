@@ -1318,7 +1318,9 @@ pub async fn import_config(
     settings::load(&app)
 }
 
-/// How a configured `editor_command` should be launched.
+/// How a configured `editor_command` should be launched (macOS; Windows
+/// parses it in `launcher.rs`).
+#[cfg(not(windows))]
 #[derive(Debug, PartialEq, Eq)]
 enum EditorLaunch {
     /// macOS app reference (name or bundle path) — launch via `open -a`
@@ -1332,6 +1334,7 @@ enum EditorLaunch {
 /// `App` when the trimmed value ends in `.app` (case-insensitive — a bundle
 /// name or path is never a whitespace-splittable CLI invocation), `Cli`
 /// otherwise (split on whitespace so flags keep working).
+#[cfg(not(windows))]
 fn classify_editor_command(cmd: &str) -> Option<EditorLaunch> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
@@ -1354,6 +1357,7 @@ fn classify_editor_command(cmd: &str) -> Option<EditorLaunch> {
 /// after dispatching to LaunchServices) — call only from `spawn_blocking`.
 /// `open` can warn on stderr while still succeeding, so failure is gated
 /// strictly on a non-zero exit status.
+#[cfg(not(windows))]
 fn open_app(app_name: &str, path: &str) -> Result<(), String> {
     let output = std::process::Command::new("/usr/bin/open")
         .arg("-a")
@@ -1375,6 +1379,21 @@ fn open_app(app_name: &str, path: &str) -> Result<(), String> {
 /// Run the user-configured editor command with `path` appended as the final
 /// argument. Never goes through a shell, so shell metacharacters in a
 /// tampered or hand-edited `editor_command` can't smuggle extra commands.
+/// Windows: see `launcher::open_editor`. macOS: see `open_in_editor`.
+#[tauri::command]
+pub async fn run_editor(app: AppHandle, path: String) -> Result<(), String> {
+    let settings = settings::load(&app)?;
+    let cmd = settings.editor_command.unwrap_or_default();
+    tokio::task::spawn_blocking(move || open_in_editor(&cmd, &path))
+        .await
+        .map_err(|e| format!("editor task panicked: {e}"))?
+}
+
+#[cfg(windows)]
+fn open_in_editor(cmd: &str, path: &str) -> Result<(), String> {
+    crate::launcher::open_editor(cmd, path)
+}
+
 /// Three behaviours (see `classify_editor_command`):
 /// - value ends in `.app` → the whole string is an app name/bundle path,
 ///   launched via `open -a` (spaces allowed, no flag splitting);
@@ -1382,25 +1401,22 @@ fn open_app(app_name: &str, path: &str) -> Result<(), String> {
 ///   `"code --new-window"` becomes `code --new-window <repo-path>`;
 /// - if that program doesn't exist, the whole string is retried via
 ///   `open -a`, which rescues spacey app names like "Visual Studio Code".
-#[tauri::command]
-pub async fn run_editor(app: AppHandle, path: String) -> Result<(), String> {
-    let settings = settings::load(&app)?;
-    let cmd = settings.editor_command.unwrap_or_default();
-    let Some(launch) = classify_editor_command(&cmd) else {
+#[cfg(not(windows))]
+fn open_in_editor(cmd: &str, path: &str) -> Result<(), String> {
+    let Some(launch) = classify_editor_command(cmd) else {
         return Err("No editor command configured. Set one in Settings.".into());
     };
-
-    tokio::task::spawn_blocking(move || match launch {
-        EditorLaunch::App(name) => open_app(&name, &path),
+    match launch {
+        EditorLaunch::App(name) => open_app(&name, path),
         EditorLaunch::Cli { program, args } => {
             match std::process::Command::new(&program)
                 .args(&args)
-                .arg(&path)
+                .arg(path)
                 .spawn()
             {
                 // Editors are long-running — don't wait on them.
                 Ok(_) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => open_app(cmd.trim(), &path)
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => open_app(cmd.trim(), path)
                     .map_err(|open_err| {
                         format!(
                             "spawning editor `{program}` failed: {e}; \
@@ -1410,40 +1426,47 @@ pub async fn run_editor(app: AppHandle, path: String) -> Result<(), String> {
                 Err(e) => Err(format!("spawning editor `{program}` failed: {e}")),
             }
         }
-    })
-    .await
-    .map_err(|e| format!("editor task panicked: {e}"))?
+    }
 }
 
-/// Open the user-configured terminal application at `path` via macOS
-/// `open -a "<App>" <path>`, which launches (or reuses) that terminal with a
-/// new session in the repo directory. Unlike `run_editor`, `terminal_command`
-/// is an *application name* (e.g. "Terminal", "iTerm", "Warp"), not a shell
-/// command — GUI terminals don't take a working directory as a positional CLI
-/// arg, but `open -a` opens them in the given folder. Empty/unset → error
-/// surfaced to the UI.
+/// Open the user-configured terminal at `path`. Empty/unset → error surfaced
+/// to the UI. Windows: see `launcher::open_terminal`. macOS: see
+/// `open_in_terminal`.
 #[tauri::command]
 pub async fn run_terminal(app: AppHandle, path: String) -> Result<(), String> {
     let settings = settings::load(&app)?;
-    let app_name = settings.terminal_command.unwrap_or_default();
-    let app_name = app_name.trim().to_string();
+    let cmd = settings.terminal_command.unwrap_or_default();
+    tokio::task::spawn_blocking(move || open_in_terminal(&cmd, &path))
+        .await
+        .map_err(|e| format!("terminal task panicked: {e}"))?
+}
+
+#[cfg(windows)]
+fn open_in_terminal(cmd: &str, path: &str) -> Result<(), String> {
+    crate::launcher::open_terminal(cmd, path)
+}
+
+/// Via macOS `open -a "<App>" <path>`, which launches (or reuses) that
+/// terminal with a new session in the repo directory. Unlike the editor,
+/// `terminal_command` is an *application name* (e.g. "Terminal", "iTerm",
+/// "Warp"), not a shell command — GUI terminals don't take a working
+/// directory as a positional CLI arg, but `open -a` opens them in the given
+/// folder.
+#[cfg(not(windows))]
+fn open_in_terminal(cmd: &str, path: &str) -> Result<(), String> {
+    let app_name = cmd.trim();
     if app_name.is_empty() {
         return Err("No terminal application configured. Set one in Settings.".into());
     }
-
     // `open` does its own argument handling, so we pass the app name and path
     // as separate args (no shell, no manual escaping needed).
-    tokio::task::spawn_blocking(move || {
-        std::process::Command::new("/usr/bin/open")
-            .arg("-a")
-            .arg(&app_name)
-            .arg(&path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("opening terminal failed: {e}"))
-    })
-    .await
-    .map_err(|e| format!("terminal task panicked: {e}"))?
+    std::process::Command::new("/usr/bin/open")
+        .arg("-a")
+        .arg(app_name)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("opening terminal failed: {e}"))
 }
 
 /// Host component of an `https://` URL: scheme, userinfo, port and path
@@ -1648,6 +1671,7 @@ mod tests {
         assert_eq!(url_host(""), None);
     }
 
+    #[cfg(not(windows))]
     fn cli(program: &str, args: &[&str]) -> Option<EditorLaunch> {
         Some(EditorLaunch::Cli {
             program: program.to_owned(),
@@ -1655,6 +1679,7 @@ mod tests {
         })
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn classify_editor_cli_splits_flags() {
         assert_eq!(classify_editor_command("code"), cli("code", &[]));
@@ -1668,6 +1693,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn classify_editor_app_suffix_is_app_launch() {
         assert_eq!(
@@ -1691,12 +1717,14 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn classify_editor_empty_is_none() {
         assert_eq!(classify_editor_command(""), None);
         assert_eq!(classify_editor_command("   "), None);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn classify_editor_spacey_name_without_suffix_stays_cli() {
         // Intentional: classification can't tell a spacey app name from a

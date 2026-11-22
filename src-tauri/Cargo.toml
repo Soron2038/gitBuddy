@@ -77,6 +77,9 @@ tauri-plugin-single-instance = "~2.4.5"
 # Windows doesn't tint notification-area icons the way macOS tints a
 # template image. Already in the tree through tauri.
 winreg = "0.55"
+# Resolves the editor/terminal program on PATH honouring PATHEXT, so `code`
+# finds VS Code's `code.cmd` — `std::process::Command` only tries `.exe`.
+which = "8"
 
 [dev-dependencies]
 # Local-index tests build real git repos in a throwaway temp dir and run the
