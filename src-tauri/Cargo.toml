@@ -67,6 +67,17 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAttributedString", "NSDictionary", "NSGeometry", "NSObject", "NSString"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSAppearance", "NSAttributedString", "NSBezierPath", "NSButton", "NSCell", "NSColor", "NSControl", "NSFont", "NSGraphics", "NSResponder", "NSStatusBarButton", "NSStatusItem", "NSStringDrawing", "NSView"] }
 
+[target.'cfg(windows)'.dependencies]
+# A second launch focuses the running app instead of adding a second tray
+# icon (macOS gets that from LaunchServices). 2.5 requires tauri ^2.12, and
+# the tauri crate stays on 2.11 for now (docs/DECISIONS.md 2026-09-16), so
+# this is pinned to the 2.4 line.
+tauri-plugin-single-instance = "~2.4.5"
+# Reads the taskbar theme (`SystemUsesLightTheme`) to pick the tray icon:
+# Windows doesn't tint notification-area icons the way macOS tints a
+# template image. Already in the tree through tauri.
+winreg = "0.55"
+
 [dev-dependencies]
 # Local-index tests build real git repos in a throwaway temp dir and run the
 # libgit2 diagnostics against them; tempfile handles creation + cleanup.
