@@ -13,6 +13,18 @@
 #   scripts/release.sh --skip-build             # reuse artifacts already in release/
 #   scripts/release.sh --notes-file PATH        # release notes (default: CHANGELOG section)
 #   scripts/release.sh --target aarch64-apple-darwin   # default is universal
+#   scripts/release.sh --windows-run ID         # Windows installer from this finished
+#                                               # release-windows.yml run
+#   scripts/release.sh --no-windows             # emergency: publish without Windows
+#
+# WINDOWS — .github/workflows/release-windows.yml builds the installer on the
+# tag push. The tag is pushed right after the credential checks (you are asked
+# first), so that build runs while the Mac one does. At the end this script
+# waits for it, downloads the installer, checks its SHA-256 and signs it for
+# the updater with the same local key as the Mac build. A release-signing run
+# waits for approvals in SignPath; an unsigned run (policy `none`) is published
+# with a "Windows preview" note. The release is created as a draft and only
+# published once its asset list is complete.
 #
 # SECRETS — this script asks for them interactively and never writes them
 # anywhere. Nothing here belongs in a file: a passphrase in a dotfile gets
@@ -46,6 +58,8 @@ NOTES_FILE=""
 # an arch-specific build silently strands the other architecture's installed
 # base — they get no update offered at all.
 TARGET="universal-apple-darwin"
+WINDOWS_RUN=""
+NO_WINDOWS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -57,10 +71,18 @@ while [[ $# -gt 0 ]]; do
     --target)
       [[ $# -ge 2 ]] || { echo "error: --target needs a value." >&2; exit 1; }
       TARGET="$2"; shift 2 ;;
-    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --windows-run)
+      [[ $# -ge 2 ]] || { echo "error: --windows-run needs a run ID." >&2; exit 1; }
+      WINDOWS_RUN="$2"; shift 2 ;;
+    --no-windows) NO_WINDOWS=1; shift ;;
+    # The comment block at the top, up to the first line that isn't one.
+    -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) echo "error: unknown argument '$1' (see --help)." >&2; exit 1 ;;
   esac
 done
+if [[ -n "$WINDOWS_RUN" && "$NO_WINDOWS" -eq 1 ]]; then
+  echo "error: --windows-run and --no-windows contradict each other." >&2; exit 1
+fi
 
 VERSION="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
 [[ -n "$VERSION" ]] || { echo "error: could not read version from tauri.conf.json." >&2; exit 1; }
@@ -218,6 +240,8 @@ export TAURI_SIGNING_PRIVATE_KEY="$(cat "$UPDATER_KEY")"
 echo "▸ Checking that codesign can use the Developer ID key…"
 SIGN_PROBE="$(mktemp -d)/probe"
 trap 'rm -rf "$(dirname "$SIGN_PROBE")" ${NOTES_TMP:+"$NOTES_TMP"}' EXIT
+# Scratch space for the rest of the run, cleaned up by the same trap.
+WORK_DIR="$(dirname "$SIGN_PROBE")"
 cp /usr/bin/true "$SIGN_PROBE"
 if ! codesign --force --sign "$APPLE_SIGNING_IDENTITY" --options runtime --timestamp \
        "$SIGN_PROBE" >/dev/null 2>&1; then
@@ -238,6 +262,66 @@ if ! xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD
   exit 1
 fi
 echo "  ✓ accepted"
+echo
+
+# ── Tag + Windows build ───────────────────────────────────────────────────
+# GitHub Actions builds the Windows installer on the tag push
+# (.github/workflows/release-windows.yml). Pushing the tag now, before the
+# multi-minute Mac build, lets both run at once. Nothing is published yet:
+# the release itself is created at the very end, as a draft first.
+HEAD_SHA="$(git rev-parse HEAD)"
+SETUP_NAME="gitBuddy_${VERSION}_x64-setup.exe"
+SETUP="release/$SETUP_NAME"
+TAG_PUSHED=0
+
+push_tag() {
+  if ! git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+    git tag -a "v$VERSION" -m "gitBuddy $VERSION"
+  fi
+  # A no-op when GitHub has the tag already.
+  git push origin "v$VERSION"
+}
+
+# The run the tag push started. It takes a few seconds to show up; for a tag
+# that was already on GitHub (re-running this script) it is the earlier run.
+find_windows_run() {
+  local id="" attempt
+  for attempt in $(seq 1 24); do
+    id="$(gh run list --workflow release-windows.yml --event push --branch "v$VERSION" \
+            --limit 5 --json databaseId,headSha \
+            --jq "[.[] | select(.headSha == \"$HEAD_SHA\")][0].databaseId // empty")"
+    if [[ -n "$id" ]]; then
+      echo "$id"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "error: no release-windows.yml run for v$VERSION showed up within two minutes." >&2
+  echo "       Look at https://github.com/Soron2038/gitBuddy/actions and re-run with" >&2
+  echo "       --skip-build --windows-run <id> once you have one." >&2
+  return 1
+}
+
+if [[ "$NO_WINDOWS" -eq 1 ]]; then
+  echo "▸ --no-windows: this release ships without a Windows installer, and"
+  echo "  latest.json offers Windows no update."
+elif [[ -n "$WINDOWS_RUN" ]]; then
+  echo "▸ Windows installer: from workflow run $WINDOWS_RUN"
+elif [[ "$SKIP_BUILD" -eq 1 && -f "$SETUP" && -f "$SETUP.sig" && -f "$SETUP.policy" ]]; then
+  echo "▸ --skip-build: reusing $SETUP"
+elif [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "▸ --dry-run: no tag is pushed, so there is no Windows build to wait for and"
+  echo "  latest.json leaves Windows out. Add --windows-run <id> to include one."
+  NO_WINDOWS=1
+else
+  echo "▸ Pushing tag v$VERSION starts the Windows build in GitHub Actions."
+  read -rp "  Push the tag now? [y/N] " yn < /dev/tty
+  [[ "$yn" == [yY] ]] || { echo "  aborted."; exit 1; }
+  push_tag
+  TAG_PUSHED=1
+  WINDOWS_RUN="$(find_windows_run)"
+  echo "  ✓ building: https://github.com/Soron2038/gitBuddy/actions/runs/$WINDOWS_RUN"
+fi
 echo
 
 # ── Clear leftovers from a failed DMG step ────────────────────────────────
@@ -287,7 +371,7 @@ if compgen -G "release/*" >/dev/null; then
   STALE=()
   for f in release/*; do
     case "$(basename "$f")" in
-      "gitBuddy_${VERSION}_${ARCH}".*|archive) ;;
+      "gitBuddy_${VERSION}_${ARCH}".*|"$SETUP_NAME"*|archive) ;;
       *) STALE+=("$f") ;;
     esac
   done
@@ -326,21 +410,79 @@ for f in "$DMG" "$TARBALL" "$TARBALL.sig"; do
   [[ -f "$f" ]] || { echo "error: expected artifact missing: $f" >&2; exit 1; }
 done
 
+# ── Windows installer ─────────────────────────────────────────────────────
+if [[ "$NO_WINDOWS" -eq 0 && -n "$WINDOWS_RUN" ]]; then
+  echo "▸ Waiting for the Windows build (run $WINDOWS_RUN)"
+  echo "  A release-signing build waits for its two approvals at https://app.signpath.io."
+  if ! gh run watch "$WINDOWS_RUN" --exit-status --interval 30; then
+    echo "error: the Windows build failed: https://github.com/Soron2038/gitBuddy/actions/runs/$WINDOWS_RUN" >&2
+    echo "       Re-run it there and continue with --skip-build --windows-run <id>," >&2
+    echo "       or publish without Windows with --skip-build --no-windows." >&2
+    exit 1
+  fi
+  WIN_DIR="$WORK_DIR/windows"
+  gh run download "$WINDOWS_RUN" --name windows-installer --dir "$WIN_DIR"
+  [[ -f "$WIN_DIR/$SETUP_NAME" ]] || {
+    echo "error: run $WINDOWS_RUN has no $SETUP_NAME — a build of another version?" >&2; exit 1
+  }
+  (cd "$WIN_DIR" && shasum -a 256 -c SHA256SUMS)
+  cp "$WIN_DIR/$SETUP_NAME" "$SETUP"
+  tr -d '[:space:]' <"$WIN_DIR/SIGNING_POLICY" >"$SETUP.policy"
+
+  # The updater signature is made here, with the same key and the same
+  # version binding as the .sig the Mac bundler wrote: the minisign key never
+  # leaves this machine. An empty passphrase has to be passed explicitly, or
+  # the CLI stops to ask for one.
+  echo "▸ Signing $SETUP_NAME for the updater"
+  PASSWORD_ARGS=()
+  [[ -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]] || PASSWORD_ARGS=(--password "")
+  rm -f "$SETUP.sig"
+  npm run --silent tauri -- signer sign --app-version "$VERSION" \
+    ${PASSWORD_ARGS[@]+"${PASSWORD_ARGS[@]}"} "$SETUP"
+  [[ -s "$SETUP.sig" ]] || { echo "error: signing produced no $SETUP.sig." >&2; exit 1; }
+  echo
+fi
+
+WINDOWS_POLICY=""
+if [[ "$NO_WINDOWS" -eq 0 ]]; then
+  WINDOWS_POLICY="$(cat "$SETUP.policy")"
+  case "$WINDOWS_POLICY" in
+    release-signing) echo "  Windows installer: Authenticode-signed (SignPath)" ;;
+    none)            echo "  Windows installer: NOT code-signed — published as a Windows preview" ;;
+    *)
+      echo "error: the Windows installer was signed under '$WINDOWS_POLICY'. Publish a" >&2
+      echo "       release-signing or an unsigned build instead." >&2
+      exit 1 ;;
+  esac
+  echo
+fi
+
+# Until SignPath has approved the project the installer is unsigned, and the
+# release says so up front: SmartScreen will warn before its first launch.
+if [[ "$WINDOWS_POLICY" == none ]]; then
+  {
+    echo "> **Windows preview:** the Windows installer isn't code-signed yet, so"
+    echo "> SmartScreen warns before its first launch — choose *More info* → *Run anyway*."
+    echo
+    cat "$NOTES_FILE"
+  } >"$WORK_DIR/notes.md"
+  NOTES_FILE="$WORK_DIR/notes.md"
+fi
+
 # ── latest.json ───────────────────────────────────────────────────────────
-scripts/generate-latest-json.sh --notes "gitBuddy $VERSION"
+# It refuses to leave a platform out, except Windows under --no-windows.
+LATEST_ARGS=(--notes "gitBuddy $VERSION")
+if [[ "$NO_WINDOWS" -eq 1 ]]; then
+  LATEST_ARGS+=(--no-windows)
+fi
+scripts/generate-latest-json.sh "${LATEST_ARGS[@]}"
 echo
 
 python3 - "$VERSION" <<'PY'
 import json, sys
 d = json.load(open("latest.json"))
 assert d["version"] == sys.argv[1], f"latest.json says {d['version']}, expected {sys.argv[1]}"
-plats = sorted(d["platforms"])
-print(f"  latest.json → version {d['version']}, platforms: {', '.join(plats)}")
-# A universal build must serve both; anything less strands an architecture.
-missing = {"darwin-aarch64", "darwin-x86_64"} - set(plats)
-if missing:
-    print(f"  note: no entry for {', '.join(sorted(missing))} — that architecture")
-    print(f"        will not be offered this update.")
+print(f"  latest.json → version {d['version']}, platforms: {', '.join(sorted(d['platforms']))}")
 PY
 echo
 
@@ -350,20 +492,43 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-echo "▸ About to publish v$VERSION to GitHub:"
-printf '    %s\n' "$DMG" "$TARBALL" "$TARBALL.sig" latest.json
-read -rp "  Publish? [y/N] " yn < /dev/tty
-[[ "$yn" == [yY] ]] || { echo "  aborted."; exit 1; }
-
-if ! git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-  git tag -a "v$VERSION" -m "gitBuddy $VERSION"
+ASSETS=("$DMG" "$TARBALL" "$TARBALL.sig")
+if [[ "$NO_WINDOWS" -eq 0 ]]; then
+  ASSETS+=("$SETUP" "$SETUP.sig")
 fi
-git push origin "v$VERSION"
+ASSETS+=(latest.json)
 
-gh release create "v$VERSION" \
-  "$DMG" "$TARBALL" "$TARBALL.sig" latest.json \
+echo "▸ About to publish v$VERSION to GitHub:"
+printf '    %s\n' "${ASSETS[@]}"
+read -rp "  Publish? [y/N] " yn < /dev/tty
+if [[ "$yn" != [yY] ]]; then
+  echo "  aborted."
+  if [[ "$TAG_PUSHED" -eq 1 ]]; then
+    echo "  The tag v$VERSION is on GitHub already. To take it back:"
+    echo "    git push --delete origin v$VERSION && git tag -d v$VERSION"
+  fi
+  exit 1
+fi
+
+push_tag
+
+# A draft first. Drafts don't count for /releases/latest/, so no updater sees
+# this release while its assets are still uploading — or if one is missing.
+gh release create "v$VERSION" "${ASSETS[@]}" \
+  --draft \
   --title "gitBuddy $VERSION" \
   --notes-file "$NOTES_FILE"
+
+EXPECTED="$(for f in "${ASSETS[@]}"; do basename "$f"; done | sort)"
+UPLOADED="$(gh release view "v$VERSION" --json assets --jq '.assets[].name' | sort)"
+if [[ "$EXPECTED" != "$UPLOADED" ]]; then
+  echo "error: the draft's assets don't match what should be there:" >&2
+  diff <(echo "$EXPECTED") <(echo "$UPLOADED") >&2 || true
+  echo "       The release is still an unpublished draft — fix it at" >&2
+  echo "       https://github.com/Soron2038/gitBuddy/releases" >&2
+  exit 1
+fi
+gh release edit "v$VERSION" --draft=false --latest
 
 echo
 echo "✓ https://github.com/Soron2038/gitBuddy/releases/tag/v$VERSION"
