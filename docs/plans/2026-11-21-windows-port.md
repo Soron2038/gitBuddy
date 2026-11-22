@@ -58,7 +58,75 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS7 | Frontend | type-checked and tested (`npm run verify` green on the PC). **Open:** visual check on macOS |
 | WS8 | Release pipeline | written; the unsigned path runs on the PR. **Open:** the SignPath steps (need WS0), a real `release.sh` run on the Mac |
 | WS9 | Docs | done: DECISIONS (five 2026-11-22 entries), RELEASING, README, CLAUDE.md, PRD (M8), CHANGELOG. **Open:** the SignPath sentence in README once approved (WS0) |
-| WS10 | End-to-end on the Windows PC | open (last) |
+| WS10 | End-to-end on the Windows PC | first pass done 2026-11-22 (see below): most of PRD M8 passes. **Open:** the cases listed there |
+
+**WS10, first pass (2026-11-22):**
+
+Setup:
+- Installer: the unsigned one from the PR's "Release (Windows)" run (1.6.0).
+- Windows 11, one monitor, auto-hiding taskbar at the bottom, dark mode, a
+  GitHub account via OAuth device flow.
+- The maintainer installed and clicked through the UI; the system side
+  (files, registry, Credential Manager, git) was checked from a shell.
+
+Passed:
+- **Install:**
+  - No UAC prompt; installed to `%LOCALAPPDATA%\gitBuddy`.
+  - Start-menu shortcut; the desktop shortcut is optional on the finish
+    page.
+  - Uninstall entry under HKCU only; WebView2 was already present.
+- **Launch:** the first launch opens the main window. A second launch from
+  the Start menu brings it back, with one process and one tray icon.
+- **Tray and popover:**
+  - The tray icon toggles the popover.
+  - A click outside closes it, and the next click on the icon reopens it.
+  - "Quit gitBuddy" in the menu works.
+- **Account:**
+  - GitHub OAuth gives a v2 `accounts.json` entry (`oauth_device`) and the
+    Credential Manager entry `github:github.com:soron2038.dev.soron2038.gitbuddy`.
+  - The account survives quitting and relaunching.
+- **Clone:**
+  - `CON`, `D:x` and `..` are refused.
+  - With `core.autocrlf=true` the clone is checked out with CRLF, yet
+    `git status` and the app both show it clean (risk 6 doesn't happen).
+  - `.git/config` holds the reset plus the helper with
+    `C:/Users/…/gitBuddy/gitbuddy.exe`.
+- **Push:** `git push --dry-run` with `GIT_TRACE` from Git Bash, cmd and
+  PowerShell runs gitBuddy's helper (`get`, then `store`) and authenticates.
+  Git Credential Manager never runs.
+- **Download:** a release `.msi` lands in Downloads with
+  `Zone.Identifier` = `ZoneId=3` + `HostUrl` (no token), and opening it shows
+  SmartScreen's warning.
+- **Editor and terminal:**
+  - Editor `"…\Antigravity IDE\bin\antigravity-ide.cmd"` opens the clone
+    without a console flash.
+  - `wt`, `cmd` and `Git Bash` open in the clone and stay open, so the
+    installed GUI exe doesn't have the debug-build caveat.
+- **Appearance:** Light/Dark/System switch the native title bar and the
+  content.
+- **Context menu:** suppressed on empty areas; Cut/Copy/Paste in the search
+  field.
+
+Not tested yet:
+- Reboot persistence, GitLab/Codeberg PATs, a clone into a folder with
+  spaces.
+- `code` and `pwsh`, which aren't installed.
+- The tray icon on a light taskbar, the badge dot (needs a clone that is
+  behind; the maintainer skipped it), notification toasts (no event came
+  up).
+- Autostart after signing in.
+- Taskbar at the top or the side (Windows 11 doesn't offer it natively), a
+  second monitor, mixed DPI (only one monitor here).
+- Update N → N+1.
+- Uninstalling through Settings. A silent `uninstall.exe /S` of the first,
+  virtualized install did remove files, shortcuts and the key.
+
+Testing pitfall, now in CLAUDE.md: the Claude desktop app is an MSIX
+package. Processes started from a Claude Code session (installers, dev
+builds) get their `%LOCALAPPDATA%`/`%APPDATA%` writes redirected to
+`%LOCALAPPDATA%\Packages\Claude_*\LocalCache`. The first install landed
+there, invisible to the user, and so did the dev builds' settings. Installers
+have to be run by the user, from Explorer.
 
 **Pick up here (2026-11-22, evening):** WS1–WS9 are written; the PR is
 green, including the unsigned release run. Its `windows-installer`

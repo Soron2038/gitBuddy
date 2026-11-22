@@ -160,6 +160,10 @@ The Windows behaviour is decided in the 2026-11-22 entries of `docs/DECISIONS.md
 - **Build tools:** the MSVC toolchain, plus Python + Pillow for the icon script.
 - **PowerShell 5.1 pitfalls:** it drops empty arguments to native programs (`git config --add key ''`), and its pipe into `git` is unreliable. Use Git Bash for those.
 - **One instance:** a running gitBuddy (installed or release build) swallows a second launch of the dev build. Quit it first.
+- **Claude desktop is an MSIX package.** Anything a Claude Code session starts (installers, `npm run tauri dev`, a release exe) inherits that. Its writes to `%LOCALAPPDATA%` / `%APPDATA%` are redirected into `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\…`, and an empty folder of the same name there hides the real one from the session.
+  - An installer run that way installs where the user can't see it.
+  - Install builds by double-clicking them in Explorer, and read the real files only after removing such leftovers from `LocalCache`.
+  - Credential Manager, Documents and Downloads are not affected.
 
 ## Conventions to follow
 
