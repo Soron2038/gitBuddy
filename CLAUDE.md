@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-gitBuddy is a **macOS menu-bar companion** for GitHub, GitLab, and Codeberg/Gitea/Forgejo. It aggregates repos, issues/PRs, releases, and CI status across multiple forge accounts, and surfaces the state of local clones (via libgit2). Tauri 2 shell + SvelteKit 2 / Svelte 5 frontend + Rust core.
+gitBuddy is a **macOS menu-bar companion** for GitHub, GitLab, and Codeberg/Gitea/Forgejo, with a **Windows x64 port** in preview (tray app, NSIS installer). It aggregates repos, issues/PRs, releases, and CI status across multiple forge accounts, and surfaces the state of local clones (via libgit2). Tauri 2 shell + SvelteKit 2 / Svelte 5 frontend + Rust core. The Windows port's plan and progress: `docs/plans/2026-11-21-windows-port.md`.
 
 Scope and milestones live in `PRD.md`. Architecture decisions with dated rationales live in `docs/DECISIONS.md` (append-only — never edit past entries; add a new entry that references the older one if reversing course).
 
@@ -26,10 +26,18 @@ All commands run from repo root unless noted.
 | Rust tests | `cd src-tauri && cargo test --lib` |
 | Frontend bundle (no Tauri) | `npm run build` |
 | Release build (signed) | `scripts/build-app.sh` — see `docs/RELEASING.md` |
-| Tray icon regen | `python3 scripts/regenerate-tray-icon.py` |
+| Release (macOS + Windows) | `scripts/release.sh` — see `docs/RELEASING.md` |
+| Windows installer, local unsigned | `npm run tauri build -- --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'` (Git Bash; see README) |
+| Windows editor/terminal smoke test | `GITBUDDY_SMOKE_EDITOR=code GITBUDDY_SMOKE_TERMINALS='wt\|cmd' cargo test --lib launcher::tests::smoke -- --ignored` (opens real windows) |
+| Tray icon regen | `python3 scripts/regenerate-tray-icon.py` (`python` on Windows; needs Pillow) |
 | Palette contrast check | `node scripts/check-contrast.mjs` (add `--html design-mockups/04-buddy-warm-dark.html` for the mockup's palettes) |
 
-CI (`.github/workflows/ci.yml`, push/PR to `main`) runs a minimal gate: `npm run check` on `ubuntu-latest`, plus, on `macos-latest`, `cargo fmt --check`, `cargo clippy --all-targets -D warnings` and `cargo test --lib` — no Tauri bundle build, releases stay local and signed (see the 2026-06-10 entry in `docs/DECISIONS.md`). It installs the current `stable` Rust, which can be newer than your local one: new Clippy lints show up there first. Reproduce with that exact version side by side (`rustup toolchain install <ver> -c clippy` then `cargo +<ver> clippy …`) rather than bumping the default.
+CI (`.github/workflows/ci.yml`, push/PR to `main`) runs a minimal gate:
+- `npm run check` on `ubuntu-latest`;
+- on `macos-latest`: `cargo fmt --check`, `cargo clippy --all-targets -D warnings` and `cargo test --lib`;
+- the same clippy and tests on `windows-latest` (`backend-windows`). That job is the only place the Windows side of the `cfg` gates compiles if you work on a Mac.
+
+No Tauri bundle build there: the Mac release stays local and signed (2026-06-10 entry in `docs/DECISIONS.md`). The Windows installer is built by `.github/workflows/release-windows.yml` on `v*` tags. That workflow also runs, unsigned, on any PR that changes it (2026-11-22 entry). It installs the current `stable` Rust, which can be newer than your local one: new Clippy lints show up there first. Reproduce with that exact version side by side (`rustup toolchain install <ver> -c clippy` then `cargo +<ver> clippy …`) rather than bumping the default.
 
 **`npm run tauri build` requires `TAURI_SIGNING_PRIVATE_KEY`** since v1.0: `bundle.createUpdaterArtifacts` is enabled, so the bundle step fails without the updater signing key. For a local smoke-test without the key use `scripts/build-app.sh --unsigned` (skips updater artifacts and notarization). The full signed/notarized release flow is documented in `docs/RELEASING.md`.
 
@@ -105,16 +113,58 @@ The terracotta badge can't live in the template image, and tinting the robot our
 
 ### Tray menu is attached only while it is shown
 
-The right-click menu is deliberately **not** passed to `TrayIconBuilder::menu`. On macOS 27 a menu that is permanently attached to the `NSStatusItem` swallows the left click (AppKit pops the menu before `tray-icon`'s overlay view sees the event), so `TrayIconEvent::Click` never fires and the popover can't open. `show_tray_menu` in `lib.rs` attaches the menu on right mouse-down, pops it, and detaches it again — the same trick upstream shipped in `tray-icon` 0.25.1, which no Tauri 2.x release pulls in yet. Don't "clean this up" by restoring `.menu(&menu)`; see the 2026-09-16 entry in `docs/DECISIONS.md`.
+On macOS the right-click menu is deliberately **not** passed to `TrayIconBuilder::menu` (Windows does pass it; see below). On macOS 27 a menu that is permanently attached to the `NSStatusItem` swallows the left click (AppKit pops the menu before `tray-icon`'s overlay view sees the event), so `TrayIconEvent::Click` never fires and the popover can't open. `show_tray_menu` in `lib.rs` attaches the menu on right mouse-down, pops it, and detaches it again — the same trick upstream shipped in `tray-icon` 0.25.1, which no Tauri 2.x release pulls in yet. Don't "clean this up" by restoring `.menu(&menu)`; see the 2026-09-16 entry in `docs/DECISIONS.md`.
 
 ### Appearance is set natively, the CSS only follows
 
 The Settings → Appearance choice (System / Light / Dark, `settings::Appearance`) is applied by `appearance::apply` in Rust, which calls `WebviewWindow::set_theme` on every window. On macOS that sets `NSApp.appearance`; WKWebView follows it, so `app.css` keeps keying dark mode on `@media (prefers-color-scheme: dark)` — no `data-theme` attribute, no per-component branching. Use the per-window call, **never `AppHandle::set_theme`**: the app-level one leaves each window's cached theme stale, and `apply` reads `main.theme()` for the System case. The native window background can't follow CSS, so `appearance.rs` paints it from `PAPER_LIGHT`/`PAPER_DARK`, which mirror `--paper` in `app.css` — a Rust test fails when they drift. `app.html` declares `color-scheme: light dark` so form controls and scrollbars follow as well. See the 2026-09-29 entry in `docs/DECISIONS.md`.
 
+## Windows-specific quirks
+
+The Windows behaviour is decided in the 2026-11-22 entries of `docs/DECISIONS.md`.
+
+### Tray: menu attached, icons per taskbar theme
+- **Menu:** attached for good (`.menu(&menu)` outside macOS). The macOS attach-while-shown trick loses the menu's clicks on Windows, so `show_tray_menu` is macOS-only.
+- **Icon:** no template tinting on Windows, so `tray_windows.rs` swaps between four 32×32 PNGs: `tray-win-{light,dark}[-badged].png`, chosen by the *taskbar* theme (`SystemUsesLightTheme`).
+- **Badge:** a terracotta dot; the count is in the tooltip.
+- **Main thread:** every swap goes through `run_on_main_thread`, because `set_icon` blocks off the main thread and the swap holds a lock.
+- **Regenerating:** the PNGs come from `scripts/regenerate-tray-icon.py`, and it leaves the macOS PNGs pixel-identical.
+
+### Popover placement and the focus race
+- **Placement:** `popover.rs` holds pure, tested geometry. The popover opens away from the taskbar edge, found from the work-area inset or, with an auto-hiding taskbar, the icon. It is clamped into the work area of the icon's monitor at that monitor's scale. macOS keeps its inline formula in `lib.rs`.
+- **Focus race:** clicking the tray focuses the taskbar on mouse-down, so the popover hid itself and reopened on mouse-up. `POPOVER_AUTO_HIDDEN_AT` + `popover::REOPEN_GUARD` (500 ms) keep it closed. Auto-hide exists only in release builds, so test toggling with one.
+
+### Lifecycle
+- **Single instance:** `tauri-plugin-single-instance` is the first plugin, Windows only. It is pinned to `~2.4.5` because 2.5 needs tauri 2.12, and the crate stays on 2.11 (2026-09-16).
+- **Autostart:** the autostart Run key passes `--autostart`. Every other launch opens the main window, since a new tray icon hides in the overflow.
+
+### Secrets, helper, downloads
+- **Token store:** Credential Manager via `keyring`'s `windows-native`. Without a store feature, keyring silently uses an in-memory mock.
+- **Helper path:** written with `/` (`git_credential::shell_path`) for Git for Windows' MSYS `sh`.
+- **Downloads:** they get the Mark-of-the-Web (`<file>:Zone.Identifier`, `ZoneId=3`) instead of the xattr quarantine flag. It never contains the token.
+
+### Editor and terminal
+- **Launching:** `launcher.rs` parses the command line and resolves it with the `which` crate (PATHEXT: `code` → `code.cmd`). It spawns without a shell; `.cmd` runs with `CREATE_NO_WINDOW`.
+- **Terminal presets:** `wt`, Git Bash; anything else gets its own console.
+- **macOS:** keeps `open -a` (`cfg(not(windows))` in `commands.rs`).
+- **Testing:** a debug build passes its `tauri dev` pipes on to a launched shell, so `cmd` exits at once. Test terminal launches with a release build or the ignored smoke test.
+
+### Paths and names
+- **One set of name rules:** `util::file_name_problem` / `sanitize_file_name` apply the Windows rules on every platform (forbidden characters, trailing dot or space, `CON`/`NUL`/`COM1`…).
+  - Downloads are rewritten to pass.
+  - Clone folder names are refused instead.
+- **Scan skips:** `local_index::SKIP_DIRS` includes `AppData`, `$Recycle.Bin` and `System Volume Information`. It compares case-insensitively on Windows only.
+- **Line endings:** `.gitattributes` forces LF checkouts. Git for Windows defaults to CRLF, which broke the contrast test's shebang and would break the shell scripts.
+
+### Developing on the Windows PC
+- **Build tools:** the MSVC toolchain, plus Python + Pillow for the icon script.
+- **PowerShell 5.1 pitfalls:** it drops empty arguments to native programs (`git config --add key ''`), and its pipe into `git` is unreliable. Use Git Bash for those.
+- **One instance:** a running gitBuddy (installed or release build) swallows a second launch of the dev build. Quit it first.
+
 ## Conventions to follow
 
 - **`docs/DECISIONS.md` is append-only**. If a decision is being reversed, add a new dated entry that explains why and points back at the older one — don't edit history.
-- **Rust unit tests live in per-module `#[cfg(test)]` blocks** (~174 tests: provider fixture deserialization, oauth parsing, settings migrations, aggregator diff logic, libgit2 tests against temp fixture repos in `local_index.rs`, and a credential-helper test that drives a real `git credential fill` when a `git` binary is present). Run via `cargo test --lib`. Includes an HTTP-level **provider conformance suite** (`wiremock` dev-dependency): each provider is pointed at a localhost mock server via the per-provider `#[cfg(test)] for_test` seam and driven through real reqwest requests — pagination, the bearer header, and the rate-limit/401/403/5xx/graceful-404 mappings. Shared test helpers (a `Viewer` stub, a pagination-page generator) live in `provider_util::test_support`. GitHub's API base is a struct field (defaulting to `API_BASE`) purely so this seam can redirect it; `base_url()` still returns `None`.
+- **Rust unit tests live in per-module `#[cfg(test)]` blocks** (~200 tests, a few of them Windows- or macOS-only: provider fixture deserialization, oauth parsing, settings migrations, aggregator diff logic, libgit2 tests against temp fixture repos in `local_index.rs`, and a credential-helper test that drives a real `git credential fill` when a `git` binary is present). Run via `cargo test --lib`. Includes an HTTP-level **provider conformance suite** (`wiremock` dev-dependency): each provider is pointed at a localhost mock server via the per-provider `#[cfg(test)] for_test` seam and driven through real reqwest requests — pagination, the bearer header, and the rate-limit/401/403/5xx/graceful-404 mappings. Shared test helpers (a `Viewer` stub, a pagination-page generator) live in `provider_util::test_support`. GitHub's API base is a struct field (defaulting to `API_BASE`) purely so this seam can redirect it; `base_url()` still returns `None`.
 - **Frontend tests are Vitest, in `src/**/*.test.ts`** next to the module they cover (`format.test.ts`, `data/api.test.ts`, `data/auth.test.ts` — ~44 tests over the pure logic both windows share: key derivation, dedup, formatters, provider resolution, auth-head derivation), plus `app-contrast.test.ts`, which runs `scripts/check-contrast.mjs` over both schemes of `src/app.css`. `vitest.config.ts` deliberately does *not* load the SvelteKit plugin — these are plain functions, so a Node environment plus the `$lib` alias keeps the suite at ~100 ms. Component tests would need the plugin plus jsdom; add a second project there if that day comes.
 - **The account migrations take a `keychain::KeychainStore`**, not the free functions, so `migrate_ids` can run against `keychain::test_support::FakeKeychain` (in-memory, with per-key load/save failure injection and a record of every delete). This is the code that can lose a user's stored token — the partial-failure branches are covered, in particular that a failed copy never deletes the v1 entry.
 - **Settings & accounts use `util::atomic_write`** — never write JSON config files directly with `serde_json::to_writer`; the atomic helper survives mid-write crashes.

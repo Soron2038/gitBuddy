@@ -7,6 +7,30 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **gitBuddy on Windows (preview).** Windows 10/11 x64 gets the tray icon
+  with its popover, the main window, accounts stored in Windows Credential
+  Manager, pushing through gitBuddy from any terminal, and updates through
+  the built-in updater.
+  - The installer works per user, without an administrator prompt. Until it
+    is code-signed, SmartScreen warns before the first launch: choose *More
+    info* → *Run anyway*.
+  - The tray icon follows the taskbar's light or dark theme and shows a dot
+    while clones are behind; the count is in its tooltip.
+- **Open in editor or terminal on Windows** works with `code`, a full path in
+  quotes, `wt`, `pwsh`, `cmd` and Git Bash.
+- **Downloaded release files on Windows are marked as coming from the
+  Internet**, so SmartScreen checks an installer just as after a browser
+  download.
+
+### Changed
+
+- **Clone folder names have to work on every platform.** Names containing
+  `: * ? " < > |`, ending in a dot or a space, or naming a Windows device
+  (`CON`, `NUL`, `aux`, `com1`, …) are refused, on macOS too. Downloaded
+  release files are renamed the same way.
+
 ## [1.6.0] — 2026-11-04
 
 A proper badge for the clones that are behind.

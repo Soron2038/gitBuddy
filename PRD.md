@@ -29,6 +29,7 @@ Linux without rewriting the UI.
 - Fast and resource-light (small RAM/CPU footprint suitable for an always-running app).
 - Treat local clones as first-class: detect them, surface their state.
 - Architecture portable to Windows and Linux later without major rewrites.
+  (Windows x64 since M8; Linux still later.)
 
 ### Non-Goals (for v1)
 - Full Git client (no commit/push/merge UI). Hand off to terminal/IDE.
@@ -168,7 +169,7 @@ Per repo (context menu / row buttons):
 - Local scan of 10k subdirectories: < 5 s (incremental, with cache).
 
 ### 5.2 Security & Privacy
-- All tokens in OS keystore (Keychain on macOS).
+- All tokens in OS keystore (Keychain on macOS, Credential Manager on Windows).
 - No telemetry, no analytics, no third-party crash reporters in v1.
 - All network traffic goes only to user-configured forge endpoints.
 - Optional opt-in anonymous error reporting in a later version.
@@ -231,7 +232,11 @@ Per repo (context menu / row buttons):
 
 ### 6.5 Distribution & Updates
 - **Signed & notarized `.dmg`** published on GitHub Releases.
-- **Tauri Updater** for in-app auto-updates, signature-verified.
+- **Windows (M8):** a per-user NSIS installer, built in GitHub Actions and
+  Authenticode-signed through SignPath Foundation (unsigned "preview" until
+  the project is approved), published in the same release.
+- **Tauri Updater** for in-app auto-updates, signature-verified, on both
+  platforms from one `latest.json`.
 - Requires Apple Developer ID (~99 USD/year).
 - Homebrew Cask and other channels: post-v1.
 
@@ -284,7 +289,8 @@ GraphQL preferred for GitHub to minimize request count for the
 - Per-repo notification subscriptions ("watch list").
 - Stats dashboard (PR throughput, review latency).
 - Multi-language UI (German, etc.).
-- Windows and Linux release builds (architecture is ready; needs CI + signing).
+- Linux release builds (architecture is ready; needs CI + packaging). Windows
+  moved into scope with M8.
 - Mac App Store distribution.
 
 ---
@@ -307,6 +313,47 @@ GraphQL preferred for GitHub to minimize request count for the
    - Native notifications, editor/terminal launchers, OAuth where applicable.
 7. **M7 — Polishing, signing, updater, v1.0 release** (week 11–13)
    - Notarization, Tauri Updater, documentation, MIT release on GitHub.
+8. **M8 — Windows x64** (started 2026-11-21; plan and progress in
+   `docs/plans/2026-11-21-windows-port.md`)
+   - Tray app with popover and main window, Credential Manager, per-user NSIS
+     installer, auto-update from the same `latest.json`, a Windows CI gate.
+   - **Acceptance criteria**, on a Windows 11 x64 PC with the installed build:
+     - **Install:** no administrator prompt; installs to
+       `%LOCALAPPDATA%\gitBuddy` with a Start-menu entry; WebView2 is
+       fetched when missing.
+     - **Launch:** the first launch opens the main window; a second launch
+       focuses the running app, so there is only one tray icon; autostart
+       after signing in starts into the tray without a window.
+     - **Accounts:** GitHub OAuth device flow and PATs for GitHub, GitLab and
+       Codeberg work; accounts survive a restart and a reboot; the tokens are
+       visible in Credential Manager.
+     - **Clone and push:** a clone into a folder with spaces isn't reported
+       dirty; `git push` works from Git Bash, PowerShell and cmd without a Git
+       Credential Manager prompt; `CON`, `D:x` and `..` are refused as folder
+       names.
+     - **Downloads:** a downloaded release file carries the Mark-of-the-Web
+       (`ZoneId=3`) and SmartScreen checks it.
+     - **Editor and terminal:** `code`, a quoted `C:\Program Files\…` path,
+       `wt`, `pwsh`, `cmd` and Git Bash each open in the right folder without
+       a console flash.
+     - **Tray and popover:**
+       - The popover opens next to the icon with the taskbar at the bottom,
+         at the top, or auto-hiding, and from the overflow.
+       - It opens correctly on a second monitor (including negative
+         coordinates), at 100/150/200 % and with mixed DPI.
+       - The tray icon toggles it, and a click outside closes it.
+       - The right-click menu opens gitBuddy and quits it.
+       - The icon follows the taskbar theme, and a dot shows while clones
+         are behind.
+     - **Updates:** N → N+1 through the passive installer; settings and
+       tokens survive.
+     - **Uninstall:** removes the app and its shortcuts; with "delete app
+       data" ticked, `%APPDATA%\dev.soron2038.gitbuddy` goes too.
+     - **No regression on macOS:** popover position, the right-click menu on
+       macOS 27, the badge, and `release.sh --dry-run`.
+     - **Signing:** the installer is Authenticode-signed ("SignPath
+       Foundation") once SignPath has approved the project; until then it
+       ships as a labelled unsigned preview.
 
 ---
 

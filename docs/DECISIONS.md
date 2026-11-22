@@ -673,3 +673,175 @@ fetching the *named* remote makes libgit2 re-apply its configured refspecs
 **Sizes:** tray-icon draws the icon 18 pt tall, not 22, so the 9 pt badge from the mockups came out at 7 pt. The badge is 10 pt across instead and hangs into the button's lower margin. Anything smaller stops being readable on a 1× external display. `9+` is the weakest case there.
 
 **Costs:** direct `objc2` and `objc2-app-kit` dependencies that have to track the versions tray-icon uses, and geometry kept in two places (the Rust module and the icon script). The first appearance read right after adding the view can report the wrong scheme; `viewDidChangeEffectiveAppearance` repaints when it settles.
+
+## 2026-11-22 — Windows release: per-user NSIS installer, built and Authenticode-signed in GitHub Actions, updater signature stays local
+
+Amends the 2026-06-10 entries ("release builds remain a local, signed,
+tag-driven process") and the PRD non-goal "Windows and Linux release builds".
+The plan and its progress are in `docs/plans/2026-11-21-windows-port.md`.
+
+**Context.** gitBuddy gets a Windows x64 build. The Mac that cuts releases
+can't build it, and Windows warns about an unsigned installer (SmartScreen).
+SignPath Foundation signs open-source projects for free, but only from a
+pipeline it can verify: a GitHub Actions workflow artifact.
+
+**Decision.**
+- **Installer:** NSIS, `installMode: currentUser`. It installs to
+  `%LOCALAPPDATA%\gitBuddy` without a UAC prompt, and the updater replaces it
+  the same way (`passive`). WebView2 comes through the download
+  bootstrapper. The Windows-only config is the merge patch
+  `src-tauri/tauri.windows.conf.json`.
+- **Built in CI:** `.github/workflows/release-windows.yml` runs on the tag
+  push. It builds with `tauri build --no-bundle` and has SignPath sign the
+  exe. It then bundles with `tauri bundle --no-binary-patching` and has
+  SignPath sign the installer. There are no caches.
+- **No binary patching:** patching would rewrite bytes in the signed exe and
+  break its signature. Without the patch the app can't tell the updater its
+  installer type, so `latest.json` uses the plain `windows-x86_64` key.
+- **`bundle.windows.signCommand` is out:** it runs mid-bundle, where SignPath
+  can't see a workflow artifact. As a result the NSIS uninstaller stays
+  unsigned.
+- **Updater signature stays local:** `scripts/release.sh` downloads the
+  installer, checks its SHA-256 and signs it with `tauri signer sign
+  --app-version`. The minisign key never leaves the Mac, as in 2026-06-10.
+- **One release for both platforms:** `release.sh` pushes the tag right
+  after the credential checks, so both builds run at once. It creates the
+  release as a draft, compares the asset list, and only then publishes it
+  with `--latest`. Drafts don't count for `/releases/latest/`, so no updater
+  sees a half-uploaded release.
+- **`latest.json` refuses gaps:** it has to contain darwin-aarch64,
+  darwin-x86_64 and windows-x86_64. `--no-windows` is the deliberate
+  exception. Never point the key at an older installer: `version` covers all
+  platforms, so Windows clients would reinstall it on every launch.
+- **Until SignPath approves:** the policy comes from the repo variable
+  `WINDOWS_SIGNING_POLICY` and defaults to `none`. Such a release ships an
+  unsigned installer, and the release notes open with a "Windows preview"
+  note. Signing is switched on by setting the variable to `release-signing`;
+  the workflow needs no edit. The `release` environment with the SignPath
+  token is only entered when the job signs.
+- **Tooling:** `@tauri-apps/cli` 2.12 (the first with
+  `--no-binary-patching`). The `tauri` crate stays on 2.11, see the
+  2026-09-16 entry.
+
+**Costs.**
+- Every signed release waits for manual approvals in SignPath.
+- An aborted `release.sh` can leave a pushed tag behind; the script prints
+  how to delete it.
+- A Mac-only release now needs `--no-windows`.
+
+## 2026-11-22 — Windows tray: the menu stays attached, one icon per taskbar theme, the count in the tooltip
+
+Narrows the 2026-09-16 entry (menu attached only while shown) and the
+2026-11-04 entry (native badge view) to macOS.
+
+**Menu.** On Windows the context menu is attached for good
+(`TrayIconBuilder::menu`). tray-icon opens it on right mouse-up and still
+reports left clicks. The attach-while-shown trick loses the menu's clicks
+there: tray-icon's Windows `show_menu` calls `TrackPopupMenu` without
+`TPM_RETURNCMD`, and muda's window subclass is gone by the time the
+`WM_COMMAND` arrives. `show_tray_menu` is macOS-only.
+
+**Icon.** Windows shows a notification-area icon as given; there is no
+template tinting. A black robot vanishes on the default dark taskbar.
+- `scripts/regenerate-tray-icon.py` draws four 32×32 PNGs: a dark glyph for
+  a light taskbar and a white one for a dark taskbar, each with and without
+  a terracotta dot.
+- `tray_windows.rs` picks the PNG by `SystemUsesLightTheme`, the taskbar
+  theme. That is not `AppsUseLightTheme`, which the webviews follow.
+- Nothing notifies the app when only the taskbar theme changes. The theme is
+  therefore re-read on every scan, every tray click and every
+  `ThemeChanged`, and `set_icon` runs only when the variant changes.
+
+**Badge.** Digits don't read at 16 px, so the dot means "something is
+behind" and the count stays in the tooltip.
+
+**Main thread.** Every icon swap runs on the main thread. Off it, Tauri's
+`set_icon` blocks until the main thread has run it, and a lock held across
+that call would deadlock against a tray click.
+
+## 2026-11-22 — Windows credentials: Credential Manager, `/` helper paths, GCM silenced per clone
+
+Amends the 2026-09-25 credential-helper entry.
+
+- **Token store:** `keyring` is built with `windows-native` as well as
+  `apple-native`. Without a store feature it silently falls back to an
+  in-memory mock, and accounts vanish on restart. A Windows-only test does a
+  round trip through a fresh `Entry` to catch that.
+  - Entries are generic credentials named `<account id>.dev.soron2038.gitbuddy`.
+  - The largest OAuth blob fits Credential Manager's 2560-byte limit, and a
+    test guards that.
+- **Helper path:** the helper command writes the exe path with `/`. Git for
+  Windows runs `!` helpers through MSYS `sh`, where `C:/…` is the reliable
+  spelling; a backslash inside a double-quoted gitconfig value is an escape
+  sequence.
+- **GUI exe as helper:** the release exe is a GUI-subsystem binary, and it
+  still serves as the helper over pipes. `git credential fill` from Git Bash,
+  cmd and PowerShell got its answer in about 160 ms, with no console window.
+- **GCM silenced:** the empty `helper =` reset in the clone's config also
+  silences Git Credential Manager, which Git for Windows configures
+  system-wide. This is intended, for the same reasons as the macOS Keychain
+  helper: the clone pushes with the account it was cloned with, and no GCM
+  prompt appears.
+- **Temporary copies refused:** `unusable_exe` also refuses an exe under
+  `%TEMP%`, such as Explorer's copy of an exe opened inside a zip. A helper
+  path there stops working when the copy is deleted.
+
+## 2026-11-22 — Windows behaviour: popover from the taskbar edge, one instance, the download mark, portable names, launching programs
+
+- **Popover placement** (`popover.rs`, pure and tested):
+  - The taskbar edge is the one the monitor's work area is inset from. With
+    an auto-hiding taskbar it is the monitor edge nearest the clicked icon.
+  - The popover opens away from that edge, 12 logical px clear of both the
+    taskbar and the icon (the icon can sit in the overflow flyout).
+  - It is clamped into the work area of the icon's monitor and sized at
+    that monitor's scale factor. If the scale changes on `show`, it is
+    placed again.
+  - macOS keeps its fixed "below the menu bar" formula.
+- **Focus race:** clicking the tray focuses the taskbar on mouse-down, so
+  the auto-hiding popover closed and reopened on mouse-up. A tray click
+  within 500 ms of an auto-hide now leaves it closed. The guard runs on
+  every platform.
+- **One instance:** `tauri-plugin-single-instance` (2.4.x, as 2.5 needs tauri
+  2.12), Windows only. A second launch shows the running app's main window
+  and exits. macOS gets this from LaunchServices.
+- **First launch:** Windows 11 tucks a new tray icon into the overflow, so
+  every launch except the autostart one opens the main window. The autostart
+  Run key passes `--autostart`.
+- **Mark-of-the-Web:** a downloaded release file gets a `Zone.Identifier`
+  stream with `ZoneId=3`, the counterpart of the macOS quarantine flag, so
+  SmartScreen checks it like a browser download. Its `HostUrl` is the
+  asset's web address without query, fragment or user info, never the token.
+- **Portable names:** one set of name rules (`util::file_name_problem`)
+  applies on every platform, so a name that works on one works on all.
+  - Refused: the Windows-forbidden characters, a trailing dot or space, and
+    device names such as `CON`, `NUL`, `COM1`.
+  - Downloads are rewritten to pass. Clone folder names are refused instead,
+    and must be a single path component.
+  - This is stricter on macOS than before: a repo can't be cloned into a
+    folder named `aux` any more.
+- **Scan skips:** `AppData`, `$Recycle.Bin` and `System Volume Information`
+  are skipped. OneDrive is not, because it often holds Documents. The skip
+  list ignores case on Windows only, so on a Mac a `library` folder of repos
+  stays visible.
+- **Editor and terminal** (`launcher.rs`):
+  - The command line is parsed (a quoted program, an unquoted path to an
+    existing file, otherwise split on whitespace) and resolved with the
+    `which` crate. `std::process::Command` only tries `.exe` and would never
+    find `code.cmd`.
+  - Programs are spawned without a shell; `.cmd` shims run with
+    `CREATE_NO_WINDOW`.
+  - Terminal presets: `wt` (`-d`, with `;` escaped) and Git Bash (`--cd=`,
+    found beside `git`); anything else starts in the folder with its own
+    console.
+  - The installed app has no standard handles, so a shell attaches to its
+    new console. A debug build passes on the `tauri dev` pipes instead, so
+    terminal launches have to be tested with a release build.
+
+## 2026-11-22 — LF line endings in every checkout
+
+`.gitattributes` sets `* text=auto eol=lf`. Git for Windows and the
+`windows-latest` runners default to `core.autocrlf=true`, and a CRLF checkout
+breaks things that work on a Mac: Vitest doesn't strip a `#!…\r` shebang
+(`scripts/check-contrast.mjs` failed to parse), and the shell scripts fail
+under Git Bash. The index was LF already, so no file changed. A clone made
+before this has to re-check out its files once to drop the CRLFs.
