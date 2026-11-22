@@ -52,7 +52,7 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS1 | Windows CI gate + the fixes it forces | done locally (clippy + 173 tests green on the PC); **open:** first `backend-windows` CI run |
 | WS2 | Secret storage (Credential Manager) | done: the round-trip test passes against the real Credential Manager |
 | WS3 | Config and bundling | done on Windows: CLI 2.12.6, flags present, unsigned NSIS build. **Open:** `build-app.sh --unsigned` on macOS |
-| WS4 | Tray, popover, lifecycle | open |
+| WS4 | Tray, popover, lifecycle | done on Windows, tested on the PC (see below). **Open:** the WS10 cases the PC can't show, the macOS regression check |
 | WS5 | External programs + credential helper | open |
 | WS6 | Filesystem hardening | open |
 | WS7 | Frontend | type-checked and tested (`npm run verify` green on the PC). **Open:** visual check on macOS |
@@ -60,8 +60,53 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS9 | Docs | open (last) |
 | WS10 | End-to-end on the Windows PC | open (last) |
 
-**Pick up here (2026-11-22):** the 2026-11-21 list below was worked through on
-the Windows PC (Windows 11, MSVC, Rust 1.99.1, Node 26):
+**WS4 (2026-11-22), as built:**
+- Tray menu: attached for good outside macOS; `show_tray_menu` is macOS-only.
+- Placement: `popover.rs` holds the pure, tested geometry (`taskbar_edge`,
+  `popover_origin`, 13 tests). `lib.rs::popover_position` picks the monitor
+  and sizes the popover at that monitor's scale. If the scale changes on
+  `show`, it places the popover a second time. Gap and margin are 12 logical
+  px. macOS keeps its inline formula unchanged.
+- Focus race: the focus-lost handler records when it hid a *visible* popover.
+  A tray click within 500 ms of that leaves it closed
+  (`popover::REOPEN_GUARD`). This applies on macOS too, where it only matters
+  for a reopen within 500 ms of an outside click.
+- Tray icon:
+  - `tray_windows.rs` swaps between four 32×32 PNGs (light/dark taskbar, with
+    and without the terracotta dot), chosen by `SystemUsesLightTheme`.
+  - Every swap runs on the main thread. `set_icon` blocks off it, and a lock
+    held across that call would deadlock against a tray click.
+  - The theme is re-read on every scan, every tray click and every
+    `ThemeChanged`.
+  - The script now draws the robot with a view and a colour as parameters.
+    The macOS PNGs came out pixel-identical.
+- Single instance: `tauri-plugin-single-instance` `~2.4.5`, Windows-only. 2.5
+  needs tauri ^2.12.
+- Autostart: the Run key passes `--autostart`; every other launch opens the
+  main window.
+
+Checked on the PC (one monitor, auto-hide taskbar at the bottom, dark theme,
+icon in the overflow):
+- In the dev build: the main window opens on a normal launch, and a second
+  launch exits and shows the running app's main window. A second launch with
+  `--autostart` leaves it closed.
+- The popover opens centred above the overflow icon.
+- The right-click menu shows, and "Open gitBuddy" works.
+- In a release build, a second tray click closes the popover for good.
+
+Not covered yet (WS10):
+- The other taskbar edges, a second monitor, mixed DPI.
+- A light taskbar, and the badge dot with clones that are behind.
+- Closing the popover by clicking outside it, then reopening.
+- "Quit" from the menu.
+- Sign-in autostart.
+- On macOS: the popover position, the menu on macOS 27 and the badge.
+
+Python 3.13 and Pillow are now installed on the PC (`winget`, `pip --user`),
+so the tray icons can be regenerated there.
+
+**Pick up here (2026-11-22, morning):** the 2026-11-21 list below was worked
+through on the Windows PC (Windows 11, MSVC, Rust 1.99.1, Node 26):
 - `cargo fmt` reflowed one test. clippy `-D warnings` is clean, and all 173 lib
   tests pass, including the Credential Manager round trip.
 - `Cargo.lock` gained keyring's `windows-native` dependencies.
@@ -80,9 +125,8 @@ Still open from that list:
 - On macOS, a visual check that the main window and popover look as before.
 - The first run of the `backend-windows` CI job, on the draft PR.
 
-After that, WS4 (tray/popover) is the next big package. The installer built
-here is good for the WS4 spike (risk 3), but the tray still behaves like the
-macOS build.
+WS4 followed the same day (above). Next is WS5 (editor/terminal and the
+credential helper), then WS6.
 
 **Pick-up list of 2026-11-21:** WS1, WS2, WS3 (partly) and WS7 were written on
 a Mac with neither Rust nor Node, and merged into `feat/windows-port`. Nothing
