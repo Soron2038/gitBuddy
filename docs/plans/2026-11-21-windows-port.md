@@ -53,12 +53,57 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS2 | Secret storage (Credential Manager) | done: the round-trip test passes against the real Credential Manager |
 | WS3 | Config and bundling | done on Windows: CLI 2.12.6, flags present, unsigned NSIS build. **Open:** `build-app.sh --unsigned` on macOS |
 | WS4 | Tray, popover, lifecycle | done on Windows, tested on the PC (see below). **Open:** the WS10 cases the PC can't show, the macOS regression check |
-| WS5 | External programs + credential helper | open |
+| WS5 | External programs + credential helper | done, tested on the PC (see below). **Open:** `code`, `pwsh` and a real `git push` in WS10 |
 | WS6 | Filesystem hardening | open |
 | WS7 | Frontend | type-checked and tested (`npm run verify` green on the PC). **Open:** visual check on macOS |
 | WS8 | Release pipeline | open (needs WS3) |
 | WS9 | Docs | open (last) |
 | WS10 | End-to-end on the Windows PC | open (last) |
+
+**WS5 (2026-11-22), as built:**
+- New `launcher.rs`, Windows only at runtime. The parsing is pure and tested
+  on every platform:
+  - `parse_command_line`: a leading `"…"` is the program, an unquoted path to
+    an existing file is the program, otherwise the line is split on
+    whitespace.
+  - `classify_terminal`: `wt`/`Windows Terminal` → `wt -d` (`;` escaped as
+    `\;`); `Git Bash`/`git-bash` → `git-bash.exe --cd=` (found beside `git`
+    or under `%ProgramFiles%\Git`); anything else → started in the folder
+    with `CREATE_NEW_CONSOLE`.
+  - Programs resolve through the `which` crate (PATHEXT). `.cmd`/`.bat` get
+    `CREATE_NO_WINDOW`.
+- macOS: `run_editor`/`run_terminal` behave exactly as before. The `.app`
+  logic and its tests are now `cfg(not(windows))`.
+- `settings.rs`: the scan-root candidates add `source\repos` and
+  `Documents\GitHub` on Windows. The pick is testable through
+  `default_scan_roots_in`.
+- `git_credential.rs`:
+  - `unusable_exe` refuses an exe under `%TEMP%`, such as Explorer's copy of
+    an exe opened inside a zip.
+  - The docs say that the empty `helper =` reset also silences Git
+    Credential Manager, on purpose.
+
+Checked on the PC:
+- Risk 2: the release exe (GUI subsystem) works as the credential helper.
+  `git credential fill` from Git Bash, cmd and PowerShell returned the test
+  entry from Credential Manager in about 160 ms with no console window, and
+  stayed silent for other hosts. The test entry was deleted afterwards.
+- `launcher::tests::smoke_opens_the_configured_programs` (ignored; set
+  `GITBUDDY_SMOKE_EDITOR` / `GITBUDDY_SMOKE_TERMINALS` and run with
+  `--ignored`):
+  - `wt`, `powershell` and `Git Bash` opened in the repository.
+  - The quoted `…\Antigravity IDE\bin\antigravity-ide.cmd` opened the
+    folder, with no leftover console.
+- From a GUI-subsystem parent, `cmd` and `powershell` stay open in their new
+  console. With Windows Terminal as the default terminal they open as tabs
+  there.
+- Caveat: a debug build is a console program and passes the `tauri dev`
+  pipes on to the shell, so `cmd` exits at once. Test terminal launches with
+  a release build.
+
+Not covered yet (WS10): `code`, `pwsh`, `git push` with a real account,
+clicking through the right-click menu of a listed clone (needs a connected
+account).
 
 **WS4 (2026-11-22), as built:**
 - Tray menu: attached for good outside macOS; `show_tray_menu` is macOS-only.
@@ -125,8 +170,8 @@ Still open from that list:
 - On macOS, a visual check that the main window and popover look as before.
 - The first run of the `backend-windows` CI job, on the draft PR.
 
-WS4 followed the same day (above). Next is WS5 (editor/terminal and the
-credential helper), then WS6.
+WS4 and WS5 followed the same day (above). Next is WS6 (filesystem
+hardening), then WS8.
 
 **Pick-up list of 2026-11-21:** WS1, WS2, WS3 (partly) and WS7 were written on
 a Mac with neither Rust nor Node, and merged into `feat/windows-port`. Nothing
