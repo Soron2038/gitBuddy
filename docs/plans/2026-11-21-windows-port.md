@@ -57,8 +57,32 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS6 | Filesystem hardening | done, tested on the PC (see below). **Open:** a real release download and SmartScreen in WS10 |
 | WS7 | Frontend | type-checked and tested (`npm run verify` green on the PC). **Open:** visual check on macOS |
 | WS8 | Release pipeline | written; the unsigned path runs on the PR. **Open:** the SignPath steps (need WS0), a real `release.sh` run on the Mac |
-| WS9 | Docs | open (last) |
+| WS9 | Docs | done: DECISIONS (five 2026-11-22 entries), RELEASING, README, CLAUDE.md, PRD (M8), CHANGELOG. **Open:** the SignPath sentence in README once approved (WS0) |
 | WS10 | End-to-end on the Windows PC | open (last) |
+
+**Pick up here (2026-11-22, evening):** WS1–WS9 are written; the PR is
+green, including the unsigned release run. Its `windows-installer`
+artifact checked out with `sha256sum -c`, and a throwaway key signed it with
+`--app-version`. What's left, in order:
+1. **WS0 (you):**
+   - Apply at SignPath and add `PRIVACY.md` (fonts from fontshare/Google, the
+     update check).
+   - Decide on self-hosting the fonts and an "Automatically check for
+     updates" setting.
+   - Once approved: add the SignPath sentence ("Free code signing provided
+     by SignPath.io, certificate by SignPath Foundation") to the README's
+     "Code signing policy", then do the SignPath and GitHub setup in
+     `docs/RELEASING.md` § 3. Put copies of the artifact configurations under
+     `.signpath/artifact-configurations/`.
+2. **On the Mac:**
+   - `npm ci`, `npm run verify`, `scripts/build-app.sh --unsigned`.
+   - Check that the main window and popover look as before.
+   - Check the 13th acceptance criterion (macOS regression) in PRD M8.
+3. **WS10 on the PC:** connect an account and work through PRD M8's
+   acceptance criteria with an installed build, using the unsigned
+   installer from the PR run or from a local `tauri build`.
+4. **First release with Windows:** `scripts/release.sh` on the Mac, which
+   becomes the unsigned Windows preview.
 
 **WS8 (2026-11-22), as built:**
 - `.github/workflows/release-windows.yml`:
