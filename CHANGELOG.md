@@ -7,6 +7,10 @@ All notable changes to gitBuddy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-11-23
+
+gitBuddy comes to Windows, as a preview.
+
 ### Added
 
 - **gitBuddy on Windows (preview).** Windows 10/11 x64 gets the tray icon
@@ -374,7 +378,8 @@ First signed and notarized release.
   config export/import.
 - In-app auto-update via signed `latest.json` on GitHub Releases.
 
-[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/Soron2038/gitBuddy/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/Soron2038/gitBuddy/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/Soron2038/gitBuddy/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/Soron2038/gitBuddy/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/Soron2038/gitBuddy/compare/v1.4.0...v1.5.0
