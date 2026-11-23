@@ -313,7 +313,8 @@ GraphQL preferred for GitHub to minimize request count for the
    - Native notifications, editor/terminal launchers, OAuth where applicable.
 7. **M7 — Polishing, signing, updater, v1.0 release** (week 11–13)
    - Notarization, Tauri Updater, documentation, MIT release on GitHub.
-8. **M8 — Windows x64** (started 2026-11-21; plan and progress in
+8. **M8 — Windows x64** (started 2026-11-21; first shipped as an unsigned
+   preview in 1.7.0 on 2026-11-23; plan and progress in
    `docs/plans/2026-11-21-windows-port.md`)
    - Tray app with popover and main window, Credential Manager, per-user NSIS
      installer, auto-update from the same `latest.json`, a Windows CI gate.

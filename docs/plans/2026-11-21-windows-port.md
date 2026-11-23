@@ -1,7 +1,9 @@
 # Windows port (x64) — effort estimate and implementation plan
 
 > **Status:** drafted 2026-11-21; execution started the same day on
-> `feat/windows-port` (WS1 + WS2). Progress is tracked in the table below —
+> `feat/windows-port` (WS1 + WS2). Merged into `main` and first shipped as
+> the unsigned Windows preview in 1.7.0 (2026-11-23). Progress is tracked in
+> the table below —
 > update it as work packages land, since the port continues across machines.
 > Facts and line numbers are from the 1.6.0 tree; re-check them before editing.
 
@@ -49,16 +51,16 @@ Windows release (x64)**: signed installer, auto-update through the same
 | WS | Package | Status |
 |---|---|---|
 | WS0 | SignPath application (maintainer action) | open |
-| WS1 | Windows CI gate + the fixes it forces | done locally (clippy + 173 tests green on the PC); **open:** first `backend-windows` CI run |
+| WS1 | Windows CI gate + the fixes it forces | done: clippy + tests green on the PC and in CI's `backend-windows` job on `main` (2026-11-23) |
 | WS2 | Secret storage (Credential Manager) | done: the round-trip test passes against the real Credential Manager |
-| WS3 | Config and bundling | done on Windows: CLI 2.12.6, flags present, unsigned NSIS build. **Open:** `build-app.sh --unsigned` on macOS |
-| WS4 | Tray, popover, lifecycle | done on Windows, tested on the PC (see below). **Open:** the WS10 cases the PC can't show, the macOS regression check |
+| WS3 | Config and bundling | done on Windows (CLI 2.12.6, flags present, unsigned NSIS build) and on macOS (`build-app.sh --unsigned`, 2026-11-23) |
+| WS4 | Tray, popover, lifecycle | done on Windows, tested on the PC (see below); macOS regression checked 2026-11-23. **Open:** the WS10 cases the PC can't show |
 | WS5 | External programs + credential helper | done, tested on the PC (see below). **Open:** `code`, `pwsh` and a real `git push` in WS10 |
 | WS6 | Filesystem hardening | done, tested on the PC (see below). **Open:** a real release download and SmartScreen in WS10 |
-| WS7 | Frontend | type-checked and tested (`npm run verify` green on the PC). **Open:** visual check on macOS |
-| WS8 | Release pipeline | written; the unsigned path runs on the PR. **Open:** the SignPath steps (need WS0), a real `release.sh` run on the Mac |
+| WS7 | Frontend | done: `npm run verify` green on the PC and the Mac; the macOS windows look as before (2026-11-23) |
+| WS8 | Release pipeline | done for the unsigned path: 1.7.0 shipped through it (2026-11-23). **Open:** the SignPath steps (need WS0) |
 | WS9 | Docs | done: DECISIONS (five 2026-11-22 entries), RELEASING, README, CLAUDE.md, PRD (M8), CHANGELOG. **Open:** the SignPath sentence in README once approved (WS0) |
-| WS10 | End-to-end on the Windows PC | first pass done 2026-11-22 (see below): most of PRD M8 passes. **Open:** the cases listed there |
+| WS10 | End-to-end on the Windows PC | first pass done 2026-11-22 (see below): most of PRD M8 passes. **Open:** the cases listed there; update N → N+1 can now run against 1.7.0 |
 
 **WS10, first pass (2026-11-22):**
 
@@ -128,10 +130,34 @@ builds) get their `%LOCALAPPDATA%`/`%APPDATA%` writes redirected to
 there, invisible to the user, and so did the dev builds' settings. Installers
 have to be run by the user, from Explorer.
 
-**Pick up here (2026-11-22, evening):** WS1–WS9 are written; the PR is
-green, including the unsigned release run. Its `windows-installer`
-artifact checked out with `sha256sum -c`, and a throwaway key signed it with
-`--app-version`. What's left, in order:
+**Mac side and first release (2026-11-23):**
+- `feat/windows-port` was fast-forwarded into `main`.
+- **Gates on the Mac:** `npm ci`, `npm run verify` (69 tests), `cargo fmt
+  --check`, `cargo clippy -D warnings`, `cargo test --lib` (202 tests), and
+  `scripts/build-app.sh --unsigned`.
+- **macOS regression (PRD M8):**
+  - The unsigned build was re-signed locally with the Developer ID, by hash,
+    so the installed app's Keychain grants applied to it.
+  - The maintainer checked it by hand. The popover opens under the icon, and
+    a tray click toggles it: the new `REOPEN_GUARD` doesn't get in the way.
+  - On macOS 27 the right-click menu works, "Open gitBuddy" included. The
+    badge shows, and the main window and popover look as before.
+  - `release.sh --dry-run` passed for 1.7.0.
+- **CI:** green on `main` (`fb65064`) in all three jobs, `backend-windows`
+  included.
+- **1.7.0** was published with `scripts/release.sh`:
+  - The tag run of `release-windows.yml` took about 12 minutes. 10½ of those
+    are the cold compile, since the job has no caches by design.
+  - The installer is unsigned (`SIGNING_POLICY=none`), so the release notes
+    start with the "Windows preview" banner.
+  - `latest.json` lists darwin-aarch64, darwin-x86_64 and windows-x86_64.
+    Both download URLs answer, and the signatures match the `.sig` assets.
+- **Bumping pitfall:** the Mac's npm is older than the PC's, and `npm
+  install --package-lock-only` there strips the `libc` fields from
+  `package-lock.json`. Bump the lockfile's two version lines by hand.
+
+**Pick up here (2026-11-23):** WS1–WS9 are on `main`, and 1.7.0 shipped the
+unsigned Windows preview. What's left:
 1. **WS0 (you):**
    - Apply at SignPath and add `PRIVACY.md` (fonts from fontshare/Google, the
      update check).
@@ -142,15 +168,16 @@ artifact checked out with `sha256sum -c`, and a throwaway key signed it with
      "Code signing policy", then do the SignPath and GitHub setup in
      `docs/RELEASING.md` § 3. Put copies of the artifact configurations under
      `.signpath/artifact-configurations/`.
-2. **On the Mac:**
-   - `npm ci`, `npm run verify`, `scripts/build-app.sh --unsigned`.
-   - Check that the main window and popover look as before.
-   - Check the 13th acceptance criterion (macOS regression) in PRD M8.
-3. **WS10 on the PC:** connect an account and work through PRD M8's
-   acceptance criteria with an installed build, using the unsigned
-   installer from the PR run or from a local `tauri build`.
-4. **First release with Windows:** `scripts/release.sh` on the Mac, which
-   becomes the unsigned Windows preview.
+2. **WS10 on the PC:** the "Not tested yet" cases above.
+   - Update N → N+1 needs no staging `latest.json` any more. The 1.6.0 from
+     the PR run should be offered 1.7.0; check that the passive installer
+     runs, the app relaunches, and settings and tokens survive.
+   - A fresh install of 1.7.0 goes by double-click in Explorer, not from a
+     Claude Code session (the MSIX pitfall above).
+3. **First signed release:** once SignPath has approved, set the repo
+   variable `WINDOWS_SIGNING_POLICY` to `release-signing`. The next
+   `release.sh` run then ships an Authenticode-signed installer and drops
+   the preview banner.
 
 **WS8 (2026-11-22), as built:**
 - `.github/workflows/release-windows.yml`:
